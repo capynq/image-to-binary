@@ -61,7 +61,9 @@ class ProcessorBaselineTests(unittest.TestCase):
         result, calls = self.glyphs()
         self.assertEqual(result.size, (80, 20))
         self.assertEqual([call.kwargs["text"] for call in calls], ["1", "1", "0", "0"])
-        self.assertEqual([call.args[0] for call in calls], [(0, 0), (20, 0), (40, 0), (60, 0)])
+        self.assertEqual(
+            [call.args[0] for call in calls], [(0, 0), (20, 0), (40, 0), (60, 0)]
+        )
         self.assertTrue(all(call.kwargs["fill"] == (0, 255, 0, 255) for call in calls))
 
     def test_classic_sampling_is_nearest_neighbor_not_average(self):
@@ -123,8 +125,13 @@ class CallbackBaselineTests(unittest.TestCase):
         self.app_class = headless_app_class()
         self.app = self.app_class.__new__(self.app_class)
         for name in (
-            "label", "original_image_label", "processed_image_label",
-            "cell_size_slider", "font_size_slider", "cell_size_entry", "font_size_entry",
+            "label",
+            "original_image_label",
+            "processed_image_label",
+            "cell_size_slider",
+            "font_size_slider",
+            "cell_size_entry",
+            "font_size_entry",
         ):
             setattr(self.app, name, Mock())
         self.app.update_image = Mock()

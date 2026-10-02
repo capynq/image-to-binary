@@ -1,9 +1,8 @@
 # Image to Binary migration plan
 
-Status: subphases 0.2 and 1.1 are committed. Subphase 1.2 is complete and
-ready for its separate local commit. Subphase 1.3 is prepared in the working
-tree but remains unchecked and uncommitted in this plan. Later subphases are
-not accepted. See the validation records below.
+Status: subphases 0.2, 1.1, and 1.2 are committed. Subphase 1.3 is complete
+and ready for its separate local commit. Subphase 2.1 is under review; no
+later completion is claimed. See the validation records below.
 
 ## Initial prototype baseline
 
@@ -295,20 +294,24 @@ Ordered steps:
 
 1. Add initial README setup, supported inputs, classic behavior, limitations,
    and local test commands.
-2. Add CI for formatting, static checks, and Python tests on supported versions.
-3. Keep CI validation-only: no release, deploy, artifact publication, or
+2. Add pinned `requirements-dev.txt`, configure Ruff's critical lint and format
+   checks, and keep any formatter-only legacy diff in this same 1.3 commit.
+3. Add CI for formatting, static checks, and Python tests on supported versions.
+4. Keep CI validation-only: no release, deploy, artifact publication, or
    signing.
 
-Acceptance checks: CI passes on the declared matrix and README commands match
-the actual project.
+Acceptance checks: local commands and configuration match the README, and the
+declared matrix is structurally validated. Remote job results remain a
+follow-up before 8.1.
 
 Proposed commit title: `ci: validate Python fallback`
 
 Completion checklist:
 
-- [ ] README reviewed.
-- [ ] Static and test jobs pass.
-- [ ] CI has no release side effects.
+- [x] README reviewed against the local commands and implemented fallback.
+- [x] Local formatting, static, dependency, syntax, and regression checks pass;
+  remote job results remain unverified.
+- [x] CI has no release side effects and its six-job matrix is locally validated.
 
 ### 2.1 Establish Rust workspace and contracts
 
@@ -1021,3 +1024,19 @@ Completion checklist:
   observation concerned a lint omission in the separate 1.3 scope.
 - GUI launch and cross-platform visual checks remain unavailable on the host
   because Python lacks `_tkinter`.
+
+## 1.3 local validation record
+
+- The README commands and the pinned `requirements-dev.txt` match the local
+  fallback checks. `.venv/bin/python -m pip check`, `.venv/bin/python -m
+  compileall -q main.py image_processor.py tests`, `.venv/bin/python -m ruff
+  format --check main.py image_processor.py tests`, and `.venv/bin/python -m
+  ruff check main.py image_processor.py tests` pass locally.
+- `.venv/bin/python -m unittest discover -s tests -v` reports 14 tests with
+  three expected defect failures.
+- The workflow configuration has six read-only validation jobs, checks-only
+  triggers, pinned official actions, and no release, deployment, signing, or
+  artifact-publication side effects. Its matrix and YAML structure were
+  validated locally.
+- Remote CI has not run, so remote job results are explicitly unverified and
+  remain a follow-up before 8.1; this plan does not claim green CI.
