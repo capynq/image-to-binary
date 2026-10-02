@@ -1,9 +1,9 @@
 # Image to Binary migration plan
 
-Status: subphase 0.2 is complete and ready for its separate local commit.
-Subphases 1.1, 1.2, and 1.3 are prepared in the working tree but remain
-unchecked and uncommitted in this plan. Later subphases are not accepted.
-See the 0.2 validation record below.
+Status: subphase 0.2 is committed. Subphase 1.1 is complete and ready for its
+separate local commit. Subphases 1.2 and 1.3 are prepared in the working tree
+but remain unchecked and uncommitted in this plan. Later subphases are not
+accepted. See the validation records below.
 
 ## Initial prototype baseline
 
@@ -254,9 +254,9 @@ Proposed commit title: `build: pin Python baseline dependencies`
 
 Completion checklist:
 
-- [ ] Dependencies and interpreter documented.
-- [ ] Bundled font and license checked.
-- [ ] Baseline command passes.
+- [x] Dependencies and interpreter documented.
+- [x] Bundled font and license checked.
+- [x] Baseline command passes on local Python 3.14.7.
 
 ### 1.2 Add headless baseline fixtures and known-edge tests
 
@@ -996,3 +996,15 @@ Completion checklist:
   skills with the ignored validation environment.
 - The 0.2 guidance was independently reviewed; the root corrected omissions
   and reviewed the final local guidance and skill-source record.
+
+## 1.1 local validation record
+
+- `pyproject.toml` and the requirements files pin the Python dependencies and
+  declare CPython 3.11–3.14 support.
+- The bundled IBM Plex Mono test font and its OFL notice are retained;
+  `.gitattributes` exempts only that vendor notice from whitespace diagnostics.
+- The portable font intentionally changes historical Times glyph raster bytes;
+  classic geometry, sampling, and threshold semantics remain unchanged.
+- Headless baseline checks pass locally on Python 3.14.7/macOS. GUI launch is
+  unverified because the host Python lacks `_tkinter`; other Python and OS
+  combinations remain unverified.

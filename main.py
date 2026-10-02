@@ -3,13 +3,14 @@ from tkinter import filedialog, messagebox
 from tkinterdnd2 import TkinterDnD, DND_FILES
 from PIL import Image, ImageTk
 import os
+from pathlib import Path
 from image_processor import ImageProcessor
 
 class ImageProcessorApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Image Processor")
-        self.font_path = "C:/Windows/Fonts/times.ttf"
+        self.font_path = str(Path(__file__).resolve().parent / "assets" / "fonts" / "IBMPlexMono-Regular.ttf")
         self.cell_size = 20
         self.font_size = 20
 
