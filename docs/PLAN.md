@@ -1,9 +1,9 @@
 # Image to Binary migration plan
 
-Status: subphases 0.2, 1.1, 1.2, 1.3, 2.1, and 2.2 are committed. Subphase
-2.3 is complete and ready for its separate local commit. Subphase 2.4 is not
-implemented and awaits start; no later completion is claimed. See the
-validation records below.
+Status: subphases 0.2, 1.1, 1.2, 1.3, 2.1, 2.2, and 2.3 are committed.
+Subphase 2.4 is complete and ready for a separate local commit; no later
+completion is claimed.
+See the validation records below.
 
 ## Initial prototype baseline
 
@@ -433,17 +433,43 @@ Ordered steps:
    are implemented.
 
 Acceptance checks: repeated renders are byte-stable for the same inputs and
-   settings; preview and export agree on grid geometry; cache limits hold.
+settings; preview and export agree on grid geometry; cache limits hold.
+
+Validation record: 28 processing tests (22 unit and 6 independent acceptance
+tests) passed, with strict processing clippy and formatting checks passing. The
+renderer uses pinned `fontdue` 0.9.4 and the bundled IBM Plex Mono font under
+the adjacent SIL Open Font License notice. Preview uses integer nearest-center
+mapping from the bounded destination into the export coordinate space, so it
+does not allocate a full export frame and keeps the longest edge at 1600 pixels.
+Classic output uses opaque black/green RGBA cells with symmetric clipping; byte
+parity with the legacy Python/Pillow rasterizer is intentionally not claimed.
+Cache limits charge retained glyph-mask payload capacity and exclude font data,
+metadata, and caller-owned buffers. WASM compilation is recorded separately by
+the root acceptance run passed the WASM compilation check; no 2.5
+streaming/export claim is made here.
+
+Rendering contract notes: the bundled IBM Plex Mono font is rasterized through
+`fontdue`, so glyph bytes intentionally differ from the Python/Pillow
+reference raster even when classic sampling and threshold semantics match.
+Classic cells use opaque green foreground and opaque black background with
+symmetric clipping at the cell boundary; glyph spill from the legacy renderer
+is not part of the new contract. The Average preset uses font-aspect-corrected
+source and output cell geometry with checked, rounded edge dimensions. Preview
+and export reuse the same deterministic source grid, with preview longest edge
+bounded at 1600 pixels. Glyph-mask cache accounting is bounded to mask payload
+capacity and excludes font storage, metadata, and external allocations.
 
 Proposed commit title: `feat: cache deterministic glyph rendering`
 
 Completion checklist:
 
-- [ ] Golden fixtures pass.
-- [ ] Preview geometry matches export.
-- [ ] Font and cache behavior reviewed.
+- [x] Golden fixtures pass.
+- [x] Preview geometry matches export.
+- [x] Font and cache behavior reviewed.
 
 ### 2.5 Add streaming PNG export and core benchmarks
+
+Status: not implemented.
 
 Objective: export PNG without unnecessary full-frame duplication and measure
 the agreed processing stages.
@@ -1122,3 +1148,18 @@ Completion checklist:
 - Eighteen native tests, formatting, Clippy `-D warnings`, and the WASM build
   pass locally. Independent review accepted the implementation. Rendering and
   font-aspect correction remain deferred to 2.4.
+
+## 2.4 local validation record
+
+- The processing renderer uses pinned `fontdue` 0.9.4 and the bundled IBM Plex
+  Mono font under its adjacent SIL Open Font License notice. Classic cells use
+  opaque black/green RGBA8 output with symmetric clipping; byte parity with the
+  legacy Python/Pillow glyph raster is intentionally not claimed.
+- Average rendering derives checked, rounded source/output aspect geometry;
+  preview and export reuse one source grid, and preview longest edge is capped
+  at 1600 pixels. Glyph-mask cache accounting is bounded to retained mask
+  payload capacity and excludes font storage, metadata, and caller buffers.
+- Twenty-eight processing tests (22 unit and 6 independent acceptance tests)
+  passed. Processing formatting and strict Clippy pass;
+  the root acceptance run also passed the WASM compilation check. No browser or
+  native replacement is claimed by this phase.

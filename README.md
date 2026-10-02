@@ -1,8 +1,44 @@
 # Image to Binary
 
 A local image-to-binary-art desktop tool. The current reference application is
-Python/Tkinter; the Rust-powered desktop and browser replacement is planned in
-[docs/PLAN.md](docs/PLAN.md), not implemented yet.
+Python/Tkinter, while the Rust migration is being implemented in the workspace
+described by [docs/PLAN.md](docs/PLAN.md). The Rust library is not yet a desktop
+or browser replacement.
+
+## Rust migration status
+
+The Rust workspace currently provides normalized RGBA8 decoding for six image
+formats (BMP, GIF, JPEG, PNG, TIFF, and WebP), checked resource limits with a
+50-megapixel default ceiling, classic and Average source sampling, and a
+bounded `fontdue` glyph renderer. Phase 2.4 is complete and ready for its
+separate local commit. The Rust renderer uses the bundled
+IBM Plex Mono font, so its glyph rasterization is intentionally not a
+byte-for-byte
+match for the Python/Pillow reference font raster.
+
+The new Average preset applies font-aspect correction through rounded source
+and output cell geometry. Edge rounding is explicit and bounded to the source
+cell; classic geometry remains the compatibility path. Rendered cells use an
+opaque green foreground and opaque black background with symmetric cell
+clipping, rather than relying on legacy glyph spill outside a cell. Preview
+renders are capped at a 1600-pixel longest edge and reuse the export source
+grid. Glyph-mask cache accounting is bounded to mask payload capacity and
+excludes font, metadata, and external allocations.
+
+HEIC/AVIF decoding, browser adapters, and the native/browser replacement are
+not current guarantees; those remain later migration phases. The Python
+application remains the supported reference UI until the documented acceptance
+gates pass.
+
+Rust checks use the pinned 1.88.0 toolchain and the project-local `.local`
+toolchain environment when available. CI runs:
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+cargo check --workspace --target wasm32-unknown-unknown --locked
+```
 
 ## Current behavior
 

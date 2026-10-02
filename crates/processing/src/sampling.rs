@@ -46,6 +46,9 @@ impl SampleCell {
 pub struct SampleGrid {
     width: u32,
     height: u32,
+    sampling: Sampling,
+    source_cell_width: u8,
+    source_cell_height: u32,
     cells: Vec<SampleCell>,
 }
 
@@ -60,6 +63,24 @@ impl SampleGrid {
     #[must_use]
     pub const fn height(&self) -> u32 {
         self.height
+    }
+
+    /// Returns the sampling mode used to construct this grid.
+    #[must_use]
+    pub const fn sampling(&self) -> Sampling {
+        self.sampling
+    }
+
+    /// Returns the source-cell width used to construct this grid.
+    #[must_use]
+    pub const fn source_cell_width(&self) -> u8 {
+        self.source_cell_width
+    }
+
+    /// Returns the source-cell height used to construct this grid.
+    #[must_use]
+    pub const fn source_cell_height(&self) -> u32 {
+        self.source_cell_height
     }
 
     /// Returns a cell, or `None` outside the grid.
@@ -90,7 +111,8 @@ impl SampleGrid {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CacheKey {
-    cell_size: u8,
+    cell_width: u8,
+    cell_height: u32,
     sampling: Sampling,
 }
 
@@ -145,11 +167,41 @@ impl Sampler {
         cell_size: u8,
         sampling: Sampling,
     ) -> Result<Arc<SampleGrid>, ContractError> {
-        if !(5..=30).contains(&cell_size) {
-            return Err(ContractError::InvalidSettings("cell_size"));
+        self.sample_with_geometry(cell_size, u32::from(cell_size), sampling)
+    }
+
+    /// Samples average cells with independently controlled source width and height.
+    ///
+    /// The width is bounded to the classic cell-size range and the height is
+    /// bounded to a positive font-derived line-cell range. Partial edge cells
+    /// are included, and the resulting grid is cached by both dimensions.
+    ///
+    /// # Errors
+    ///
+    /// Returns a contract error for invalid geometry or allocation arithmetic.
+    pub fn sample_average_rect(
+        &mut self,
+        cell_width: u8,
+        cell_height: u32,
+    ) -> Result<Arc<SampleGrid>, ContractError> {
+        if !(1..=1024).contains(&cell_height) {
+            return Err(ContractError::InvalidSettings("cell_height"));
+        }
+        self.sample_with_geometry(cell_width, cell_height, Sampling::Average)
+    }
+
+    fn sample_with_geometry(
+        &mut self,
+        cell_width: u8,
+        cell_height: u32,
+        sampling: Sampling,
+    ) -> Result<Arc<SampleGrid>, ContractError> {
+        if !(5..=30).contains(&cell_width) {
+            return Err(ContractError::InvalidSettings("cell_width"));
         }
         let key = CacheKey {
-            cell_size,
+            cell_width,
+            cell_height,
             sampling,
         };
         if let Some(position) = self.cache.iter().position(|entry| entry.key == key) {
@@ -161,7 +213,7 @@ impl Sampler {
             self.cache.push_back(entry);
             return Ok(grid);
         }
-        let grid = Arc::new(build_grid(&self.source, cell_size, sampling)?);
+        let grid = Arc::new(build_grid(&self.source, cell_width, cell_height, sampling)?);
         let bytes = u64::try_from(grid.cells.capacity())
             .ok()
             .and_then(|count| count.checked_mul(u64::try_from(size_of::<SampleCell>()).ok()?))
@@ -193,27 +245,28 @@ impl Sampler {
 
 fn dimensions(
     source: &DecodedSource,
-    cell_size: u8,
+    cell_width: u8,
+    cell_height: u32,
     sampling: Sampling,
 ) -> Result<(u32, u32), ContractError> {
     let source_dimensions = source.metadata().dimensions();
-    let cell = u32::from(cell_size);
+    let width_cell = u32::from(cell_width);
     let (width, height) = match sampling {
         Sampling::Classic => (
-            source_dimensions.width() / cell,
-            source_dimensions.height() / cell,
+            source_dimensions.width() / width_cell,
+            source_dimensions.height() / width_cell,
         ),
         Sampling::Average => (
             source_dimensions
                 .width()
-                .checked_add(cell - 1)
+                .checked_add(width_cell - 1)
                 .ok_or(ContractError::ArithmeticOverflow)?
-                / cell,
+                / width_cell,
             source_dimensions
                 .height()
-                .checked_add(cell - 1)
+                .checked_add(cell_height - 1)
                 .ok_or(ContractError::ArithmeticOverflow)?
-                / cell,
+                / cell_height,
         ),
     };
     Ok((width.max(1), height.max(1)))
@@ -221,10 +274,11 @@ fn dimensions(
 
 fn build_grid(
     source: &DecodedSource,
-    cell_size: u8,
+    cell_width: u8,
+    cell_height: u32,
     sampling: Sampling,
 ) -> Result<SampleGrid, ContractError> {
-    let (width, height) = dimensions(source, cell_size, sampling)?;
+    let (width, height) = dimensions(source, cell_width, cell_height, sampling)?;
     let count = u64::from(width)
         .checked_mul(u64::from(height))
         .ok_or(ContractError::ArithmeticOverflow)?;
@@ -263,13 +317,16 @@ fn build_grid(
                         .ok_or(ContractError::ArithmeticOverflow)?
                         [usize::try_from(y).map_err(|_| ContractError::ArithmeticOverflow)?],
                 )?,
-                Sampling::Average => average_cell(source, x, y, cell_size)?,
+                Sampling::Average => average_cell(source, x, y, cell_width, cell_height)?,
             });
         }
     }
     Ok(SampleGrid {
         width,
         height,
+        sampling,
+        source_cell_width: cell_width,
+        source_cell_height: cell_height,
         cells,
     })
 }
@@ -335,21 +392,22 @@ fn average_cell(
     source: &DecodedSource,
     x: u32,
     y: u32,
-    cell_size: u8,
+    cell_width: u8,
+    cell_height: u32,
 ) -> Result<SampleCell, ContractError> {
     let dimensions = source.metadata().dimensions();
     let left = x
-        .checked_mul(u32::from(cell_size))
+        .checked_mul(u32::from(cell_width))
         .ok_or(ContractError::ArithmeticOverflow)?;
     let top = y
-        .checked_mul(u32::from(cell_size))
+        .checked_mul(cell_height)
         .ok_or(ContractError::ArithmeticOverflow)?;
     let right = left
-        .checked_add(u32::from(cell_size))
+        .checked_add(u32::from(cell_width))
         .ok_or(ContractError::ArithmeticOverflow)?
         .min(dimensions.width());
     let bottom = top
-        .checked_add(u32::from(cell_size))
+        .checked_add(cell_height)
         .ok_or(ContractError::ArithmeticOverflow)?
         .min(dimensions.height());
     let mut sums = [0_u64; 4];
@@ -411,6 +469,9 @@ mod tests {
         let mut sampler = Sampler::new(source(59, 1, &[[127, 0, 0, 255]; 59]));
         let grid = sampler.sample(20, Sampling::Classic).unwrap();
         assert_eq!((grid.width(), grid.height()), (2, 1));
+        assert_eq!(grid.sampling(), Sampling::Classic);
+        assert_eq!(grid.source_cell_width(), 20);
+        assert_eq!(grid.source_cell_height(), 20);
         assert_eq!(grid.cell(0, 0).unwrap().color(), [127, 0, 0, 255]);
         let mut tiny = Sampler::new(source(1, 1, &[[255, 0, 0, 255]]));
         assert_eq!(
@@ -463,6 +524,62 @@ mod tests {
         assert_eq!((grid.width(), grid.height()), (2, 1));
         assert_eq!(grid.cell(0, 0).unwrap().color(), [30, 40, 50, 20]);
         assert_eq!(grid.cell(1, 0).unwrap().color(), [200, 210, 220, 50]);
+    }
+
+    #[test]
+    fn rectangular_average_uses_distinct_partial_regions() {
+        let mut sampler = Sampler::new(source(
+            6,
+            3,
+            &[
+                [10, 0, 0, 255],
+                [20, 0, 0, 255],
+                [30, 0, 0, 255],
+                [40, 0, 0, 255],
+                [50, 0, 0, 255],
+                [60, 0, 0, 255],
+                [20, 0, 0, 255],
+                [30, 0, 0, 255],
+                [40, 0, 0, 255],
+                [50, 0, 0, 255],
+                [60, 0, 0, 255],
+                [70, 0, 0, 255],
+                [30, 0, 0, 255],
+                [40, 0, 0, 255],
+                [50, 0, 0, 255],
+                [60, 0, 0, 255],
+                [70, 0, 0, 255],
+                [80, 0, 0, 255],
+            ],
+        ));
+        let grid = sampler.sample_average_rect(5, 2).unwrap();
+        assert_eq!((grid.width(), grid.height()), (2, 2));
+        assert_eq!(grid.sampling(), Sampling::Average);
+        assert_eq!(grid.source_cell_width(), 5);
+        assert_eq!(grid.source_cell_height(), 2);
+        assert_eq!(grid.cell(0, 0).unwrap().color(), [35, 0, 0, 255]);
+        assert_eq!(grid.cell(1, 0).unwrap().color(), [65, 0, 0, 255]);
+        assert_eq!(grid.cell(0, 1).unwrap().color(), [50, 0, 0, 255]);
+        assert_eq!(grid.cell(1, 1).unwrap().color(), [80, 0, 0, 255]);
+    }
+
+    #[test]
+    fn rectangular_average_cache_isolated_from_other_heights() {
+        let source = source(20, 20, &[[1, 2, 3, 255]; 400]);
+        let mut sampler = Sampler::new(Arc::clone(&source));
+        let square = sampler.sample(5, Sampling::Average).unwrap();
+        let rect = sampler.sample_average_rect(5, 6).unwrap();
+        let square_again = sampler.sample_average_rect(5, 5).unwrap();
+        assert!(!Arc::ptr_eq(&square, &rect));
+        assert!(Arc::ptr_eq(&square, &square_again));
+    }
+
+    #[test]
+    fn rectangular_average_rejects_invalid_geometry() {
+        let mut sampler = Sampler::new(source(1, 1, &[[0, 0, 0, 255]]));
+        assert!(sampler.sample_average_rect(4, 1).is_err());
+        assert!(sampler.sample_average_rect(5, 0).is_err());
+        assert!(sampler.sample_average_rect(5, 1025).is_err());
     }
 
     #[test]

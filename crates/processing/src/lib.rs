@@ -1,9 +1,13 @@
 //! Normalized image decoding, deterministic cell sampling, and processing lifecycle contracts.
 
 mod decode;
+mod renderer;
 mod sampling;
 
 pub use decode::{decode, DecodeError, DecodeLimits, DecodedSource};
+pub use renderer::{
+    AspectGeometry, RenderError, RenderOptions, RenderedFrame, Renderer, RendererCacheStats,
+};
 pub use sampling::{SampleCell, SampleGrid, Sampler};
 
 use image_to_binary_core::{

@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 image = { version = "=0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png", "tiff", "webp"] }
 image-to-binary-core = { path = "../core" }
+fontdue = "=0.9.4"
 
 [dev-dependencies]
 tiff = "=0.11.3"
