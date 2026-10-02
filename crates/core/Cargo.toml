@@ -1,0 +1,10 @@
+[package]
+name = "image-to-binary-core"
+version = "0.1.0"
+description = "Validated contracts shared by image-to-binary processing adapters"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true

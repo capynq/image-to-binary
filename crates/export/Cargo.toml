@@ -1,0 +1,13 @@
+[package]
+name = "image-to-binary-export"
+version = "0.1.0"
+description = "Bounded output contracts for image-to-binary exporters"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+image-to-binary-core = { path = "../core" }
+
+[lints]
+workspace = true

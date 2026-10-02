@@ -1,0 +1,14 @@
+[package]
+name = "image-to-binary-adapters"
+version = "0.1.0"
+description = "Lifecycle boundary for browser and native processing adapters"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+image-to-binary-core = { path = "../core" }
+image-to-binary-processing = { path = "../processing" }
+
+[lints]
+workspace = true

@@ -1,8 +1,9 @@
 # Image to Binary migration plan
 
-Status: subphases 0.2, 1.1, and 1.2 are committed. Subphase 1.3 is complete
-and ready for its separate local commit. Subphase 2.1 is under review; no
-later completion is claimed. See the validation records below.
+Status: subphases 0.2, 1.1, 1.2, and 1.3 are committed. Subphase 2.1 is
+complete and ready for its separate local commit. Subphase 2.2 is not
+implemented and awaits start; no later completion is claimed. See the
+validation records below.
 
 ## Initial prototype baseline
 
@@ -322,22 +323,28 @@ Prerequisites: 1.3; Rust toolchain and licensing choices approved.
 
 Ordered steps:
 
-1. Create a Rust workspace for core types, processing, export, and adapters.
-2. Define typed input metadata, settings, limits, progress, cancellation,
-   errors, and output contracts with Rustdoc for invariants.
-3. Keep caches/resources private and define stable serialization only where an
-   adapter requires it.
+1. Create a four-crate Rust workspace for core types, processing, export, and
+   adapters.
+2. Define private checked types for input metadata, dimensions and the 50 MP
+   limit, settings and ramps, progress, cancellation, errors, and outputs;
+   document invariants with Rustdoc.
+3. Keep caches/resources private, use RAII-owned sessions, and define stable
+   serialization only where an adapter requires it.
+4. Add adapter-owned lifecycle state and cancellation backed by `AtomicBool`;
+   a result's generation token alone is insufficient, so the adapter must also
+   compare its current generation before accepting an old result.
 
 Acceptance checks: workspace builds and contract tests cover invalid settings,
-checked dimensions, errors, and cancellation states.
+checked dimensions, errors, and cancellation states without adding image
+rendering or codec implementation.
 
 Proposed commit title: `feat: define Rust processing contracts`
 
 Completion checklist:
 
-- [ ] Crate boundaries and contracts reviewed.
-- [ ] Invalid input tests pass.
-- [ ] No UI or codec implementation added prematurely.
+- [x] Four crate boundaries and contracts reviewed.
+- [x] Invalid input tests pass.
+- [x] No image rendering or codec implementation added prematurely.
 
 ### 2.2 Implement decode, normalization, common codecs, and limits
 
@@ -1040,3 +1047,21 @@ Completion checklist:
   validated locally.
 - Remote CI has not run, so remote job results are explicitly unverified and
   remain a follow-up before 8.1; this plan does not claim green CI.
+
+## 2.1 local validation record
+
+- The four-crate workspace pins Rust 1.85.1. Local checks use the project
+  `.local` toolchain environment with task-scoped `CARGO_HOME` and
+  `RUSTUP_HOME` values.
+- Five native unit tests and the Rust doctests pass. `cargo fmt --all --check`,
+  `cargo clippy --workspace --all-targets --locked -- -D warnings`, and the
+  `wasm32-unknown-unknown` workspace check also pass locally.
+- Contracts cover checked dimensions and 50 MP limits, settings and ramps,
+  progress, RAII session ownership, and `AtomicBool` cancellation. No image
+  rendering or codec implementation is included.
+- Independent review accepted the 2.1 implementation with no findings.
+- `.github/workflows/rust.yml` is ready in this same 2.1 scope; its YAML and
+  basic locked fmt, Clippy, test, and WASM checks were validated locally. It
+  uses read-only permissions, pinned checkout, concurrency cancellation, and
+  no deploy or artifact steps. Remote CI has not run, so no remote result is
+  claimed.

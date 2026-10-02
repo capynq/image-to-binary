@@ -1,0 +1,13 @@
+[package]
+name = "image-to-binary-processing"
+version = "0.1.0"
+description = "Processing job lifecycle contracts"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+image-to-binary-core = { path = "../core" }
+
+[lints]
+workspace = true
