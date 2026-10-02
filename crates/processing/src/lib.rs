@@ -1,5 +1,9 @@
 //! Processing lifecycle contracts; pixel algorithms arrive in later subphases.
 
+mod decode;
+
+pub use decode::{decode, DecodeError, DecodeLimits, DecodedSource};
+
 use image_to_binary_core::{
     Cancellation, ContractError, Generation, Progress, Settings, SourceMetadata,
 };

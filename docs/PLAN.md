@@ -1,7 +1,7 @@
 # Image to Binary migration plan
 
-Status: subphases 0.2, 1.1, 1.2, and 1.3 are committed. Subphase 2.1 is
-complete and ready for its separate local commit. Subphase 2.2 is not
+Status: subphases 0.2, 1.1, 1.2, 1.3, and 2.1 are committed. Subphase 2.2 is
+complete and ready for its separate local commit. Subphase 2.3 is not
 implemented and awaits start; no later completion is claimed. See the
 validation records below.
 
@@ -355,22 +355,30 @@ Prerequisites: 2.1; image-crate and license review.
 
 Ordered steps:
 
-1. Decode once, apply orientation, alpha policy, and 8-bit normalization.
-2. Add format detection and actionable errors.
-3. Enforce the 50 MP cap before allocation where possible and graceful lower
-   browser limits.
-4. Add fixtures for orientation, alpha, grayscale, RGB, and common formats.
+1. Pin `image` 0.25.10 with only BMP, GIF, JPEG, PNG, TIFF, and WebP features;
+   keep AVIF and Rayon out of this phase and use the Rust 1.88.0 toolchain/MSRV.
+2. Read headers, validate the recognized format, then decode once into owned
+   normalized RGBA8 pixels with EXIF orientation, the primary TIFF page, and
+   the first GIF frame.
+3. Enforce checked native, normalized-RGBA, and orientation working budgets,
+   including the 50 MP guard before pixel allocation; allow supported browser
+   adapters to select lower budgets.
+4. Add malformed/recognized-format, grayscale/RGB/RGBA/alpha, orientation,
+   and common-codec fixtures with actionable errors.
 
-Acceptance checks: all declared formats decode deterministically; oversized or
-malformed inputs fail gracefully without unbounded allocation.
+Acceptance checks: all six declared formats decode deterministically; both the
+header reader and actual decoder apply allocation ceilings; oversized or
+malformed inputs fail gracefully without unbounded allocation. Allocation
+limits are best-effort because codec implementations may not support every
+limit, and the decoded working budget excludes encoded input bytes.
 
 Proposed commit title: `feat: add normalized image decoding`
 
 Completion checklist:
 
-- [ ] Common codec fixtures pass.
-- [ ] Orientation and alpha policy tested.
-- [ ] Resource-limit errors tested.
+- [x] Common codec fixtures pass.
+- [x] Orientation and alpha policy tested.
+- [x] Resource-limit errors tested.
 
 ### 2.3 Implement binary sampling, caches, and partial cells
 
@@ -1065,3 +1073,25 @@ Completion checklist:
   uses read-only permissions, pinned checkout, concurrency cancellation, and
   no deploy or artifact steps. Remote CI has not run, so no remote result is
   claimed.
+
+## 2.2 local validation record
+
+- The processing crate pins `image` 0.25.10 with exactly six codec features:
+  BMP, GIF, JPEG, PNG, TIFF, and WebP. AVIF and Rayon are not enabled. The
+  Rust MSRV and toolchain are 1.88.0.
+- Decoding reads headers before a second reader performs the actual decode,
+  owns one normalized RGBA8 pixel buffer, applies EXIF orientation, and keeps
+  the primary TIFF page and first GIF frame. Native, RGBA, and orientation
+  working estimates are checked before pixel allocation; defaults are 50 MP,
+  256 MiB encoded input, and 1 GiB decoded working budget, with encoded input
+  excluded from the latter.
+- Local reproducible checks use the project `.local` Rust 1.88.0 toolchain
+  paths with task-scoped `CARGO_HOME` and `RUSTUP_HOME`: 12 native tests,
+  doctests, formatting, Clippy `-D warnings`, and the WASM workspace check all
+  pass after the final `max_alloc` fix.
+- Browser adapters may select lower resource budgets; browser UI support is
+  not implemented in this subphase. Malformed recognized PNG handling and
+  grayscale, RGB, RGBA, alpha, orientation, and common-codec fixtures pass.
+- Independent review accepted the final implementation with all tests passing.
+  The Rust workflow reads `rust-toolchain.toml` through `rustup show` and will
+  follow future toolchain updates automatically; remote CI remains unrun.
