@@ -1,8 +1,7 @@
 # Image to Binary migration plan
 
-Status: subphases 0.2, 1.1, 1.2, 1.3, 2.1, 2.2, and 2.3 are committed.
-Subphases 2.4 and 2.5 are complete and ready for separate local commits; no
-later completion is claimed.
+Status: subphases 0.2, 1.1, 1.2, 1.3, 2.1, 2.2, 2.3, 2.4, and 2.5 are
+committed. Subphase 3.1 is complete; no later completion is claimed.
 See the validation records below.
 
 ## Initial prototype baseline
@@ -515,9 +514,9 @@ Proposed commit title: `feat: scaffold typed frontend adapters`
 
 Completion checklist:
 
-- [ ] UI state and adapter contracts reviewed.
-- [ ] Build and typecheck pass.
-- [ ] No large binary payload in JSON state.
+- [x] UI state and adapter contracts reviewed.
+- [x] Build and typecheck pass.
+- [x] No large binary payload in JSON state.
 
 ### 3.2 Add WASM worker scheduling, cancellation, and generations
 
@@ -1189,3 +1188,19 @@ Completion checklist:
   tests), strict all-target Clippy and formatting checks passing, and the
   locked WASM workspace check passing. Python fallback checks remain separate;
   no browser UI or native replacement is claimed by this phase.
+
+## 3.1 local validation record
+
+- The frontend workspace pins Node 24.15.0 and the reviewed React, Vite,
+  TypeScript, Vitest, and Prettier versions. Its typed adapter/controller
+  boundary keeps sessions, binary payloads, and revocable preview handles out
+  of JSON-safe snapshots.
+- Eighteen frontend tests, strict TypeScript typechecking, production build,
+  and Prettier checks pass locally. The demo adapter is fixture-only: real file
+  conversion, PNG export, and the browser processing worker remain later work.
+- Chromium checks passed at all tested widths from 320 through 2560 CSS px plus
+  640x360, including preview fit, reset, text export, and inspector transitions.
+  A WebKit rendered check passed. The Firefox profile launched but its browser
+  verification remains unverified. The real React lifecycle probe was invalid
+  because it loaded a second React runtime, so no lifecycle browser pass is
+  claimed; hook lifecycle behavior is covered by code review and unit tests.

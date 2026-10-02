@@ -10,12 +10,10 @@ or browser replacement.
 The Rust workspace currently provides normalized RGBA8 decoding for six image
 formats (BMP, GIF, JPEG, PNG, TIFF, and WebP), checked resource limits with a
 50-megapixel default ceiling, classic and Average source sampling, and a
-bounded `fontdue` glyph renderer. Phase 2.4 is complete and ready for its
-separate local commit, and phase 2.5 streaming/export benchmarks are complete
-and ready for their separate local commit. The Rust renderer uses the bundled
-IBM Plex Mono font, so its glyph rasterization is intentionally not a
-byte-for-byte
-match for the Python/Pillow reference font raster.
+bounded `fontdue` glyph renderer. Phases 2.4 and 2.5 are complete. The Rust
+renderer uses the bundled IBM Plex Mono font, so its glyph rasterization is
+intentionally not byte-for-byte compatible with the Python/Pillow reference
+font raster.
 
 The new Average preset applies font-aspect correction through rounded source
 and output cell geometry. Edge rounding is explicit and bounded to the source
@@ -56,7 +54,28 @@ file; browser chunks retain encoded payload for Blob creation. Partial output
 on any export error must be discarded. Fast compression and NoFilter are
 benchmark settings, not quality or cross-platform performance guarantees.
 
-## Current behavior
+## Frontend development
+
+The phase 3.1 frontend uses the pinned Node.js 24.15.0 toolchain in
+`frontend/.node-version`. Install and run its local checks from `frontend/`:
+
+```sh
+npm ci
+npm run dev
+npm test
+npm run typecheck
+npm run build
+npm run format:check
+```
+
+The phase 3.1 frontend scaffold is complete. Its browser adapter is a
+deterministic demo fixture for validating the React state and adapter
+contracts; it does not convert user files, export PNG, or run the Rust
+processing worker yet. Chromium checks passed at tested widths from 320
+through 2560 CSS px plus 640x360, and a WebKit rendered check passed. Firefox
+verification and the real React lifecycle browser probe remain unverified.
+
+## Python reference behavior
 
 Open or drop an image, adjust cell and font sizes, inspect the two previews,
 and save the result as PNG. Dark samples become green `1` characters and light

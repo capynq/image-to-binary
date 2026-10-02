@@ -167,3 +167,5 @@ cython_debug/
 /.codex/
 /.local/
 /docs/reports/
+/frontend/node_modules/
+/frontend/.local/
