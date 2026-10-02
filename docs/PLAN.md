@@ -1,9 +1,9 @@
 # Image to Binary migration plan
 
-Status: subphase 0.2 is committed. Subphase 1.1 is complete and ready for its
-separate local commit. Subphases 1.2 and 1.3 are prepared in the working tree
-but remain unchecked and uncommitted in this plan. Later subphases are not
-accepted. See the validation records below.
+Status: subphases 0.2 and 1.1 are committed. Subphase 1.2 is complete and
+ready for its separate local commit. Subphase 1.3 is prepared in the working
+tree but remains unchecked and uncommitted in this plan. Later subphases are
+not accepted. See the validation records below.
 
 ## Initial prototype baseline
 
@@ -281,9 +281,9 @@ Proposed commit title: `test: freeze Python baseline behavior`
 
 Completion checklist:
 
-- [ ] Fixtures retained and licensed.
-- [ ] Classic parity assertions pass.
-- [ ] Known-edge tests are named and triaged.
+- [x] Fixtures retained and licensed.
+- [x] Classic parity assertions pass.
+- [x] Known-edge tests are named and triaged.
 
 ### 1.3 Add initial README and Python checks CI
 
@@ -1008,3 +1008,16 @@ Completion checklist:
 - Headless baseline checks pass locally on Python 3.14.7/macOS. GUI launch is
   unverified because the host Python lacks `_tkinter`; other Python and OS
   combinations remain unverified.
+
+## 1.2 local validation record
+
+- `.venv/bin/python -m unittest discover -s tests -v` passes 14 tests with
+  three expected failures documenting the tiny-image, reset/export, and
+  multiple-drop defects.
+- Procedural fixtures cover alpha handling, EXIF orientation, threshold
+  mapping, floor dimensions, nearest-neighbor sampling, and classic output
+  colors; the GPL application notice and bundled-font license remain retained.
+- Independent baseline review passed with no 1.2 findings. Its only
+  observation concerned a lint omission in the separate 1.3 scope.
+- GUI launch and cross-platform visual checks remain unavailable on the host
+  because Python lacks `_tkinter`.
