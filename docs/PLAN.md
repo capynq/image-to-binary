@@ -1,0 +1,965 @@
+# Image to Binary migration plan
+
+Status: subphase 0.1 drafted; root and independent review complete, pending
+user review and exact commit approval. This is the intended version-controlled
+migration plan; it is currently an uncommitted draft and implementation is
+intentionally not included here.
+
+## Current baseline
+
+The current application is a Windows-oriented Tkinter/TkinterDnD shell around
+Pillow, NumPy, and a synchronous `ImageProcessor`. It converts an image to
+grayscale, resizes with nearest-neighbor sampling, applies a threshold of 128,
+and paints `0`/`1` glyphs in green on black. The UI has fixed dimensions,
+hard-coded `C:/Windows/Fonts/times.ttf`, a limited file filter, synchronous
+slider work, and PNG-only output.
+
+Known baseline defects to preserve as regression fixtures or explicitly retire:
+
+- Tiny inputs can resize to a zero width or height and fail.
+- Reset clears the labels but leaves the processed image exportable.
+- Entry validation accepts 8–30 while the cell-size slider exposes 5–30.
+- Every slider event performs synchronous processing on the UI thread.
+- The font path only exists on one Windows installation.
+- Drag-and-drop path parsing is naïve for quoted paths, spaces, and multiple
+  dropped files.
+
+## Architecture and scope
+
+The product remains Python until the replacement is accepted. The target is a
+shared Rust core with a React/TypeScript/Vite UI, exposed through a browser Rust
+WASM worker and a Tauri native shell for Windows, macOS, and Linux. The core
+owns decoding, normalization, sampling, glyph masks, rendering, export, limits,
+and deterministic contracts; adapters own platform I/O and scheduling.
+
+The classic binary tool remains compatible: nearest-neighbor resize with the
+existing floor-grid geometry, threshold 128, dark pixels mapped to `1`, and
+green-on-black output. New rendering presets use average luminance/color and
+font-aspect correction; those improvements are not retroactively claimed as
+byte-for-byte classic parity. The expanded product also supports ASCII and
+block modes, a custom printable ASCII ramp of at most 64 characters,
+monochrome foreground/background colors, and source-colored output. PNG and
+UTF-8 text are export formats.
+
+Source data is decoded once, orientation-normalized, and represented in an
+8-bit primary path with alpha handling. JPEG, PNG, WebP, BMP, TIFF (first page),
+and GIF (first frame) are explicit image-crate formats. HEIF/HEIC uses the
+primary image and AVIF uses its primary item. HEIF/HEIC and AVIF are v1 formats
+with pinned native decode-only
+`libheif` plus `libde265` and `libaom`; the embedded libheif build must not
+assume codecs are included. The browser uses an Emscripten build with both
+codecs enabled, lazy temporary decoder workers, worker termination, and
+transferred RGBA buffers.
+
+Resource limits are part of the contract: reject or gracefully lower work for
+large inputs (50 MP cap before allocation where possible), with browser limits
+allowed to be lower. Native processing stays off the UI thread and uses binary
+IPC rather than huge JSON or base64 payloads.
+
+New rendering presets use average luminance/color and font-aspect correction.
+Classic mode retains its nearest-neighbor sampling path. Caches are private
+and bounded where appropriate: sampled cells, luminance/colors, glyph masks,
+and preview artifacts. The preview has a longest edge of 1600 and uses the
+same source grid as export, with viewport zoom/pan. There is one active job and
+one newest pending job; chunked work yields between synchronous WASM calls, and
+cancellation plus stale-generation rejection prevents obsolete results.
+
+Native PNG export streams rows to a file sink. Browser export accumulates
+encoded chunks in a Blob and necessarily retains the encoded result for the
+download path; this is a bounded-output design, not a claim of constant-memory
+browser export.
+
+The UI direction is a graphite/cobalt studio with light and dark themes,
+native decorations, a resizable default 1280×800 logical window, and a
+provisional, content-tested minimum area of 800×600. It has original/artwork views, split comparison, zoom,
+pan, fit, keyboard focus, progress, cancellation, errors, metadata, reset, and
+disposal. Layout contracts:
+
+- 320–767 CSS px: one column, controls below, wrapped toolbar, normal vertical
+  scrolling.
+- 768–1199 px: canvas first with a collapsible inspector.
+- 1200 px and above: canvas plus an independently scrolling approximately
+  320 px inspector.
+
+Use intrinsic sizing and container queries; resize must preserve state. Canvas
+rendering may use a 2D reflow exception, but controls must always reflow.
+Touch targets are at least 44 px. Support reduced motion, high contrast, visible
+keyboard focus, 200% text, 320 px CSS reflow, and 400% zoom without masked
+overflow. Long names and full error text remain accessible.
+
+The GPLv3 notice is preserved. CI validates source, tests, and build outputs
+only; it does not deploy, publish artifacts, sign releases, or make release
+decisions.
+
+## Gates and non-goals
+
+Each numbered subphase below is one exact commit/review boundary. The commit
+must contain only that subphase and its completion-checklist update. Do not
+store a self-referential commit SHA in the plan. A subphase is complete only
+when its acceptance checks pass and the root agent has reviewed the diff. Stop
+after each subphase for user review and explicit commit approval before starting
+the next one.
+
+No implementation, dependency installation, generated artifact, signing,
+release, or remote/history operation is authorized by subphase 0.1. Future
+subphases must preserve classic parity fixtures and licensing notices. The
+repository-root `/AGENTS.md` is intended to remain ignored as local
+guidance, while `docs/PLAN.md` is intended to be tracked as product
+documentation after approval. `.agents/skills` is intended to be ignored and
+reports belong under intended-to-be-ignored `docs/reports/`; these local
+materials are not product source.
+
+Risks requiring explicit evidence include codec licensing and availability,
+cross-platform font behavior, WASM heap and transfer costs, 50 MP memory
+pressure, deterministic raster differences, cancellation races, native IPC
+backpressure, accessibility across browsers, and inability to run one of the
+native targets in CI.
+
+## Decisions and engineering conventions
+
+- Keep Python until the Rust/browser/native replacement passes the acceptance
+  gates; do not silently remove the fallback.
+- Keep contracts typed and minimal. Encapsulate caches and resources privately,
+  use composition, RAII, checked arithmetic, and `Result`-based error handling
+  in Rust; use strict TypeScript and opaque adapter sessions.
+- Spend comments on contracts, invariants, and complex work: use concise
+  Rustdoc/TSDoc, avoid ordinary single-line narration, and preserve generated
+  comments and license notices.
+- Use the references *Rust API Guidelines*, *A Philosophy of Software Design*,
+  and *Refactoring* when making API and decomposition choices.
+- Preview and export must share the source grid and deterministic settings.
+- Benchmark stages are decode/render/export/memory at 1, 12, and 50 MP. The
+  aspirational reference-hardware targets are cached preview under 100 ms at
+  12 MP and under 250 ms at 50 MP; these are not measured yet and are not
+  flaky CI gates.
+- Browser checks cover Chromium, Firefox, and WebKit where available. Native
+  checks identify unavailable OS targets explicitly rather than implying they
+  passed.
+- Routing uses fresh-context Luna agents for reads/search/code/docs/tests and
+  an independent Luna review. Findings return to the owning agent for fixes and
+  retest; the root agent integrates, codes only when delegation is unavailable,
+  or makes minor formatting fixes. RTK prefixes are required for shell work and
+  Context7 is required for current library/API documentation. Git history and
+  remote changes require exact current-conversation approval; report scope and
+  wait for that approval before acting.
+
+## Subphases
+
+### 0.1 Record migration plan
+
+Objective: establish this reviewed, tracked plan and the scope boundaries for
+the migration.
+
+Prerequisites: current Python prototype inspected; no implementation change.
+
+Ordered steps:
+
+1. Record the baseline behavior, defects, architecture, decisions, gates, and
+   all later subphase boundaries in `docs/PLAN.md`.
+2. State that only this document changes in this subphase and that future work
+   remains unchecked until acceptance.
+3. Have the root agent review scope, licensing, and commit-boundary wording.
+
+Acceptance checks: `docs/PLAN.md` is readable Markdown, includes every
+subphase 0.1–8.3, and `git status` shows no intended change outside this file.
+
+Proposed commit title: `docs: record image-to-binary migration plan`
+
+Completion checklist:
+
+- [x] Plan drafted.
+- [x] Root and independent review complete.
+- [x] User review and exact commit approval received.
+
+### 0.2 Add local engineering guidance, ignore rules, and skills
+
+Objective: make local instructions and reusable UI/testing skills available
+without treating them as product source.
+
+Prerequisites: 0.1 accepted; exact local guidance reviewed by root.
+
+Ordered steps:
+
+1. Add a local `AGENTS.md` with concise project guidance for Rustdoc/TSDoc,
+   contracts, invariants, checked arithmetic, RAII, `Result`, cache/resource
+   ownership, strict TypeScript, composition, and testing. Include a
+   token-aware comment check that permits contract/invariant/complex-work
+   comments while rejecting ordinary narration and preserving generated or
+   license comments.
+2. Extend ignore rules for `/AGENTS.md`, local `.agents/skills`, generated
+   `docs/reports/`, local tooling, and other non-product artifacts without
+   ignoring tracked `docs/PLAN.md`, documentation, or fixtures.
+3. Reuse existing `frontend-design` instructions. Select exact pinned
+   revisions (recorded at this subphase) and install, only with explicit
+   approval, the project-local sources at
+   `plugins/ui-design/skills/responsive-design`,
+   `skills/web-design-guidelines`, and `skills/.curated/playwright`.
+4. Use skill-creator to define a custom desktop-UX skill from official Apple,
+   Microsoft, GNOME, and Tauri guidance. Preserve source licenses and record
+   revisions and destinations.
+
+Acceptance checks: `AGENTS.md` guidance and the token-aware comment check are
+discoverable, selected skill revisions and source paths are recorded, all local
+skill material is ignored and reproducible, licenses are retained, and no
+product dependency is introduced.
+
+Proposed commit title: `chore: add local engineering and UX guidance`
+
+Completion checklist:
+
+- [ ] Guidance and ignore rules reviewed.
+- [ ] Skill sources, revisions, destinations, and notices recorded.
+- [ ] Local validation passes.
+
+### 1.1 Make Python dependencies and test font reproducible
+
+Objective: make the current implementation runnable and testable on a clean
+machine while it remains the reference fallback.
+
+Prerequisites: 0.2; dependency and font licenses reviewed.
+
+Ordered steps:
+
+1. Pin Python dependencies and document supported interpreter/platform versions.
+2. Bundle a licensed test font (proposed IBM Plex) with its notice and use it
+   in tests instead of the Windows-only path.
+3. Add deterministic setup and a minimal command for the existing app/checks.
+
+Acceptance checks: a clean environment can run the baseline tests with the
+bundled font; notices are present; no machine-specific path is required.
+
+Proposed commit title: `build: pin Python baseline dependencies`
+
+Completion checklist:
+
+- [ ] Dependencies and interpreter documented.
+- [ ] Bundled font and license checked.
+- [ ] Baseline command passes.
+
+### 1.2 Add headless baseline fixtures and known-edge tests
+
+Objective: freeze current classic behavior and expose known defects as named
+tests before changing implementation.
+
+Prerequisites: 1.1; fixture and font available.
+
+Ordered steps:
+
+1. Add tiny, threshold-boundary, transparency, orientation, long-name, and
+   representative image fixtures.
+2. Add headless tests for classic threshold 128, dark-to-1 mapping,
+   green-on-black output, and deterministic dimensions.
+3. Add explicit tests for zero-size inputs, reset/export lifecycle, entry/slider
+   bounds, synchronous UI behavior, Windows font assumptions, and dropped paths.
+
+Acceptance checks: tests are deterministic and document whether each known edge
+is preserved as compatibility or marked for a later fix.
+
+Proposed commit title: `test: freeze Python baseline behavior`
+
+Completion checklist:
+
+- [ ] Fixtures retained and licensed.
+- [ ] Classic parity assertions pass.
+- [ ] Known-edge tests are named and triaged.
+
+### 1.3 Add initial README and Python checks CI
+
+Objective: document the fallback and run its checks automatically.
+
+Prerequisites: 1.2; CI scope approved.
+
+Ordered steps:
+
+1. Add initial README setup, supported inputs, classic behavior, limitations,
+   and local test commands.
+2. Add CI for formatting, static checks, and Python tests on supported versions.
+3. Keep CI validation-only: no release, deploy, artifact publication, or
+   signing.
+
+Acceptance checks: CI passes on the declared matrix and README commands match
+the actual project.
+
+Proposed commit title: `ci: validate Python fallback`
+
+Completion checklist:
+
+- [ ] README reviewed.
+- [ ] Static and test jobs pass.
+- [ ] CI has no release side effects.
+
+### 2.1 Establish Rust workspace and contracts
+
+Objective: create the core crate boundaries and typed contracts without
+changing product behavior yet.
+
+Prerequisites: 1.3; Rust toolchain and licensing choices approved.
+
+Ordered steps:
+
+1. Create a Rust workspace for core types, processing, export, and adapters.
+2. Define typed input metadata, settings, limits, progress, cancellation,
+   errors, and output contracts with Rustdoc for invariants.
+3. Keep caches/resources private and define stable serialization only where an
+   adapter requires it.
+
+Acceptance checks: workspace builds and contract tests cover invalid settings,
+checked dimensions, errors, and cancellation states.
+
+Proposed commit title: `feat: define Rust processing contracts`
+
+Completion checklist:
+
+- [ ] Crate boundaries and contracts reviewed.
+- [ ] Invalid input tests pass.
+- [ ] No UI or codec implementation added prematurely.
+
+### 2.2 Implement decode, normalization, common codecs, and limits
+
+Objective: implement one source decode and normalized 8-bit representation for
+JPEG, PNG, WebP, BMP, TIFF, and first-frame GIF.
+
+Prerequisites: 2.1; image-crate and license review.
+
+Ordered steps:
+
+1. Decode once, apply orientation, alpha policy, and 8-bit normalization.
+2. Add format detection and actionable errors.
+3. Enforce the 50 MP cap before allocation where possible and graceful lower
+   browser limits.
+4. Add fixtures for orientation, alpha, grayscale, RGB, and common formats.
+
+Acceptance checks: all declared formats decode deterministically; oversized or
+malformed inputs fail gracefully without unbounded allocation.
+
+Proposed commit title: `feat: add normalized image decoding`
+
+Completion checklist:
+
+- [ ] Common codec fixtures pass.
+- [ ] Orientation and alpha policy tested.
+- [ ] Resource-limit errors tested.
+
+### 2.3 Implement binary sampling, caches, and partial cells
+
+Objective: implement separate classic floor-grid/nearest-neighbor sampling and
+new average cell sampling with safe partial-cell handling.
+
+Prerequisites: 2.2; parity fixtures.
+
+Ordered steps:
+
+1. Preserve classic floor-grid geometry, nearest-neighbor sampling, threshold
+   128, and dark-to-1 behavior as a named compatibility path.
+2. Implement checked source-grid geometry and average luminance/color sampling
+   as a separate new preset.
+3. Define edge behavior for cells smaller than the requested cell size.
+4. Add bounded private caches for sampled cells and luminance/colors.
+
+Acceptance checks: tiny images never produce zero dimensions in the fixed path;
+partial-edge handling is tested as a deliberate new-path exception; classic
+fixtures match the documented nearest-neighbor output, while average sampling
+has its own fixtures and is not claimed byte-identical.
+
+Proposed commit title: `feat: add deterministic cell sampling`
+
+Completion checklist:
+
+- [ ] Geometry and partial-cell tests pass.
+- [ ] Classic threshold parity passes.
+- [ ] Cache ownership and limits reviewed.
+
+### 2.4 Add glyph caches, bounded preview, and deterministic fixtures
+
+Objective: render glyphs efficiently and establish preview determinism.
+
+Prerequisites: 2.3; bundled font and licensing.
+
+Ordered steps:
+
+1. Add fontdue glyph-mask generation with a bounded private cache.
+2. Apply font-aspect correction only to new rendering presets and define
+   deterministic raster settings; preserve classic font/cell geometry.
+3. Bound preview longest edge at 1600 while reusing the export source grid.
+4. Add golden fixtures for classic output only. Defer ASCII, block,
+   monochrome, and source-colored fixtures to 6.1 and 6.2, when those modes
+   are implemented.
+
+Acceptance checks: repeated renders are byte-stable for the same inputs and
+   settings; preview and export agree on grid geometry; cache limits hold.
+
+Proposed commit title: `feat: cache deterministic glyph rendering`
+
+Completion checklist:
+
+- [ ] Golden fixtures pass.
+- [ ] Preview geometry matches export.
+- [ ] Font and cache behavior reviewed.
+
+### 2.5 Add streaming PNG export and core benchmarks
+
+Objective: export PNG without unnecessary full-frame duplication and measure
+the agreed processing stages.
+
+Prerequisites: 2.4; benchmark fixtures.
+
+Ordered steps:
+
+1. Implement row streaming to a native file sink and a browser chunk contract;
+   browser export retains the encoded Blob result as documented above.
+2. Add decode/render/export/memory benchmarks at 1, 12, and 50 MP.
+3. Record hardware and settings with results; keep aspirational preview targets
+   informational rather than CI gates.
+
+Acceptance checks: streamed PNGs decode correctly and benchmark reports are
+   reproducible enough to compare; no flaky timing threshold gates CI.
+
+Proposed commit title: `feat: stream PNG output and benchmark core`
+
+Completion checklist:
+
+- [ ] Native and chunked export tests pass.
+- [ ] Three benchmark sizes recorded.
+- [ ] Memory and target caveats documented.
+
+### 3.1 Scaffold frontend and processing adapters
+
+Objective: establish the React/TypeScript/Vite UI and an adapter interface that
+can use a worker or native backend.
+
+Prerequisites: 2.5; frontend guidance from 0.2.
+
+Ordered steps:
+
+1. Add typed frontend state for source, settings, job status, progress, errors,
+   metadata, and disposal.
+2. Implement an adapter contract with opaque sessions for import, preview,
+   export, cancel, and dispose; keep platform-specific details behind it.
+3. Add the initial graphite/cobalt shell and light/dark theme tokens.
+
+Acceptance checks: frontend builds, typechecks, and can display a fixture through
+an adapter stub without embedding processing logic in components.
+
+Proposed commit title: `feat: scaffold typed frontend adapters`
+
+Completion checklist:
+
+- [ ] UI state and adapter contracts reviewed.
+- [ ] Build and typecheck pass.
+- [ ] No large binary payload in JSON state.
+
+### 3.2 Add WASM worker scheduling, cancellation, and generations
+
+Objective: run Rust WASM processing off the browser UI thread with predictable
+latest-job behavior.
+
+Prerequisites: 3.1; 2.x core contracts.
+
+Ordered steps:
+
+1. Build and load the WASM worker with transferred RGBA buffers.
+2. Schedule one active and one newest pending job; replace obsolete pending
+   work.
+3. Chunk long work, yield between synchronous WASM calls, and implement
+   cancellation plus stale-generation rejection.
+4. Keep decoder-worker lifecycle out of this subphase; termination belongs to
+   the lazy codec workers introduced in 4.2.
+
+Acceptance checks: cancellation resolves promptly, stale results never replace
+newer settings, processing-worker disposal releases resources, and UI stays
+responsive. Codec-worker termination is checked in 4.2.
+
+Proposed commit title: `feat: schedule cancellable WASM processing`
+
+Completion checklist:
+
+- [ ] Worker lifecycle tests pass.
+- [ ] Generation and cancellation races are covered.
+- [ ] Browser memory transfer behavior reviewed.
+
+### 3.3 Implement browser import and preview
+
+Objective: provide browser import, metadata, original/artwork views, and basic
+preview controls on the shared source grid. Expanded split/zoom/pan canvas work
+belongs to 7.2.
+
+Prerequisites: 3.2; 2.2–2.4.
+
+Ordered steps:
+
+1. Add file picker and drop handling for supported formats and long names.
+2. Display metadata, loading/progress, errors, and cancellation state.
+3. Implement the basic original/artwork preview without changing source
+   processing settings; defer split, zoom, pan, and fit expansion to 7.2.
+
+Acceptance checks: supported fixtures import once, previews match core golden
+fixtures, controls remain usable during processing, and errors are fully
+readable and actionable.
+
+Proposed commit title: `feat: add browser import and preview`
+
+Completion checklist:
+
+- [ ] Import and metadata tests pass.
+- [ ] Preview parity passes.
+- [ ] Loading, error, and cancellation states reviewed.
+
+### 3.4 Implement browser export and lifecycle
+
+Objective: export PNG in the browser while correctly resetting and disposing
+jobs, workers, and object URLs. UTF-8 text export belongs to 6.3.
+
+Prerequisites: 3.3; 2.5 streaming contract.
+
+Ordered steps:
+
+1. Stream encoded chunks into a Blob/download path and retain the encoded Blob
+   required by the browser download path.
+2. Implement reset, replacement, disposal, and object URL cleanup.
+
+Acceptance checks: exported PNG matches fixtures; reset removes exportable state;
+repeated imports do not leak workers or object URLs. Text export is accepted in
+6.3.
+
+Proposed commit title: `feat: add browser exports and cleanup`
+
+Completion checklist:
+
+- [ ] PNG export passes parity checks.
+- [ ] Reset/replacement lifecycle tests pass.
+- [ ] Resource cleanup reviewed.
+
+### 4.1 Add native HEIC/AVIF dependencies and build scripts
+
+Objective: make native HEIC/AVIF decoding explicit, pinned, and reproducible.
+
+Prerequisites: 2.2; codec licensing and platform support decision.
+
+Ordered steps:
+
+1. Integrate pinned decode-only libheif with pinned libde265 and libaom codec
+   dependencies; do not treat libheif as a codec provider.
+2. Add platform build scripts and configuration that never assumes embedded
+   libheif supplies codecs.
+3. Record licenses, versions, and fallback errors.
+
+Acceptance checks: native builds decode HEIC and AVIF fixtures on available
+targets; unavailable codec/OS combinations fail with documented errors.
+
+Proposed commit title: `build: add pinned native HEIF AVIF codecs`
+
+Completion checklist:
+
+- [ ] Dependencies and licenses reviewed.
+- [ ] Native fixtures pass on available targets.
+- [ ] Missing-codec path tested.
+
+### 4.2 Add lazy browser HEIC/AVIF decoder workers
+
+Objective: add browser HEIC/AVIF decoding without loading codec memory into the
+main thread permanently.
+
+Prerequisites: 3.2; 4.1 codec configuration.
+
+Ordered steps:
+
+1. Build Emscripten decoder support with both codecs enabled and keep it lazy.
+2. Load a temporary decoder worker lazily, transfer RGBA output, and terminate
+   it after decode or cancellation.
+3. Map codec failures and resource limits to typed UI errors.
+
+Acceptance checks: HEIC/AVIF fixtures decode in supported browsers, cancellation
+terminates the worker, and ordinary formats do not pay codec startup cost.
+
+Proposed commit title: `feat: add lazy browser HEIF AVIF decoding`
+
+Completion checklist:
+
+- [ ] Browser codec fixtures pass where supported.
+- [ ] Worker lifecycle and cancellation pass.
+- [ ] Startup/memory behavior measured.
+
+### 4.3 Complete format coverage, 8-bit paths, limits, and orientation
+
+Objective: close format and normalization coverage across adapters.
+
+Prerequisites: 4.1–4.2; all format fixtures.
+
+Ordered steps:
+
+1. Verify JPEG, PNG, WebP, BMP, TIFF, GIF first frame, HEIC, and AVIF paths.
+2. Exercise grayscale, RGB, RGBA, alpha, orientation, selected TIFF page,
+   GIF first frame, and 8-bit normalization.
+3. Verify 50 MP and browser-lower-limit behavior for every adapter.
+
+Acceptance checks: coverage matrix is green for available environments and
+explicitly marks unavailable native/browser checks; no path allocates beyond
+declared limits.
+
+Proposed commit title: `test: complete image format coverage`
+
+Completion checklist:
+
+- [ ] Format matrix reviewed.
+- [ ] Pixel-depth/orientation tests pass.
+- [ ] Limit behavior is consistent.
+
+### 5.1 Add the Tauri shell
+
+Objective: package the shared UI and core behind a native Tauri window.
+
+Prerequisites: 4.3; Tauri guidance and native target availability.
+
+Ordered steps:
+
+1. Add a resizable native window with default 1280×800 logical size and
+   provisional, content-tested minimum 800×600 area.
+2. Define narrow typed commands/events for binary processing and progress.
+3. Preserve native decorations and avoid huge JSON/base64 IPC.
+
+Acceptance checks: shell launches on available OS targets, resizing preserves
+state, and command contracts are typed and bounded.
+
+Proposed commit title: `feat: add Tauri desktop shell`
+
+Completion checklist:
+
+- [ ] Window geometry checks pass.
+- [ ] IPC contract reviewed.
+- [ ] Available OS smoke checks pass.
+
+### 5.2 Add native processing, files, dialogs, and drop
+
+Objective: connect native file access and processing off the UI thread.
+
+Prerequisites: 5.1; 2.x core and 2.5 export.
+
+Ordered steps:
+
+1. Add file dialogs, drag/drop, native file sinks, and safe path handling.
+2. Run processing off the UI thread and stream progress/results over binary IPC.
+3. Match browser metadata, errors, cancellation, and reset behavior.
+
+Acceptance checks: native import/export fixtures match browser/core fixtures;
+large jobs do not block the UI; dropped paths and multiple files are handled
+without naïve parsing.
+
+Proposed commit title: `feat: connect native processing and file flows`
+
+Completion checklist:
+
+- [ ] Native file/dialog checks pass.
+- [ ] Off-thread and cancellation behavior passes.
+- [ ] Browser/native parity reviewed.
+
+### 5.3 Add desktop menus, shortcuts, focus, appearance, and DPI
+
+Objective: complete platform-native interaction and accessibility behavior.
+
+Prerequisites: 5.2; UI accessibility boundary tests planned in 7.4.
+
+Ordered steps:
+
+1. Add menus, keyboard shortcuts, focus restoration, and native appearance
+   integration.
+2. Handle light/dark system appearance and DPI scaling without state loss.
+3. Ensure reduced motion, high contrast, 44 px targets, and visible focus.
+
+Acceptance checks: keyboard-only workflows, appearance changes, and DPI checks
+pass on available targets with no focus trap or clipped controls.
+
+Proposed commit title: `feat: finish desktop interaction and accessibility`
+
+Completion checklist:
+
+- [ ] Menu and shortcut matrix passes.
+- [ ] DPI/theme checks pass where available.
+- [ ] Focus and accessibility review complete.
+
+### 5.4 Build local packages for three operating systems
+
+Objective: verify reproducible local packaging for Windows, macOS, and Linux
+without publishing.
+
+Prerequisites: 5.3; signing/release explicitly out of scope.
+
+Ordered steps:
+
+1. Add local build scripts for all three targets.
+2. Produce local packages only where toolchains are available.
+3. Record unavailable target checks and package reproducibility evidence.
+
+Acceptance checks: available packages install/launch locally; no package is
+uploaded, signed, or published; missing target toolchains are explicit.
+
+Proposed commit title: `build: validate local desktop packages`
+
+Completion checklist:
+
+- [ ] Three-target scripts reviewed.
+- [ ] Available packages smoke-tested.
+- [ ] No publishing or signing side effects.
+
+### 6.1 Add ASCII, block, and custom ramps
+
+Objective: expose the expanded rendering modes while preserving classic mode.
+
+Prerequisites: 2.3–2.4; UI adapter paths available.
+
+Ordered steps:
+
+1. Add ASCII and block modes with printable characters.
+2. Add custom printable ASCII ramps capped at 64 characters with validation.
+3. Keep classic binary mode as an explicit compatibility preset.
+
+Acceptance checks: mode/ramp fixtures are deterministic, invalid ramps produce
+typed errors, and classic output remains unchanged.
+
+Proposed commit title: `feat: add ASCII and block render modes`
+
+Completion checklist:
+
+- [ ] Mode fixtures pass.
+- [ ] Ramp bounds and printable validation pass.
+- [ ] Classic parity remains green.
+
+### 6.2 Add tone/color controls, invalidation, and bounds
+
+Objective: implement monochrome and source-colored rendering with predictable
+control limits and cache invalidation.
+
+Prerequisites: 6.1; 2.3–2.4 caches.
+
+Ordered steps:
+
+1. Add foreground/background colors and source-color mode.
+2. Define tone, cell, font, and ramp bounds in shared contracts, including
+   explicit contrast, threshold, and invert controls.
+3. Invalidate only affected caches when settings or source changes.
+
+Acceptance checks: color, contrast, threshold, and invert fixtures pass,
+controls reject invalid values, and cache invalidation never reuses stale
+source/settings data.
+
+Proposed commit title: `feat: add color controls and cache invalidation`
+
+Completion checklist:
+
+- [ ] Color and tone fixtures pass.
+- [ ] Bounds are shared across UI and core.
+- [ ] Invalidation review complete.
+
+### 6.3 Add plaintext grid export and parity checks
+
+Objective: export the rendered grid as UTF-8 text and verify readable parity.
+
+Prerequisites: 6.1–6.2; 3.4 and 5.2 export paths.
+
+Ordered steps:
+
+1. Define UTF-8 whitespace, newline, trailing-line, and metadata conventions;
+   preserve spaces and use the same source grid as PNG export.
+2. Export classic, ASCII, block, and custom-ramp grids.
+3. Compare browser/native text output byte-for-byte on shared fixtures.
+
+Acceptance checks: UTF-8 output preserves required whitespace, uses the same
+grid as PNG, and is byte-identical across adapters for the same settings.
+
+Proposed commit title: `feat: export deterministic text grids`
+
+Completion checklist:
+
+- [ ] Text contract documented.
+- [ ] Cross-adapter parity passes.
+- [ ] Long-output memory behavior reviewed.
+
+### 7.1 Implement visual primitives
+
+Objective: build reusable accessible controls, canvas, inspector, metadata,
+progress, error, and dialog primitives.
+
+Prerequisites: 6.3; frontend design guidance.
+
+Ordered steps:
+
+1. Add primitives with keyboard semantics, focus states, labels, and full-text
+   error/name presentation.
+2. Implement loading, progress, cancel, metadata, reset, and disposal states.
+3. Add light/dark graphite/cobalt visual tokens and reduced-motion variants.
+
+Acceptance checks: primitive tests cover keyboard and screen-reader semantics;
+no state is hidden behind color alone or clipped overflow.
+
+Proposed commit title: `feat: add accessible studio UI primitives`
+
+Completion checklist:
+
+- [ ] Primitive behavior reviewed.
+- [ ] Accessibility tests pass.
+- [ ] Theme and motion variants pass.
+
+### 7.2 Implement comparison canvas
+
+Objective: provide original/artwork/split comparison with zoom, pan, and fit.
+
+Prerequisites: 7.1; 3.3 preview contract.
+
+Ordered steps:
+
+1. Add responsive canvas rendering and split divider.
+2. Implement pointer, keyboard, and wheel zoom/pan/fit behavior.
+3. Keep source metadata and settings stable while changing viewport state.
+
+Acceptance checks: canvas geometry assertions pass at representative sizes;
+viewport operations never alter export output or lose focus.
+
+Proposed commit title: `feat: add comparison canvas controls`
+
+Completion checklist:
+
+- [ ] Geometry assertions pass.
+- [ ] Keyboard/pointer viewport tests pass.
+- [ ] Export-state separation reviewed.
+
+### 7.3 Implement adaptive layout
+
+Objective: implement the documented breakpoint and resizing behavior.
+
+Prerequisites: 7.1–7.2; container-query support decision.
+
+Ordered steps:
+
+1. Implement 320–767 single-column, 768–1199 collapsible-inspector, and
+   1200+ canvas/320 px inspector layouts.
+2. Add intrinsic sizing, container queries, independent inspector scrolling,
+   normal vertical scrolling, and wrapped toolbar behavior.
+3. Preserve source/settings/viewport state through resize and orientation change.
+
+Acceptance checks: no horizontal overflow, overlap, clipping, trimming, or
+unreachable control across the full viewport matrix and short landscape cases.
+
+Proposed commit title: `feat: add responsive studio layout`
+
+Completion checklist:
+
+- [ ] Breakpoint geometry tests pass.
+- [ ] Resize/orientation state preservation passes.
+- [ ] Overflow and scrolling review complete.
+
+### 7.4 Add layout, accessibility, and boundary tests
+
+Objective: make UI acceptance executable across viewport, browser, and content
+boundaries.
+
+Prerequisites: 7.3; Playwright guidance from 0.2.
+
+Ordered steps:
+
+1. Test 320, 360, 390, 640, 767, 768, 769, 1024, 1199, 1200, 1201, 1440,
+   1920, and 2560 widths plus short landscape, DPI, and light/dark cases.
+2. Test 200% text, 320 px reflow, 400% zoom, long names, full errors, ramp
+   extrema, loading, exports, dialogs, scrolling, and focus.
+3. Run geometry assertions and screenshots in Chromium, Firefox, and WebKit;
+   mark unavailable native checks explicitly.
+
+Acceptance checks: all available browser projects pass with no overlap,
+trimming, masked overflow, or unreachable keyboard control; screenshots are
+reviewable and reports remain under ignored `docs/reports/`.
+
+Proposed commit title: `test: cover responsive and accessible boundaries`
+
+Completion checklist:
+
+- [ ] Full viewport matrix passes.
+- [ ] Accessibility/content boundary checks pass.
+- [ ] Cross-browser evidence reviewed.
+
+### 8.1 Run final checks in CI only
+
+Objective: consolidate reproducible validation without adding deployment or
+release behavior.
+
+Prerequisites: 7.4; all implementation subphases accepted.
+
+Ordered steps:
+
+1. Run strict Rust, frontend/TypeScript, WASM, unit, integration, browser,
+   native, package, and benchmark smoke checks appropriate to each platform.
+2. Verify generated reports are ignored, source fixtures/notices are tracked,
+   workflow permissions are least-privilege, dependency caches are scoped, and
+   concurrency cancels superseded runs/jobs.
+3. Keep CI limited to checks; do not publish, deploy, sign, or release.
+
+Acceptance checks: every required CI job in the supported OS/browser matrix is
+green. An unavailable environment is reported as unavailable and cannot be
+declared passed; the worktree contains no accidental artifacts.
+
+Proposed commit title: `ci: consolidate migration validation`
+
+Completion checklist:
+
+- [ ] Required CI checks pass.
+- [ ] Unavailable environments are explicit.
+- [ ] No release side effects exist.
+
+### 8.2 Complete README and contributor documentation
+
+Objective: document the accepted product for users and maintainers.
+
+Prerequisites: 8.1; measured benchmark results and final UI screenshots.
+
+Ordered steps:
+
+1. Document setup, build, project layout, architecture, supported formats,
+   PNG/text exports, controls, privacy, dependency licenses, limits,
+   troubleshooting, and contribution workflow.
+2. Add screenshots for responsive/native states and explain browser/native
+   differences.
+3. Report measured performance with hardware and distinguish it from
+   aspirational targets; retain codec and font notices.
+
+Acceptance checks: a new contributor can follow README commands, supported
+formats and limits are accurate, privacy claims match implementation, and
+screenshots show accessible, unclipped states.
+
+Proposed commit title: `docs: document accepted application`
+
+Completion checklist:
+
+- [ ] README and screenshots reviewed.
+- [ ] Format/privacy/limits documentation matches code.
+- [ ] Notices and measured performance retained.
+
+### 8.3 Retire Python only after acceptance
+
+Objective: remove or archive the Python fallback only after the replacement is
+formally accepted against all gates.
+
+Prerequisites: 8.1–8.2; root-agent acceptance decision and preserved fixtures.
+
+Ordered steps:
+
+1. Compare the replacement against classic parity, format, resource, export,
+   accessibility, browser, and available native checks.
+2. Preserve fixtures, notices, and a migration note before removal or archival.
+3. Remove Python-only runtime files only if the root agent explicitly accepts
+   the replacement; otherwise keep Python as a documented fallback.
+
+Acceptance checks: all required gates are green, known risks are resolved or
+accepted in writing, and no user-visible classic behavior regresses.
+
+Proposed commit title: `refactor: retire Python fallback after acceptance`
+
+Completion checklist:
+
+- [ ] Acceptance decision recorded.
+- [ ] Fixtures and notices retained.
+- [ ] Python removal/retention is explicit and validated.
+
+## Subphase 0.1 validation record
+
+- Inspected `main.py`, `image_processor.py`, and `.gitignore`.
+- Confirmed no pre-existing `docs/` files were present.
+- This subphase changes only `docs/PLAN.md`; because it is untracked until
+  approval, the root agent must recheck `git status --short` and use
+  `git diff --no-index --check /dev/null docs/PLAN.md` before review/commit.
