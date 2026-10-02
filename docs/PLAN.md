@@ -1,7 +1,7 @@
 # Image to Binary migration plan
 
-Status: subphases 0.2, 1.1, 1.2, 1.3, and 2.1 are committed. Subphase 2.2 is
-complete and ready for its separate local commit. Subphase 2.3 is not
+Status: subphases 0.2, 1.1, 1.2, 1.3, 2.1, and 2.2 are committed. Subphase
+2.3 is complete and ready for its separate local commit. Subphase 2.4 is not
 implemented and awaits start; no later completion is claimed. See the
 validation records below.
 
@@ -389,25 +389,32 @@ Prerequisites: 2.2; parity fixtures.
 
 Ordered steps:
 
-1. Preserve classic floor-grid geometry, nearest-neighbor sampling, threshold
-   128, and dark-to-1 behavior as a named compatibility path.
-2. Implement checked source-grid geometry and average luminance/color sampling
-   as a separate new preset.
-3. Define edge behavior for cells smaller than the requested cell size.
-4. Add bounded private caches for sampled cells and luminance/colors.
+1. Add an immutable `Arc`-owned source and a sampler module that builds checked
+   classic and average source grids.
+2. Preserve classic floor-grid geometry, sequential `f64` center truncation,
+   nearest-neighbor sampling, threshold 128, and dark-to-1 behavior as a named
+   compatibility path; clamp tiny inputs to one cell.
+3. Implement average ceil-grid geometry with partial edges, actual edge areas,
+   average grayscale and straight RGBA channels, and alpha-ignored luminance.
+4. Add a private LRU cache with a 64 MiB default. Charge `Vec` capacity times
+   `size_of::<SampleCell>()`; exclude metadata, `Arc` source pixels, external
+   references, and temporary coordinate vectors from the cache ceiling.
 
 Acceptance checks: tiny images never produce zero dimensions in the fixed path;
-partial-edge handling is tested as a deliberate new-path exception; classic
-fixtures match the documented nearest-neighbor output, while average sampling
-has its own fixtures and is not claimed byte-identical.
+classic fixtures match Pillow-compatible center coordinates and 16-bit ITU
+luminance coefficients; average sampling handles partial edges deliberately;
+cache ownership and accounting are private and bounded. Threshold is excluded
+from cache keys, sources remain immutable per sampler, and any future matte
+policy change must invalidate affected cached grids. Rendering and font-aspect
+correction remain deferred to 2.4.
 
 Proposed commit title: `feat: add deterministic cell sampling`
 
 Completion checklist:
 
-- [ ] Geometry and partial-cell tests pass.
-- [ ] Classic threshold parity passes.
-- [ ] Cache ownership and limits reviewed.
+- [x] Geometry and partial-cell tests pass.
+- [x] Classic threshold parity passes.
+- [x] Cache ownership and limits reviewed.
 
 ### 2.4 Add glyph caches, bounded preview, and deterministic fixtures
 
@@ -1095,3 +1102,23 @@ Completion checklist:
 - Independent review accepted the final implementation with all tests passing.
   The Rust workflow reads `rust-toolchain.toml` through `rustup show` and will
   follow future toolchain updates automatically; remote CI remains unrun.
+
+## 2.3 local validation record
+
+- The sampler owns an immutable `Arc` source, produces classic and average
+  grids, and uses a private LRU cache with a 64 MiB default. Accounting uses
+  actual `Vec` capacity times `size_of::<SampleCell>()`; metadata, source
+  pixels, external `Arc` references, and temporary coordinates are excluded,
+  without making a global RSS claim.
+- Classic sampling clamps tiny inputs to one cell and uses sequential `f64`
+  center truncation matching Pillow (the 28-by-28/cell-5 coordinates are
+  2, 8, 13, 19, and 25 on both axes). Its 16-bit ITU luminance coefficients,
+  alpha-ignored grayscale, threshold 128, and dark-to-1 mapping are tested.
+- Average sampling uses ceil grids, actual partial-edge areas, average
+  grayscale, and straight RGBA channels while ignoring alpha for luminance.
+  Matte policy is intentionally deferred; any future matte change requires
+  cache invalidation. Threshold is not a cache key because the source grids
+  are immutable and reusable.
+- Eighteen native tests, formatting, Clippy `-D warnings`, and the WASM build
+  pass locally. Independent review accepted the implementation. Rendering and
+  font-aspect correction remain deferred to 2.4.

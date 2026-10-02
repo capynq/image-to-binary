@@ -1,8 +1,10 @@
-//! Processing lifecycle contracts; pixel algorithms arrive in later subphases.
+//! Normalized image decoding, deterministic cell sampling, and processing lifecycle contracts.
 
 mod decode;
+mod sampling;
 
 pub use decode::{decode, DecodeError, DecodeLimits, DecodedSource};
+pub use sampling::{SampleCell, SampleGrid, Sampler};
 
 use image_to_binary_core::{
     Cancellation, ContractError, Generation, Progress, Settings, SourceMetadata,
