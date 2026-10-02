@@ -1,11 +1,11 @@
 # Image to Binary migration plan
 
-Status: subphase 0.1 drafted; root and independent review complete, pending
-user review and exact commit approval. This is the intended version-controlled
-migration plan; it is currently an uncommitted draft and implementation is
-intentionally not included here.
+Status: subphase 0.2 is complete and ready for its separate local commit.
+Subphases 1.1, 1.2, and 1.3 are prepared in the working tree but remain
+unchecked and uncommitted in this plan. Later subphases are not accepted.
+See the 0.2 validation record below.
 
-## Current baseline
+## Initial prototype baseline
 
 The current application is a Windows-oriented Tkinter/TkinterDnD shell around
 Pillow, NumPy, and a synchronous `ImageProcessor`. It converts an image to
@@ -97,8 +97,11 @@ Each numbered subphase below is one exact commit/review boundary. The commit
 must contain only that subphase and its completion-checklist update. Do not
 store a self-referential commit SHA in the plan. A subphase is complete only
 when its acceptance checks pass and the root agent has reviewed the diff. Stop
-after each subphase for user review and explicit commit approval before starting
-the next one.
+for review at each subphase boundary. The user authorized the root agent to
+create ordinary local granular commits for scoped migration work after
+reporting their scope, superseding routine commit approval. Pushes, history
+rewrites, merges, rebases, and other remote or history-changing operations
+still require exact current-conversation approval.
 
 No implementation, dependency installation, generated artifact, signing,
 release, or remote/history operation is authorized by subphase 0.1. Future
@@ -207,9 +210,28 @@ Proposed commit title: `chore: add local engineering and UX guidance`
 
 Completion checklist:
 
-- [ ] Guidance and ignore rules reviewed.
-- [ ] Skill sources, revisions, destinations, and notices recorded.
-- [ ] Local validation passes.
+- [x] Guidance and ignore rules implemented and reviewed.
+- [x] Skill sources, revisions, destinations, and available notices recorded.
+- [x] All four local skills pass the bundled validator; ignore checks pass.
+
+Upstream source paths are not installation destinations:
+
+| Repository and pinned revision | Source path | Ignored destination |
+| --- | --- | --- |
+| `wshobson/agents@156b7a5e7a8b93642628a339ee4039c925b34c7f` | `plugins/ui-design/skills/responsive-design` | `.agents/skills/responsive-design` |
+| `vercel-labs/agent-skills@063bee94c3f4df8453406c830b0a7df0f2860278` | `skills/web-design-guidelines` | `.agents/skills/web-design-guidelines` |
+| `openai/skills@49f948faa9258a0c61caceaf225e179651397431` | `skills/.curated/playwright` | `.agents/skills/playwright` |
+
+The custom `.agents/skills/desktop-ux` is local; existing frontend-design is
+reused from the session catalog. Reinstall remote skills with skill-installer
+using the exact repository, source path, `--ref`, and `--dest .agents/skills`.
+Responsive-design retains its MIT license; Playwright retains its packaged
+Apache license and notice. No license was found in the pinned Vercel skill:
+keep it local and resolve redistribution terms before copying its material
+into product source. Validation uses ignored `.agents/tools/skill-validation`
+with PyYAML 6.0.3, not an application dependency. Use the local Playwright
+wrapper or a future pinned project CLI, artifacts under `docs/reports/`, and
+never reassign `CODEX_HOME`.
 
 ### 1.1 Make Python dependencies and test font reproducible
 
@@ -963,3 +985,14 @@ Completion checklist:
 - This subphase changes only `docs/PLAN.md`; because it is untracked until
   approval, the root agent must recheck `git status --short` and use
   `git diff --no-index --check /dev/null docs/PLAN.md` before review/commit.
+
+## 0.2 local validation record
+
+- Subphase 0.2 guidance and ignore-rule changes are ready for their scoped
+  local commit; later foundation subphases remain unchecked in this plan.
+- `git check-ignore AGENTS.md .agents/skills/desktop-ux/SKILL.md docs/reports/test.md`
+  confirms local material is ignored. `docs/PLAN.md` remains tracked.
+- Bundled skill-creator `quick_validate.py` passes for all four installed/local
+  skills with the ignored validation environment.
+- The 0.2 guidance was independently reviewed; the root corrected omissions
+  and reviewed the final local guidance and skill-source record.
