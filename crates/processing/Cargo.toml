@@ -13,6 +13,7 @@ fontdue = "=0.9.4"
 
 [dev-dependencies]
 tiff = "=0.11.3"
+image-to-binary-export = { path = "../export" }
 
 [lints]
 workspace = true

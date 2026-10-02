@@ -192,6 +192,7 @@ name = "image-to-binary-export"
 version = "0.1.0"
 dependencies = [
  "image-to-binary-core",
+ "png",
 ]
 
 [[package]]
@@ -201,6 +202,7 @@ dependencies = [
  "fontdue",
  "image",
  "image-to-binary-core",
+ "image-to-binary-export",
  "tiff",
 ]
 

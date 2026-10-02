@@ -11,7 +11,8 @@ The Rust workspace currently provides normalized RGBA8 decoding for six image
 formats (BMP, GIF, JPEG, PNG, TIFF, and WebP), checked resource limits with a
 50-megapixel default ceiling, classic and Average source sampling, and a
 bounded `fontdue` glyph renderer. Phase 2.4 is complete and ready for its
-separate local commit. The Rust renderer uses the bundled
+separate local commit, and phase 2.5 streaming/export benchmarks are complete
+and ready for their separate local commit. The Rust renderer uses the bundled
 IBM Plex Mono font, so its glyph rasterization is intentionally not a
 byte-for-byte
 match for the Python/Pillow reference font raster.
@@ -39,6 +40,21 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 cargo check --workspace --target wasm32-unknown-unknown --locked
 ```
+
+Run the release benchmark harness for one measured size or all three:
+
+```sh
+cargo run -p image-to-binary-processing --release --example core_bench -- 1
+cargo run -p image-to-binary-processing --release --example core_bench -- 12
+cargo run -p image-to-binary-processing --release --example core_bench -- 50
+cargo run -p image-to-binary-processing --release --example core_bench -- all
+```
+
+The harness uses deterministic checker/gradient fixtures and reports retained
+payload counts separately from process RSS. Native PNG output streams to a
+file; browser chunks retain encoded payload for Blob creation. Partial output
+on any export error must be discarded. Fast compression and NoFilter are
+benchmark settings, not quality or cross-platform performance guarantees.
 
 ## Current behavior
 

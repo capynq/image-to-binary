@@ -1,8 +1,8 @@
 # Image to Binary migration plan
 
 Status: subphases 0.2, 1.1, 1.2, 1.3, 2.1, 2.2, and 2.3 are committed.
-Subphase 2.4 is complete and ready for a separate local commit; no later
-completion is claimed.
+Subphases 2.4 and 2.5 are complete and ready for separate local commits; no
+later completion is claimed.
 See the validation records below.
 
 ## Initial prototype baseline
@@ -469,8 +469,6 @@ Completion checklist:
 
 ### 2.5 Add streaming PNG export and core benchmarks
 
-Status: not implemented.
-
 Objective: export PNG without unnecessary full-frame duplication and measure
 the agreed processing stages.
 
@@ -491,9 +489,9 @@ Proposed commit title: `feat: stream PNG output and benchmark core`
 
 Completion checklist:
 
-- [ ] Native and chunked export tests pass.
-- [ ] Three benchmark sizes recorded.
-- [ ] Memory and target caveats documented.
+- [x] Native and chunked export tests pass.
+- [x] Three benchmark sizes recorded.
+- [x] Memory and target caveats documented.
 
 ### 3.1 Scaffold frontend and processing adapters
 
@@ -1163,3 +1161,31 @@ Completion checklist:
   passed. Processing formatting and strict Clippy pass;
   the root acceptance run also passed the WASM compilation check. No browser or
   native replacement is claimed by this phase.
+
+## 2.5 local validation record
+
+- Native streaming writes directly to a temporary file and browser streaming
+  retains bounded encoded chunks for the Blob path. Fifteen export tests pass,
+  including PNG decode, native/chunk byte equality, short writes, sink/IEND
+  failures, row validation, cancellation, generation mismatch, and output
+  limits. Partial output on error must be discarded; no atomic rename policy is
+  claimed.
+- Release benchmarks use a deterministic checker/gradient PNG, classic cell
+  size 20, font size 20, threshold 128, green/black RGBA8 output, 256 MiB
+  output ceiling, and Fast/NoFilter PNG settings. The three measured source
+  sizes are 1 MP (1000x1000), 12 MP (4000x3000), and 50 MP (10000x5000).
+- Authorized hardware evidence: Apple M1 Pro, 10 cores, 32 GiB RAM, Darwin
+  27 arm64, Rust 1.88.0 release profile. Whole-process peak RSS was 22,233,088
+  bytes (1 MP), 161,267,712 bytes (12 MP), and 611,483,648 bytes (50 MP).
+  These are whole-process measurements including fixture generation, not
+  stage-specific native-export memory; retained payload counts are reported
+  separately and are not RSS claims.
+- Stage timings and output sizes are recorded in the ignored
+  `docs/reports/core-bench.md`. The 12 MP and 50 MP cached-preview targets are
+  informational (under 100 ms and under 250 ms respectively), not CI gates.
+  Results are release measurements from this macOS host and do not establish
+  cross-platform or arbitrary-image performance.
+- Final workspace acceptance reports 46 Rust tests passing (including 15 export
+  tests), strict all-target Clippy and formatting checks passing, and the
+  locked WASM workspace check passing. Python fallback checks remain separate;
+  no browser UI or native replacement is claimed by this phase.

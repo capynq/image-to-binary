@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 image-to-binary-core = { path = "../core" }
+png = "=0.18.1"
 
 [lints]
 workspace = true
