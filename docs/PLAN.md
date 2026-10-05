@@ -521,31 +521,79 @@ Completion checklist:
 ### 3.2 Add WASM worker scheduling, cancellation, and generations
 
 Objective: run Rust WASM processing off the browser UI thread with predictable
-latest-job behavior.
+latest-job behavior. This parent phase remains incomplete until its bridge and
+browser acceptance checks pass.
 
 Prerequisites: 3.1; 2.x core contracts.
 
+#### 3.2.1 Add the latest-job scheduler foundation
+
 Ordered steps:
 
-1. Build and load the WASM worker with transferred RGBA buffers.
-2. Schedule one active and one newest pending job; replace obsolete pending
-   work.
-3. Chunk long work, yield between synchronous WASM calls, and implement
-   cancellation plus stale-generation rejection.
-4. Keep decoder-worker lifecycle out of this subphase; termination belongs to
-   the lazy codec workers introduced in 4.2.
+1. Implement the private one-active, newest-pending scheduler.
+2. Add cooperative cancellation checkpoints and stale-result release.
+3. Cover replacement, executor failure, disposal, and generation races in
+   scheduler tests.
 
-Acceptance checks: cancellation resolves promptly, stale results never replace
-newer settings, processing-worker disposal releases resources, and UI stays
-responsive. Codec-worker termination is checked in 4.2.
+Implement a generic TypeScript scheduler that holds one active execution and
+one newest pending job, rejects superseded callers promptly, and releases stale
+results after execution unwinds. Cooperative checkpoints are an adapter seam;
+they do not interrupt a synchronous WASM call.
 
-Proposed commit title: `feat: schedule cancellable WASM processing`
+Acceptance checks: scheduler unit tests cover replacement, cancellation,
+disposal, executor failures, stale-result cleanup, and generation identity.
+This foundation alone does not provide prompt cancellation of synchronous WASM
+work or UI responsiveness.
+
+Proposed commit title: `feat: add latest-job processing scheduler`
 
 Completion checklist:
 
-- [ ] Worker lifecycle tests pass.
-- [ ] Generation and cancellation races are covered.
-- [ ] Browser memory transfer behavior reviewed.
+- [x] Eight scheduler unit tests pass.
+- [x] Strict TypeScript typecheck, formatting, and frontend build pass.
+- [x] Cancellation, stale-result, and generation cases are covered.
+
+#### 3.2.2 Add the incremental Rust/WASM bridge
+
+Ordered steps:
+
+1. Build and load the processing WASM with transferred RGBA buffers.
+2. Add bounded work chunks with yields between synchronous WASM calls.
+3. Add cancellation checks and stale-generation rejection at chunk boundaries.
+4. Keep decoder-worker lifecycle out of this subphase; termination belongs to
+   the lazy codec workers introduced in 4.2.
+
+Acceptance checks: WASM bridge tests prove cancellation at chunk boundaries
+and preserve the shared deterministic source grid and settings.
+
+Proposed commit title: `feat: add incremental WASM processing bridge`
+
+Completion checklist:
+
+- [ ] WASM builds and bridge tests pass.
+- [ ] Cancellation is covered at cooperative chunk boundaries.
+- [ ] Deterministic source grid and settings are preserved.
+
+#### 3.2.3 Add worker transport and browser proof
+
+Ordered steps:
+
+1. Connect scheduler jobs to a processing worker.
+2. Verify binary transfer, resource cleanup, and stale-result handling.
+3. Verify UI responsiveness in the browser; codec-worker termination is
+   checked in 4.2.
+
+Acceptance checks: processing-worker disposal releases resources, stale
+results never replace newer settings, and browser memory transfer behavior is
+reviewed. Full phase 3.2 acceptance requires this subphase and 3.2.2.
+
+Proposed commit title: `feat: connect processing scheduler to worker`
+
+Completion checklist:
+
+- [ ] Processing worker lifecycle and stale-result tests pass.
+- [ ] Browser memory transfer behavior is reviewed.
+- [ ] UI responsiveness is verified in the browser.
 
 ### 3.3 Implement browser import and preview
 

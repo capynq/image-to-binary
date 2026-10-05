@@ -68,12 +68,15 @@ npm run build
 npm run format:check
 ```
 
-The phase 3.1 frontend scaffold is complete. Its browser adapter is a
-deterministic demo fixture for validating the React state and adapter
-contracts; it does not convert user files, export PNG, or run the Rust
-processing worker yet. Chromium checks passed at tested widths from 320
-through 2560 CSS px plus 640x360, and a WebKit rendered check passed. Firefox
-verification and the real React lifecycle browser probe remain unverified.
+The phase 3.1 frontend scaffold and phase 3.2.1 internal latest-job scheduler
+foundation are complete. The scheduler is not connected to the UI or a worker;
+its cancellation is cooperative and cannot interrupt a synchronous WASM call.
+The browser adapter remains a deterministic demo fixture for validating the
+React state and adapter contracts; it does not convert user files, export PNG,
+or run the Rust processing worker yet. Chromium checks passed at tested widths from 320
+through 2560 CSS px plus 640x360, and a WebKit rendered check passed.
+Firefox verification and the real React lifecycle browser probe remain
+unverified.
 
 ## Python reference behavior
 
