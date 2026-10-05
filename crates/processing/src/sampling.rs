@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 use std::mem::size_of;
 use std::sync::Arc;
 
+use image_to_binary_core::{Cancellation, Generation, Progress};
 use image_to_binary_core::{ContractError, Sampling};
 
 use crate::DecodedSource;
@@ -153,6 +154,27 @@ impl Sampler {
         }
     }
 
+    /// Creates a resumable sampling task without consulting or mutating the cache.
+    ///
+    /// # Errors
+    ///
+    /// Returns a settings, dimensions, arithmetic, or allocation error.
+    pub fn task(
+        &self,
+        cell_width: u8,
+        cell_height: u32,
+        sampling: Sampling,
+        generation: Generation,
+    ) -> Result<SamplingTask, ContractError> {
+        SamplingTask::new(
+            Arc::clone(&self.source),
+            cell_width,
+            cell_height,
+            sampling,
+            generation,
+        )
+    }
+
     /// Samples the source using the requested geometry and returns a shared grid.
     ///
     /// Classic geometry uses floor division and nearest-neighbor center points.
@@ -213,7 +235,12 @@ impl Sampler {
             self.cache.push_back(entry);
             return Ok(grid);
         }
-        let grid = Arc::new(build_grid(&self.source, cell_width, cell_height, sampling)?);
+        let mut task = self.task(cell_width, cell_height, sampling, Generation::new(0))?;
+        while matches!(
+            task.advance(u64::MAX, Generation::new(0))?,
+            SamplingAdvance::InProgress(_)
+        ) {}
+        let grid = Arc::new(task.finish(Generation::new(0))?);
         let bytes = u64::try_from(grid.cells.capacity())
             .ok()
             .and_then(|count| count.checked_mul(u64::try_from(size_of::<SampleCell>()).ok()?))
@@ -272,63 +299,296 @@ fn dimensions(
     Ok((width.max(1), height.max(1)))
 }
 
-fn build_grid(
-    source: &DecodedSource,
+/// Result of one bounded sampling call.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SamplingAdvance {
+    InProgress(Progress),
+    Completed(Progress),
+}
+
+/// Resumable source sampler. Each budget unit reads exactly one source pixel.
+#[derive(Debug)]
+pub struct SamplingTask {
+    source: Arc<DecodedSource>,
+    width: u32,
+    height: u32,
     cell_width: u8,
     cell_height: u32,
     sampling: Sampling,
-) -> Result<SampleGrid, ContractError> {
-    let (width, height) = dimensions(source, cell_width, cell_height, sampling)?;
-    let count = u64::from(width)
-        .checked_mul(u64::from(height))
-        .ok_or(ContractError::ArithmeticOverflow)?;
-    let count_usize = usize::try_from(count).map_err(|_| ContractError::ResourceLimitExceeded)?;
-    let mut cells = Vec::new();
-    cells
-        .try_reserve_exact(count_usize)
-        .map_err(|_| ContractError::ResourceLimitExceeded)?;
-    let x_coordinates = if sampling == Sampling::Classic {
-        Some(classic_coordinates(
-            source.metadata().dimensions().width(),
-            width,
-        )?)
-    } else {
-        None
-    };
-    let y_coordinates = if sampling == Sampling::Classic {
-        Some(classic_coordinates(
-            source.metadata().dimensions().height(),
-            height,
-        )?)
-    } else {
-        None
-    };
-    for y in 0..height {
-        for x in 0..width {
-            cells.push(match sampling {
-                Sampling::Classic => classic_cell(
-                    source,
-                    x_coordinates
-                        .as_ref()
-                        .ok_or(ContractError::ArithmeticOverflow)?
-                        [usize::try_from(x).map_err(|_| ContractError::ArithmeticOverflow)?],
-                    y_coordinates
-                        .as_ref()
-                        .ok_or(ContractError::ArithmeticOverflow)?
-                        [usize::try_from(y).map_err(|_| ContractError::ArithmeticOverflow)?],
-                )?,
-                Sampling::Average => average_cell(source, x, y, cell_width, cell_height)?,
-            });
+    cancellation: Cancellation,
+    progress: Progress,
+    cells: Vec<SampleCell>,
+    x: u32,
+    y: u32,
+    pixel_x: u32,
+    pixel_y: u32,
+    bounds: (u32, u32, u32, u32),
+    sums: [u64; 4],
+    luma_sum: u64,
+    count: u64,
+    x_coordinate: f64,
+    y_coordinate: f64,
+    x_scale: f64,
+    y_scale: f64,
+    failed: Option<ContractError>,
+}
+
+impl SamplingTask {
+    /// Creates a task after validating geometry and reserving its output grid.
+    ///
+    /// Allocation and grid setup happen synchronously and cannot be preempted.
+    ///
+    /// # Errors
+    ///
+    /// Returns a settings, dimensions, arithmetic, or allocation error.
+    pub fn new(
+        source: Arc<DecodedSource>,
+        cell_width: u8,
+        cell_height: u32,
+        sampling: Sampling,
+        generation: Generation,
+    ) -> Result<Self, ContractError> {
+        if !(5..=30).contains(&cell_width) {
+            return Err(ContractError::InvalidSettings("cell_width"));
         }
+        if !(1..=1024).contains(&cell_height) {
+            return Err(ContractError::InvalidSettings("cell_height"));
+        }
+        if sampling == Sampling::Classic && u32::from(cell_width) != cell_height {
+            return Err(ContractError::InvalidSettings("classic cell geometry"));
+        }
+        let (width, height) = dimensions(&source, cell_width, cell_height, sampling)?;
+        let count = u64::from(width)
+            .checked_mul(u64::from(height))
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        let count_usize =
+            usize::try_from(count).map_err(|_| ContractError::ResourceLimitExceeded)?;
+        let mut cells = Vec::new();
+        cells
+            .try_reserve_exact(count_usize)
+            .map_err(|_| ContractError::ResourceLimitExceeded)?;
+        let dims = source.metadata().dimensions();
+        let total = match sampling {
+            Sampling::Classic => count,
+            Sampling::Average => u64::from(dims.width())
+                .checked_mul(u64::from(dims.height()))
+                .ok_or(ContractError::ArithmeticOverflow)?,
+        };
+        let x_scale = f64::from(dims.width()) / f64::from(width);
+        let y_scale = f64::from(dims.height()) / f64::from(height);
+        let x_coordinate = x_scale * 0.5;
+        let y_coordinate = y_scale * 0.5;
+        let mut task = Self {
+            source,
+            width,
+            height,
+            cell_width,
+            cell_height,
+            sampling,
+            cancellation: Cancellation::new(generation),
+            progress: Progress::new(total)?,
+            cells,
+            x: 0,
+            y: 0,
+            pixel_x: 0,
+            pixel_y: 0,
+            bounds: (0, 0, 0, 0),
+            sums: [0; 4],
+            luma_sum: 0,
+            count: 0,
+            x_coordinate,
+            y_coordinate,
+            x_scale,
+            y_scale,
+            failed: None,
+        };
+        task.set_cell_bounds()?;
+        Ok(task)
     }
-    Ok(SampleGrid {
-        width,
-        height,
-        sampling,
-        source_cell_width: cell_width,
-        source_cell_height: cell_height,
-        cells,
-    })
+
+    /// Returns a snapshot of source pixel reads completed and the total.
+    #[must_use]
+    pub const fn progress(&self) -> Progress {
+        self.progress
+    }
+
+    /// Requests cancellation; the next boundary check discards partial output.
+    pub fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+
+    /// Reads at most `pixel_budget` source pixels and reports whether work is done.
+    ///
+    /// A zero budget is rejected without changing progress. Stale or cancelled
+    /// tasks become terminal and release their partial cells.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-progress, cancellation, stale-generation, or sampling
+    /// arithmetic error. Cancellation and stale-generation errors invalidate
+    /// the task permanently.
+    pub fn advance(
+        &mut self,
+        pixel_budget: u64,
+        current_generation: Generation,
+    ) -> Result<SamplingAdvance, ContractError> {
+        if pixel_budget == 0 {
+            return Err(ContractError::InvalidProgress);
+        }
+        if let Some(error) = &self.failed {
+            return Err(error.clone());
+        }
+        if let Err(error) = self.cancellation.check(current_generation) {
+            self.failed = Some(error.clone());
+            self.cells = Vec::new();
+            return Err(error);
+        }
+        let result = self.advance_inner(pixel_budget);
+        if let Err(error) = self.cancellation.check(current_generation) {
+            self.failed = Some(error.clone());
+            self.cells = Vec::new();
+            return Err(error);
+        }
+        if let Err(error) = result {
+            self.failed = Some(error.clone());
+            self.cells = Vec::new();
+            return Err(error);
+        }
+        Ok(if self.progress.completed() == self.progress.total() {
+            SamplingAdvance::Completed(self.progress)
+        } else {
+            SamplingAdvance::InProgress(self.progress)
+        })
+    }
+
+    fn advance_inner(&mut self, budget: u64) -> Result<(), ContractError> {
+        let mut reads = 0;
+        while reads < budget && self.progress.completed() < self.progress.total() {
+            let (source_x, source_y) = if self.sampling == Sampling::Classic {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let sx =
+                    (self.x_coordinate as u32).min(self.source.metadata().dimensions().width() - 1);
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let sy = (self.y_coordinate as u32)
+                    .min(self.source.metadata().dimensions().height() - 1);
+                (sx, sy)
+            } else {
+                (self.pixel_x, self.pixel_y)
+            };
+            let color = source_pixel(&self.source, source_x, source_y)?;
+            if self.sampling == Sampling::Classic {
+                self.cells.push(SampleCell {
+                    luma: luma(color),
+                    color,
+                });
+                self.x += 1;
+                self.x_coordinate += self.x_scale;
+                if self.x == self.width {
+                    self.x = 0;
+                    self.x_coordinate = self.x_scale * 0.5;
+                    self.y += 1;
+                    self.y_coordinate += self.y_scale;
+                }
+            } else {
+                for (sum, channel) in self.sums.iter_mut().zip(color) {
+                    *sum = sum
+                        .checked_add(u64::from(channel))
+                        .ok_or(ContractError::ArithmeticOverflow)?;
+                }
+                self.luma_sum = self
+                    .luma_sum
+                    .checked_add(u64::from(luma(color)))
+                    .ok_or(ContractError::ArithmeticOverflow)?;
+                self.count = self
+                    .count
+                    .checked_add(1)
+                    .ok_or(ContractError::ArithmeticOverflow)?;
+                self.pixel_x += 1;
+                if self.pixel_x == self.bounds.2 {
+                    self.pixel_x = self.bounds.0;
+                    self.pixel_y += 1;
+                }
+                if self.pixel_y == self.bounds.3 {
+                    let color = [
+                        u8::try_from(self.sums[0] / self.count)
+                            .map_err(|_| ContractError::ArithmeticOverflow)?,
+                        u8::try_from(self.sums[1] / self.count)
+                            .map_err(|_| ContractError::ArithmeticOverflow)?,
+                        u8::try_from(self.sums[2] / self.count)
+                            .map_err(|_| ContractError::ArithmeticOverflow)?,
+                        u8::try_from(self.sums[3] / self.count)
+                            .map_err(|_| ContractError::ArithmeticOverflow)?,
+                    ];
+                    self.cells.push(SampleCell {
+                        luma: u8::try_from(self.luma_sum / self.count)
+                            .map_err(|_| ContractError::ArithmeticOverflow)?,
+                        color,
+                    });
+                    self.sums = [0; 4];
+                    self.luma_sum = 0;
+                    self.count = 0;
+                    self.x += 1;
+                    if self.x == self.width {
+                        self.x = 0;
+                        self.y += 1;
+                    }
+                    if self.y < self.height {
+                        self.set_cell_bounds()?;
+                    }
+                }
+            }
+            reads += 1;
+            self.progress.advance(1)?;
+        }
+        Ok(())
+    }
+
+    fn set_cell_bounds(&mut self) -> Result<(), ContractError> {
+        let dims = self.source.metadata().dimensions();
+        let left = self
+            .x
+            .checked_mul(u32::from(self.cell_width))
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        let top = self
+            .y
+            .checked_mul(self.cell_height)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        let right = left
+            .checked_add(u32::from(self.cell_width))
+            .ok_or(ContractError::ArithmeticOverflow)?
+            .min(dims.width());
+        let bottom = top
+            .checked_add(self.cell_height)
+            .ok_or(ContractError::ArithmeticOverflow)?
+            .min(dims.height());
+        self.bounds = (left, top, right, bottom);
+        self.pixel_x = left;
+        self.pixel_y = top;
+        Ok(())
+    }
+
+    /// Consumes a completed task and returns its grid after generation checks.
+    ///
+    /// # Errors
+    ///
+    /// Returns cancellation, stale-generation, or incomplete-progress errors.
+    pub fn finish(mut self, current_generation: Generation) -> Result<SampleGrid, ContractError> {
+        if let Some(error) = self.failed.take() {
+            return Err(error);
+        }
+        self.cancellation.check(current_generation)?;
+        if self.progress.completed() != self.progress.total() {
+            return Err(ContractError::InvalidProgress);
+        }
+        Ok(SampleGrid {
+            width: self.width,
+            height: self.height,
+            sampling: self.sampling,
+            source_cell_width: self.cell_width,
+            source_cell_height: self.cell_height,
+            cells: self.cells,
+        })
+    }
 }
 
 fn source_pixel(source: &DecodedSource, x: u32, y: u32) -> Result<[u8; 4], ContractError> {
@@ -358,90 +618,6 @@ fn luma(color: [u8; 4]) -> u8 {
         + u32::from(color[2]) * 7_471
         + 32_768;
     u8::try_from(value >> 16).unwrap_or(u8::MAX)
-}
-
-/// Computes Pillow-compatible positive-coordinate truncation from a validated grid.
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn classic_coordinates(source_size: u32, grid_size: u32) -> Result<Vec<u32>, ContractError> {
-    let mut coordinates = Vec::new();
-    coordinates
-        .try_reserve(usize::try_from(grid_size).map_err(|_| ContractError::ResourceLimitExceeded)?)
-        .map_err(|_| ContractError::ResourceLimitExceeded)?;
-    let scale = f64::from(source_size) / f64::from(grid_size);
-    let mut coordinate = scale * 0.5;
-    for _ in 0..grid_size {
-        coordinates.push((coordinate as u32).min(source_size - 1));
-        coordinate += scale;
-    }
-    Ok(coordinates)
-}
-
-fn classic_cell(
-    source: &DecodedSource,
-    source_x: u32,
-    source_y: u32,
-) -> Result<SampleCell, ContractError> {
-    let color = source_pixel(source, source_x, source_y)?;
-    Ok(SampleCell {
-        luma: luma(color),
-        color,
-    })
-}
-
-fn average_cell(
-    source: &DecodedSource,
-    x: u32,
-    y: u32,
-    cell_width: u8,
-    cell_height: u32,
-) -> Result<SampleCell, ContractError> {
-    let dimensions = source.metadata().dimensions();
-    let left = x
-        .checked_mul(u32::from(cell_width))
-        .ok_or(ContractError::ArithmeticOverflow)?;
-    let top = y
-        .checked_mul(cell_height)
-        .ok_or(ContractError::ArithmeticOverflow)?;
-    let right = left
-        .checked_add(u32::from(cell_width))
-        .ok_or(ContractError::ArithmeticOverflow)?
-        .min(dimensions.width());
-    let bottom = top
-        .checked_add(cell_height)
-        .ok_or(ContractError::ArithmeticOverflow)?
-        .min(dimensions.height());
-    let mut sums = [0_u64; 4];
-    let mut luma_sum = 0_u64;
-    let mut count = 0_u64;
-    for source_y in top..bottom {
-        for source_x in left..right {
-            let color = source_pixel(source, source_x, source_y)?;
-            for (sum, channel) in sums.iter_mut().zip(color) {
-                *sum = sum
-                    .checked_add(u64::from(channel))
-                    .ok_or(ContractError::ArithmeticOverflow)?;
-            }
-            luma_sum = luma_sum
-                .checked_add(u64::from(luma(color)))
-                .ok_or(ContractError::ArithmeticOverflow)?;
-            count = count
-                .checked_add(1)
-                .ok_or(ContractError::ArithmeticOverflow)?;
-        }
-    }
-    if count == 0 {
-        return Err(ContractError::InvalidDimensions);
-    }
-    let color = [
-        u8::try_from(sums[0] / count).map_err(|_| ContractError::ArithmeticOverflow)?,
-        u8::try_from(sums[1] / count).map_err(|_| ContractError::ArithmeticOverflow)?,
-        u8::try_from(sums[2] / count).map_err(|_| ContractError::ArithmeticOverflow)?,
-        u8::try_from(sums[3] / count).map_err(|_| ContractError::ArithmeticOverflow)?,
-    ];
-    Ok(SampleCell {
-        luma: u8::try_from(luma_sum / count).map_err(|_| ContractError::ArithmeticOverflow)?,
-        color,
-    })
 }
 
 #[cfg(test)]
@@ -528,7 +704,7 @@ mod tests {
 
     #[test]
     fn rectangular_average_uses_distinct_partial_regions() {
-        let mut sampler = Sampler::new(source(
+        let source = source(
             6,
             3,
             &[
@@ -551,7 +727,8 @@ mod tests {
                 [70, 0, 0, 255],
                 [80, 0, 0, 255],
             ],
-        ));
+        );
+        let mut sampler = Sampler::new(Arc::clone(&source));
         let grid = sampler.sample_average_rect(5, 2).unwrap();
         assert_eq!((grid.width(), grid.height()), (2, 2));
         assert_eq!(grid.sampling(), Sampling::Average);
@@ -561,6 +738,24 @@ mod tests {
         assert_eq!(grid.cell(1, 0).unwrap().color(), [65, 0, 0, 255]);
         assert_eq!(grid.cell(0, 1).unwrap().color(), [50, 0, 0, 255]);
         assert_eq!(grid.cell(1, 1).unwrap().color(), [80, 0, 0, 255]);
+        for budget in [1, 17, 4096, u64::MAX] {
+            let mut task = sampler
+                .task(5, 2, Sampling::Average, Generation::new(11))
+                .unwrap();
+            loop {
+                if matches!(
+                    task.advance(budget, Generation::new(11)).unwrap(),
+                    SamplingAdvance::Completed(_)
+                ) {
+                    break;
+                }
+            }
+            let chunked = task.finish(Generation::new(11)).unwrap();
+            assert_eq!(chunked.cell(0, 0).unwrap().color(), [35, 0, 0, 255]);
+            assert_eq!(chunked.cell(1, 0).unwrap().color(), [65, 0, 0, 255]);
+            assert_eq!(chunked.cell(0, 1).unwrap().color(), [50, 0, 0, 255]);
+            assert_eq!(chunked.cell(1, 1).unwrap().color(), [80, 0, 0, 255]);
+        }
     }
 
     #[test]
@@ -621,5 +816,248 @@ mod tests {
         assert!(Arc::ptr_eq(&first, &classic_still_present));
         let average_again = exact.sample(5, Sampling::Average).unwrap();
         assert!(!Arc::ptr_eq(&average, &average_again));
+    }
+
+    #[test]
+    fn chunked_and_synchronous_sampling_are_identical() {
+        let pixels: Vec<[u8; 4]> = (0_u32..28 * 19)
+            .map(|index| {
+                let x = index % 28;
+                let y = index / 28;
+                [
+                    u8::try_from((x * 9 + y * 3) % 256).unwrap(),
+                    u8::try_from((x * 2 + y * 13) % 256).unwrap(),
+                    u8::try_from((x * 7 + y * 5) % 256).unwrap(),
+                    u8::try_from((x * 11 + y * 17) % 256).unwrap(),
+                ]
+            })
+            .collect();
+        let gradient_source = source(28, 19, &pixels);
+        for (sampling, cell_height) in [(Sampling::Classic, 5), (Sampling::Average, 3)] {
+            let mut sampler = Sampler::new(Arc::clone(&gradient_source));
+            let expected = sampler
+                .sample_with_geometry(5, cell_height, sampling)
+                .unwrap();
+            for budget in [1, 17, 4096, u64::MAX] {
+                let mut task = sampler
+                    .task(5, cell_height, sampling, Generation::new(9))
+                    .unwrap();
+                loop {
+                    if matches!(
+                        task.advance(budget, Generation::new(9)).unwrap(),
+                        SamplingAdvance::Completed(_)
+                    ) {
+                        break;
+                    }
+                }
+                assert_eq!(*expected, task.finish(Generation::new(9)).unwrap());
+            }
+        }
+        let narrow = source(
+            6,
+            1,
+            &[
+                [10, 20, 30, 40],
+                [50, 60, 70, 80],
+                [90, 100, 110, 120],
+                [130, 140, 150, 160],
+                [170, 180, 190, 200],
+                [210, 220, 230, 240],
+            ],
+        );
+        for (source, expected) in [
+            (Arc::clone(&narrow), [130, 140, 150, 160]),
+            (source(1, 1, &[[9, 19, 29, 39]]), [9, 19, 29, 39]),
+        ] {
+            let mut task =
+                SamplingTask::new(source, 5, 5, Sampling::Classic, Generation::new(10)).unwrap();
+            assert!(matches!(
+                task.advance(1, Generation::new(10)).unwrap(),
+                SamplingAdvance::Completed(_)
+            ));
+            assert_eq!(
+                task.finish(Generation::new(10))
+                    .unwrap()
+                    .cell(0, 0)
+                    .unwrap()
+                    .color(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn average_budget_pauses_inside_a_large_cell() {
+        let pixels: Vec<[u8; 4]> = (0_u32..30 * 1024)
+            .map(|index| {
+                [
+                    u8::try_from(index % 256).unwrap(),
+                    u8::try_from((index * 3 + 1) % 256).unwrap(),
+                    u8::try_from((index * 7 + 2) % 256).unwrap(),
+                    u8::try_from((index * 11 + 3) % 256).unwrap(),
+                ]
+            })
+            .collect();
+        let mut channel_sums = [0_u64; 4];
+        let mut luma_sum = 0_u64;
+        for pixel in &pixels {
+            for (sum, channel) in channel_sums.iter_mut().zip(pixel) {
+                *sum += u64::from(*channel);
+            }
+            let weighted = u32::from(pixel[0]) * 19_595
+                + u32::from(pixel[1]) * 38_470
+                + u32::from(pixel[2]) * 7_471
+                + 32_768;
+            luma_sum += u64::from(u8::try_from(weighted >> 16).unwrap());
+        }
+        let mut task = SamplingTask::new(
+            source(30, 1024, &pixels),
+            30,
+            1024,
+            Sampling::Average,
+            Generation::new(1),
+        )
+        .unwrap();
+        assert!(
+            matches!(task.advance(17, Generation::new(1)).unwrap(), SamplingAdvance::InProgress(progress) if progress.completed() == 17 && progress.total() == 30 * 1024)
+        );
+        assert!(
+            matches!(task.advance(1, Generation::new(1)).unwrap(), SamplingAdvance::InProgress(progress) if progress.completed() == 18 && progress.total() == 30 * 1024)
+        );
+        while matches!(
+            task.advance(4096, Generation::new(1)).unwrap(),
+            SamplingAdvance::InProgress(_)
+        ) {}
+        let grid = task.finish(Generation::new(1)).unwrap();
+        assert_eq!((grid.width(), grid.height()), (1, 1));
+        let cell = grid.cell(0, 0).unwrap();
+        let count = u64::try_from(pixels.len()).unwrap();
+        assert_eq!(
+            cell.color(),
+            [
+                u8::try_from(channel_sums[0] / count).unwrap(),
+                u8::try_from(channel_sums[1] / count).unwrap(),
+                u8::try_from(channel_sums[2] / count).unwrap(),
+                u8::try_from(channel_sums[3] / count).unwrap(),
+            ]
+        );
+        assert_eq!(cell.luma(), u8::try_from(luma_sum / count).unwrap());
+    }
+
+    #[test]
+    fn stale_cancelled_and_incomplete_tasks_never_yield_a_grid() {
+        let source = source(30, 30, &[[0, 0, 0, 255]; 900]);
+        let mut stale = SamplingTask::new(
+            Arc::clone(&source),
+            5,
+            5,
+            Sampling::Average,
+            Generation::new(2),
+        )
+        .unwrap();
+        stale.advance(1, Generation::new(2)).unwrap();
+        assert_eq!(
+            stale.advance(1, Generation::new(3)),
+            Err(ContractError::StaleGeneration)
+        );
+        assert_eq!(stale.cells.capacity(), 0);
+        assert_eq!(
+            stale.advance(1, Generation::new(2)),
+            Err(ContractError::StaleGeneration)
+        );
+        assert_eq!(
+            stale.finish(Generation::new(2)),
+            Err(ContractError::StaleGeneration)
+        );
+        let mut cancelled = SamplingTask::new(
+            Arc::clone(&source),
+            5,
+            5,
+            Sampling::Average,
+            Generation::new(4),
+        )
+        .unwrap();
+        cancelled.cancel();
+        assert_eq!(
+            cancelled.advance(1, Generation::new(4)),
+            Err(ContractError::Cancelled)
+        );
+        assert_eq!(cancelled.cells.capacity(), 0);
+        let mut partial_cancelled = SamplingTask::new(
+            Arc::clone(&source),
+            5,
+            5,
+            Sampling::Average,
+            Generation::new(7),
+        )
+        .unwrap();
+        partial_cancelled.advance(1, Generation::new(7)).unwrap();
+        partial_cancelled.cancel();
+        assert_eq!(
+            partial_cancelled.advance(1, Generation::new(7)),
+            Err(ContractError::Cancelled)
+        );
+        assert_eq!(partial_cancelled.cells.capacity(), 0);
+        let mut complete_then_cancel = SamplingTask::new(
+            Arc::clone(&source),
+            5,
+            5,
+            Sampling::Classic,
+            Generation::new(6),
+        )
+        .unwrap();
+        assert!(matches!(
+            complete_then_cancel
+                .advance(u64::MAX, Generation::new(6))
+                .unwrap(),
+            SamplingAdvance::Completed(_)
+        ));
+        complete_then_cancel.cancel();
+        assert_eq!(
+            complete_then_cancel.finish(Generation::new(6)),
+            Err(ContractError::Cancelled)
+        );
+        let incomplete =
+            SamplingTask::new(source, 5, 5, Sampling::Classic, Generation::new(5)).unwrap();
+        assert_eq!(
+            incomplete.finish(Generation::new(5)),
+            Err(ContractError::InvalidProgress)
+        );
+    }
+
+    #[test]
+    fn task_rejects_invalid_geometry_and_zero_budget() {
+        let source = source(30, 30, &[[0, 0, 0, 255]; 900]);
+        assert!(SamplingTask::new(
+            Arc::clone(&source),
+            4,
+            4,
+            Sampling::Classic,
+            Generation::new(0)
+        )
+        .is_err());
+        assert!(SamplingTask::new(
+            Arc::clone(&source),
+            5,
+            6,
+            Sampling::Classic,
+            Generation::new(0)
+        )
+        .is_err());
+        assert!(SamplingTask::new(
+            Arc::clone(&source),
+            5,
+            1025,
+            Sampling::Average,
+            Generation::new(0)
+        )
+        .is_err());
+        let mut task =
+            SamplingTask::new(source, 5, 5, Sampling::Average, Generation::new(0)).unwrap();
+        assert_eq!(
+            task.advance(0, Generation::new(0)),
+            Err(ContractError::InvalidProgress)
+        );
+        assert_eq!(task.progress().completed(), 0);
     }
 }

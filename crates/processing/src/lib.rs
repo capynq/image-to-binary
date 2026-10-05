@@ -8,7 +8,7 @@ pub use decode::{decode, DecodeError, DecodeLimits, DecodedSource};
 pub use renderer::{
     AspectGeometry, RenderError, RenderOptions, RenderedFrame, Renderer, RendererCacheStats,
 };
-pub use sampling::{SampleCell, SampleGrid, Sampler};
+pub use sampling::{SampleCell, SampleGrid, Sampler, SamplingAdvance, SamplingTask};
 
 use image_to_binary_core::{
     Cancellation, ContractError, Generation, Progress, Settings, SourceMetadata,

@@ -555,16 +555,72 @@ Completion checklist:
 
 #### 3.2.2 Add the incremental Rust/WASM bridge
 
-Ordered steps:
+This parent phase is split into ordered, independently reviewable foundations:
 
-1. Build and load the processing WASM with transferred RGBA buffers.
-2. Add bounded work chunks with yields between synchronous WASM calls.
-3. Add cancellation checks and stale-generation rejection at chunk boundaries.
-4. Keep decoder-worker lifecycle out of this subphase; termination belongs to
-   the lazy codec workers introduced in 4.2.
+##### 3.2.2.1 Add pixel-budgeted Rust sampling
 
-Acceptance checks: WASM bridge tests prove cancellation at chunk boundaries
-and preserve the shared deterministic source grid and settings.
+1. Add an owned resumable sampler with checked geometry, progress, cancellation,
+   and generation checks at each synchronous call boundary.
+2. Count source pixel reads as work units, including pauses inside Average
+   cells; preserve the classic `f64` coordinate recurrence without eager arrays.
+3. Route the synchronous sampler through the same primitive and admit only
+   completed grids to the existing bounded cache.
+
+Acceptance checks: chunked sampling matches synchronous classic and Average
+results; budget, partial-cell, cancellation, stale-generation, and cache identity
+cases pass. This step establishes Rust resumability only; no WASM binding or
+worker is provided.
+
+Proposed commit title: `feat: add pixel-budgeted Rust sampling`
+
+Completion checklist:
+
+- [x] Bounded sampling and cancellation contract tests pass.
+- [x] Existing cache identity and sampling parity tests pass.
+- [x] No WASM worker or UI integration is claimed.
+
+##### 3.2.2.2 Add incremental preview rendering
+
+1. Refactor preview rendering into an owned resumable task with bounded output
+   work and generation checks.
+2. Keep preview and export on the same deterministic source grid and settings.
+3. Verify cancellation drops partial raster state.
+
+Acceptance checks: chunked preview matches synchronous output and cancellation
+or stale generations cannot return partial frames.
+
+Proposed commit title: `feat: make preview rendering incremental`
+
+Completion checklist:
+
+- [ ] Chunked preview matches synchronous output.
+- [ ] Cancellation and stale generations discard partial frames.
+
+##### 3.2.2.3 Add actual WASM bindings and build
+
+1. Expose stable task construction, progress, advance, cancel, and finish APIs.
+2. Build the processing crate for `wasm32-unknown-unknown` without adding UI
+   or worker transport in this step.
+3. Verify binding-level lifecycle and generation behavior.
+
+Acceptance checks: WASM builds and binding tests pass; worker transport remains
+in 3.2.3.
+
+Proposed commit title: `feat: expose incremental processing to wasm`
+
+Completion checklist:
+
+- [ ] Processing WASM builds and binding lifecycle tests pass.
+- [ ] Cancellation and generation behavior are verified through bindings.
+
+The remaining ordered work is defined in 3.2.2.2 and 3.2.2.3. This foundation
+does not add bindings, transferred buffers, or worker transport. Keep decoder-
+worker lifecycle out of these subphases; termination belongs to the lazy codec
+workers introduced in 4.2.
+
+Acceptance checks for the complete parent phase: WASM bridge tests prove
+cancellation at chunk boundaries and preserve the shared deterministic source
+grid and settings.
 
 Proposed commit title: `feat: add incremental WASM processing bridge`
 
