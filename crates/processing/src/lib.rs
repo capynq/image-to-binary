@@ -6,7 +6,8 @@ mod sampling;
 
 pub use decode::{decode, DecodeError, DecodeLimits, DecodedSource};
 pub use renderer::{
-    AspectGeometry, RenderError, RenderOptions, RenderedFrame, Renderer, RendererCacheStats,
+    AspectGeometry, PreviewAdvance, PreviewTask, RenderError, RenderOptions, RenderedFrame,
+    Renderer, RendererCacheStats,
 };
 pub use sampling::{SampleCell, SampleGrid, Sampler, SamplingAdvance, SamplingTask};
 

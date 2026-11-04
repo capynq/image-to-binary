@@ -5,7 +5,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use fontdue::{Font, FontSettings};
-use image_to_binary_core::{ContractError, Sampling};
+use image_to_binary_core::{Cancellation, ContractError, Generation, Progress, Sampling};
 
 const FONT_BYTES: &[u8] = include_bytes!("../../../assets/fonts/IBMPlexMono-Regular.ttf");
 const DEFAULT_CACHE_BYTES: u64 = 8 * 1024 * 1024;
@@ -85,6 +85,37 @@ pub struct RenderedFrame {
     width: u32,
     height: u32,
     pixels: Vec<u8>,
+}
+
+/// Result of one bounded preview rendering call.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreviewAdvance {
+    InProgress(Progress),
+    Completed(Progress),
+}
+
+#[derive(Debug)]
+struct PreviewRaster {
+    width: u32,
+    height: u32,
+    export_width: u32,
+    export_height: u32,
+    tile_width: u32,
+    tile_height: u32,
+    options: RenderOptions,
+    mask_zero: Arc<GlyphMask>,
+    mask_one: Arc<GlyphMask>,
+    progress: Progress,
+    pixels: Vec<u8>,
+}
+
+/// Owned resumable preview rendering task over an immutable sampled grid.
+#[derive(Debug)]
+pub struct PreviewTask {
+    grid: Arc<crate::SampleGrid>,
+    raster: PreviewRaster,
+    cancellation: Cancellation,
+    failed: Option<ContractError>,
 }
 
 impl RenderedFrame {
@@ -376,6 +407,44 @@ impl Renderer {
     ) -> Result<RenderedFrame, RenderError> {
         options.validate()?;
         self.validate_grid(grid, options)?;
+        let raster = self.preview_raster(grid, options)?;
+        let mut raster = raster;
+        raster.advance(grid, u64::MAX)?;
+        Ok(raster.finish())
+    }
+
+    /// Creates an owned resumable preview task for one generation.
+    ///
+    /// Grid validation, output reservation, and glyph rasterization happen
+    /// synchronously. Those setup operations cannot be preempted; each later
+    /// advance processes at most its requested number of output pixels.
+    ///
+    /// # Errors
+    ///
+    /// Returns a contract error when settings, dimensions, or output allocation
+    /// exceed their configured limits.
+    pub fn preview_task(
+        &mut self,
+        grid: Arc<crate::SampleGrid>,
+        options: RenderOptions,
+        generation: Generation,
+    ) -> Result<PreviewTask, RenderError> {
+        options.validate()?;
+        self.validate_grid(&grid, options)?;
+        let raster = self.preview_raster(&grid, options)?;
+        Ok(PreviewTask {
+            grid,
+            raster,
+            cancellation: Cancellation::new(generation),
+            failed: None,
+        })
+    }
+
+    fn preview_raster(
+        &mut self,
+        grid: &crate::SampleGrid,
+        options: RenderOptions,
+    ) -> Result<PreviewRaster, RenderError> {
         let (export_tile_width, export_tile_height) = self.tile_dimensions(options)?;
         let export_width = u64::from(grid.width())
             .checked_mul(u64::from(export_tile_width))
@@ -394,15 +463,49 @@ impl Renderer {
         } else {
             export_height
         };
-        self.render_preview_inverse(
-            grid,
+        let width =
+            u32::try_from(target_width.max(1)).map_err(|_| ContractError::ResourceLimitExceeded)?;
+        let height = u32::try_from(target_height.max(1))
+            .map_err(|_| ContractError::ResourceLimitExceeded)?;
+        let export_width =
+            u32::try_from(export_width).map_err(|_| ContractError::ResourceLimitExceeded)?;
+        let export_height =
+            u32::try_from(export_height).map_err(|_| ContractError::ResourceLimitExceeded)?;
+        let bytes = u64::from(width)
+            .checked_mul(u64::from(height))
+            .and_then(|value| value.checked_mul(4))
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        if bytes > options.max_output_bytes {
+            return Err(ContractError::ResourceLimitExceeded.into());
+        }
+        let mut pixels = Vec::new();
+        pixels
+            .try_reserve_exact(
+                usize::try_from(bytes).map_err(|_| ContractError::ResourceLimitExceeded)?,
+            )
+            .map_err(|_| ContractError::ResourceLimitExceeded)?;
+        let mask_zero = self
+            .atlas
+            .get(&self.font, b'0', f32::from(options.font_size))?;
+        let mask_one = self
+            .atlas
+            .get(&self.font, b'1', f32::from(options.font_size))?;
+        let total = u64::from(width)
+            .checked_mul(u64::from(height))
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        Ok(PreviewRaster {
+            width,
+            height,
+            export_width,
+            export_height,
+            tile_width: export_tile_width,
+            tile_height: export_tile_height,
             options,
-            u32::try_from(target_width.max(1)).map_err(|_| ContractError::ResourceLimitExceeded)?,
-            u32::try_from(target_height.max(1))
-                .map_err(|_| ContractError::ResourceLimitExceeded)?,
-            u32::try_from(export_width).map_err(|_| ContractError::ResourceLimitExceeded)?,
-            u32::try_from(export_height).map_err(|_| ContractError::ResourceLimitExceeded)?,
-        )
+            mask_zero,
+            mask_one,
+            progress: Progress::new(total)?,
+            pixels,
+        })
     }
 
     /// Renders a contiguous row batch for streaming encoders.
@@ -508,73 +611,143 @@ impl Renderer {
             Ok((u32::from(options.cell_size), u32::from(options.cell_size)))
         }
     }
+}
 
-    fn render_preview_inverse(
+impl PreviewRaster {
+    fn advance(
         &mut self,
         grid: &crate::SampleGrid,
-        options: RenderOptions,
-        width: u32,
-        height: u32,
-        export_width: u32,
-        export_height: u32,
-    ) -> Result<RenderedFrame, RenderError> {
-        let bytes = u64::from(width)
-            .checked_mul(u64::from(height))
-            .and_then(|value| value.checked_mul(4))
-            .ok_or(ContractError::ArithmeticOverflow)?;
-        if bytes > options.max_output_bytes {
-            return Err(ContractError::ResourceLimitExceeded.into());
-        }
-        let count = usize::try_from(bytes).map_err(|_| ContractError::ResourceLimitExceeded)?;
-        let mut pixels = Vec::new();
-        pixels
-            .try_reserve_exact(count)
-            .map_err(|_| ContractError::ResourceLimitExceeded)?;
-        pixels.resize(count, 0);
-        for pixel in pixels.chunks_exact_mut(4) {
-            pixel[3] = u8::MAX;
-        }
-        let (tile_width, tile_height) = self.tile_dimensions(options)?;
-        let mask_zero = self
-            .atlas
-            .get(&self.font, b'0', f32::from(options.font_size))?;
-        let mask_one = self
-            .atlas
-            .get(&self.font, b'1', f32::from(options.font_size))?;
-        for y in 0..height {
-            let source_y = u32::try_from(
-                (u64::from(y) * 2 + 1) * u64::from(export_height) / (2 * u64::from(height)),
+        pixel_budget: u64,
+    ) -> Result<(), ContractError> {
+        let remaining = self.progress.total() - self.progress.completed();
+        let count = pixel_budget.min(remaining);
+        let width = u64::from(self.width);
+        for offset in 0..count {
+            let position = self.progress.completed() + offset;
+            let x =
+                u32::try_from(position % width).map_err(|_| ContractError::ArithmeticOverflow)?;
+            let y =
+                u32::try_from(position / width).map_err(|_| ContractError::ArithmeticOverflow)?;
+            let source_x = u32::try_from(
+                (u64::from(x) * 2 + 1) * u64::from(self.export_width) / (2 * u64::from(self.width)),
             )
-            .map_err(|_| ContractError::ArithmeticOverflow)?;
-            for x in 0..width {
-                let source_x = u32::try_from(
-                    (u64::from(x) * 2 + 1) * u64::from(export_width) / (2 * u64::from(width)),
-                )
-                .map_err(|_| ContractError::ArithmeticOverflow)?;
-                let green = Self::export_pixel(
-                    grid,
-                    options,
-                    tile_width,
-                    tile_height,
-                    &mask_zero,
-                    &mask_one,
-                    source_x.min(export_width - 1),
-                    source_y.min(export_height - 1),
-                )?;
-                let index = (usize::try_from(y).map_err(|_| ContractError::ArithmeticOverflow)?
-                    * usize::try_from(width).map_err(|_| ContractError::ArithmeticOverflow)?
-                    + usize::try_from(x).map_err(|_| ContractError::ArithmeticOverflow)?)
-                    * 4;
-                pixels[index + 1] = green;
-            }
+            .map_err(|_| ContractError::ArithmeticOverflow)?
+            .min(self.export_width - 1);
+            let source_y = u32::try_from(
+                (u64::from(y) * 2 + 1) * u64::from(self.export_height)
+                    / (2 * u64::from(self.height)),
+            )
+            .map_err(|_| ContractError::ArithmeticOverflow)?
+            .min(self.export_height - 1);
+            let green = Renderer::export_pixel(
+                grid,
+                self.options,
+                self.tile_width,
+                self.tile_height,
+                &self.mask_zero,
+                &self.mask_one,
+                source_x,
+                source_y,
+            )?;
+            self.pixels.extend_from_slice(&[0, green, 0, u8::MAX]);
         }
-        Ok(RenderedFrame {
-            width,
-            height,
-            pixels,
-        })
+        self.progress.advance(count)?;
+        Ok(())
     }
 
+    fn finish(self) -> RenderedFrame {
+        RenderedFrame {
+            width: self.width,
+            height: self.height,
+            pixels: self.pixels,
+        }
+    }
+}
+
+impl PreviewTask {
+    /// Returns output pixels completed and the total preview pixel count.
+    #[must_use]
+    pub const fn progress(&self) -> Progress {
+        self.raster.progress
+    }
+
+    /// Requests cancellation; the next call boundary discards partial pixels.
+    pub fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+
+    /// Renders at most `pixel_budget` output pixels in row-major order.
+    ///
+    /// A zero budget is rejected without changing task state. Cancellation,
+    /// stale generations, and internal rendering failures permanently
+    /// invalidate the task and release its raster buffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ContractError::InvalidProgress`] for a zero budget, or a
+    /// cancellation, generation, arithmetic, or grid contract error.
+    pub fn advance(
+        &mut self,
+        pixel_budget: u64,
+        current_generation: Generation,
+    ) -> Result<PreviewAdvance, ContractError> {
+        if pixel_budget == 0 {
+            return Err(ContractError::InvalidProgress);
+        }
+        if let Some(error) = &self.failed {
+            return Err(error.clone());
+        }
+        if let Err(error) = self.cancellation.check(current_generation) {
+            self.failed = Some(error.clone());
+            self.raster.pixels = Vec::new();
+            return Err(error);
+        }
+        let result = self.raster.advance(&self.grid, pixel_budget);
+        if let Err(error) = self.cancellation.check(current_generation) {
+            self.failed = Some(error.clone());
+            self.raster.pixels = Vec::new();
+            return Err(error);
+        }
+        if let Err(error) = result {
+            self.failed = Some(error.clone());
+            self.raster.pixels = Vec::new();
+            return Err(error);
+        }
+        Ok(
+            if self.raster.progress.completed() == self.raster.progress.total() {
+                PreviewAdvance::Completed(self.raster.progress)
+            } else {
+                PreviewAdvance::InProgress(self.raster.progress)
+            },
+        )
+    }
+
+    /// Consumes a complete, current-generation task into its rendered frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns cancellation or stale-generation errors, or
+    /// [`ContractError::InvalidProgress`] when rendering is incomplete. Returns
+    /// a previously recorded terminal rendering error unchanged.
+    pub fn finish(
+        mut self,
+        current_generation: Generation,
+    ) -> Result<RenderedFrame, ContractError> {
+        if let Some(error) = self.failed.take() {
+            return Err(error);
+        }
+        if let Err(error) = self.cancellation.check(current_generation) {
+            self.raster.pixels = Vec::new();
+            return Err(error);
+        }
+        if self.raster.progress.completed() != self.raster.progress.total() {
+            return Err(ContractError::InvalidProgress);
+        }
+        Ok(self.raster.finish())
+    }
+}
+
+impl Renderer {
     #[allow(clippy::too_many_arguments)]
     fn export_pixel(
         grid: &crate::SampleGrid,
@@ -585,7 +758,7 @@ impl Renderer {
         mask_one: &Arc<GlyphMask>,
         x: u32,
         y: u32,
-    ) -> Result<u8, RenderError> {
+    ) -> Result<u8, ContractError> {
         let column = x / tile_width;
         let row = y / tile_height;
         let cell = grid
@@ -873,6 +1046,80 @@ mod tests {
         grid_with_height(width, height, dark, sampling, 5)
     }
 
+    fn patterned_grid(
+        width: u32,
+        height: u32,
+        sampling: Sampling,
+        cell_height: u8,
+    ) -> Arc<crate::SampleGrid> {
+        let image = ImageBuffer::from_fn(width, height, |x, y| {
+            if (x / 5 + y / 5) % 2 == 0 {
+                Rgba([0, 0, 0, 255])
+            } else {
+                Rgba([255, 255, 255, 255])
+            }
+        });
+        let mut bytes = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(image)
+            .write_to(&mut bytes, ImageFormat::Png)
+            .unwrap();
+        let source = Arc::new(decode(&bytes.into_inner(), DecodeLimits::default()).unwrap());
+        let mut sampler = Sampler::new(source);
+        if sampling == Sampling::Average {
+            sampler
+                .sample_average_rect(5, u32::from(cell_height))
+                .unwrap()
+        } else {
+            sampler.sample(5, sampling).unwrap()
+        }
+    }
+
+    fn inverse_preview_oracle(
+        renderer: &mut Renderer,
+        grid: &crate::SampleGrid,
+        options: RenderOptions,
+    ) -> RenderedFrame {
+        let full = renderer.render(grid, options).unwrap();
+        let export_width = full.width();
+        let export_height = full.height();
+        let longest = export_width.max(export_height);
+        let width = if longest > 1600 {
+            u32::try_from(u64::from(export_width) * 1600 / u64::from(longest)).unwrap()
+        } else {
+            export_width
+        };
+        let height = if longest > 1600 {
+            u32::try_from(u64::from(export_height) * 1600 / u64::from(longest)).unwrap()
+        } else {
+            export_height
+        };
+        let mut pixels = Vec::new();
+        for y in 0..height {
+            for x in 0..width {
+                let source_x = u32::try_from(
+                    ((u64::from(x) * 2 + 1) * u64::from(export_width)) / (2 * u64::from(width)),
+                )
+                .unwrap();
+                let source_y = u32::try_from(
+                    ((u64::from(y) * 2 + 1) * u64::from(export_height)) / (2 * u64::from(height)),
+                )
+                .unwrap();
+                let source_x = source_x.min(export_width - 1);
+                let source_y = source_y.min(export_height - 1);
+                let index = (usize::try_from(source_y).unwrap()
+                    * usize::try_from(export_width).unwrap()
+                    + usize::try_from(source_x).unwrap())
+                    * 4;
+                pixels.extend_from_slice(&full.pixels()[index..index + 4]);
+            }
+        }
+        RenderedFrame {
+            width,
+            height,
+            pixels,
+        }
+    }
+
     #[test]
     fn repeated_classic_render_is_byte_stable_and_opaque() {
         let grid = grid(10, 10, true, Sampling::Classic);
@@ -904,6 +1151,39 @@ mod tests {
         let mut renderer = Renderer::new().unwrap();
         let preview = renderer.render_preview(&grid, options).unwrap();
         assert!(preview.width().max(preview.height()) <= 1600);
+        let mut task = renderer
+            .preview_task(Arc::clone(&grid), options, Generation::new(3))
+            .unwrap();
+        assert_eq!(
+            task.progress().total(),
+            u64::from(preview.width()) * u64::from(preview.height())
+        );
+        while task.progress().completed() < task.progress().total() {
+            task.advance(4096, Generation::new(3)).unwrap();
+        }
+        assert_eq!(task.finish(Generation::new(3)).unwrap(), preview);
+    }
+
+    #[test]
+    fn incremental_preview_matches_inverse_oracle_for_narrow_downscaled_grid() {
+        let grid = patterned_grid(10_005, 25, Sampling::Classic, 5);
+        let options = RenderOptions {
+            cell_size: 5,
+            font_size: 8,
+            ..RenderOptions::default()
+        };
+        let expected = inverse_preview_oracle(&mut Renderer::new().unwrap(), &grid, options);
+        assert_eq!((expected.width(), expected.height()), (1600, 3));
+        for budget in [1, 17, 4096, u64::MAX] {
+            let mut task = Renderer::new()
+                .unwrap()
+                .preview_task(Arc::clone(&grid), options, Generation::new(9))
+                .unwrap();
+            while task.progress().completed() < task.progress().total() {
+                task.advance(budget, Generation::new(9)).unwrap();
+            }
+            assert_eq!(task.finish(Generation::new(9)).unwrap(), expected);
+        }
     }
 
     #[test]
@@ -981,5 +1261,153 @@ mod tests {
             frame.width(),
             grid.width() * u32::from(geometry.output_cell_width)
         );
+    }
+
+    #[test]
+    fn incremental_preview_matches_inverse_oracle_for_both_sampling_modes() {
+        let mut cases = vec![(Sampling::Classic, 8, 5)];
+        let geometry_renderer = Renderer::new().unwrap();
+        let average_height = u8::try_from(
+            geometry_renderer
+                .aspect_geometry(5, 30)
+                .unwrap()
+                .source_cell_height,
+        )
+        .unwrap();
+        cases.push((Sampling::Average, 30, average_height));
+        for (sampling, font_size, cell_height) in cases {
+            let grid = patterned_grid(85, 61, sampling, cell_height);
+            let options = RenderOptions {
+                cell_size: 5,
+                font_size,
+                sampling,
+                ..RenderOptions::default()
+            };
+            let expected = inverse_preview_oracle(&mut Renderer::new().unwrap(), &grid, options);
+            assert!(expected.pixels().chunks_exact(4).any(|pixel| pixel[1] > 0));
+            assert!(expected.pixels().chunks_exact(4).any(|pixel| pixel[1] == 0));
+            for budget in [1, 17, 4096, u64::MAX] {
+                let mut renderer = Renderer::with_cache_capacity(1).unwrap();
+                let task = renderer
+                    .preview_task(Arc::clone(&grid), options, Generation::new(42))
+                    .unwrap();
+                assert!(renderer.cache_stats().bytes() <= renderer.cache_stats().capacity());
+                drop(renderer);
+                let mut task = task;
+                while task.progress().completed() < task.progress().total() {
+                    let before = task.progress().completed();
+                    let advance = task.advance(budget, Generation::new(42)).unwrap();
+                    let completed = task.progress().completed();
+                    assert!(completed - before <= budget);
+                    assert!(completed > before);
+                    if completed == task.progress().total() {
+                        assert_eq!(advance, PreviewAdvance::Completed(task.progress()));
+                    }
+                }
+                assert_eq!(task.finish(Generation::new(42)).unwrap(), expected);
+            }
+            assert_eq!(
+                Renderer::new()
+                    .unwrap()
+                    .render_preview(&grid, options)
+                    .unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn preview_task_zero_budget_cancel_stale_and_finish_contracts() {
+        let patterned = patterned_grid(50, 50, Sampling::Classic, 5);
+        let options = RenderOptions {
+            cell_size: 5,
+            font_size: 30,
+            ..RenderOptions::default()
+        };
+        let generation = Generation::new(7);
+        let tiny_grid = grid(5, 5, true, Sampling::Classic);
+        let tiny = Renderer::new()
+            .unwrap()
+            .preview_task(
+                Arc::clone(&tiny_grid),
+                RenderOptions {
+                    max_output_bytes: 100,
+                    ..options
+                },
+                generation,
+            )
+            .unwrap();
+        assert_eq!((tiny.raster.width, tiny.raster.height), (5, 5));
+        assert!(Renderer::new()
+            .unwrap()
+            .preview_task(
+                tiny_grid,
+                RenderOptions {
+                    max_output_bytes: 4,
+                    ..options
+                },
+                generation,
+            )
+            .is_err());
+        let mut task = Renderer::new()
+            .unwrap()
+            .preview_task(Arc::clone(&patterned), options, generation)
+            .unwrap();
+        assert_eq!(
+            task.advance(0, generation),
+            Err(ContractError::InvalidProgress)
+        );
+        assert_eq!(task.progress().completed(), 0);
+        assert!(matches!(
+            task.advance(1, generation),
+            Ok(PreviewAdvance::InProgress(progress)) if progress.completed() == 1
+        ));
+        assert_eq!(task.finish(generation), Err(ContractError::InvalidProgress));
+
+        let mut cancelled_before = Renderer::new()
+            .unwrap()
+            .preview_task(Arc::clone(&patterned), options, generation)
+            .unwrap();
+        cancelled_before.cancel();
+        assert_eq!(
+            cancelled_before.advance(1, generation),
+            Err(ContractError::Cancelled)
+        );
+        assert_eq!(cancelled_before.raster.pixels.capacity(), 0);
+
+        let mut cancelled_partial = Renderer::new()
+            .unwrap()
+            .preview_task(Arc::clone(&patterned), options, generation)
+            .unwrap();
+        cancelled_partial.advance(13, generation).unwrap();
+        cancelled_partial.cancel();
+        assert_eq!(
+            cancelled_partial.advance(1, generation),
+            Err(ContractError::Cancelled)
+        );
+        assert_eq!(cancelled_partial.raster.pixels.capacity(), 0);
+
+        let mut stale = Renderer::new()
+            .unwrap()
+            .preview_task(Arc::clone(&patterned), options, generation)
+            .unwrap();
+        stale.advance(13, generation).unwrap();
+        assert_eq!(
+            stale.advance(1, Generation::new(8)),
+            Err(ContractError::StaleGeneration)
+        );
+        assert_eq!(stale.raster.pixels.capacity(), 0);
+        assert_eq!(
+            stale.advance(1, generation),
+            Err(ContractError::StaleGeneration)
+        );
+
+        let mut complete = Renderer::new()
+            .unwrap()
+            .preview_task(patterned, options, generation)
+            .unwrap();
+        complete.advance(u64::MAX, generation).unwrap();
+        complete.cancel();
+        assert_eq!(complete.finish(generation), Err(ContractError::Cancelled));
     }
 }

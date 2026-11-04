@@ -56,9 +56,10 @@ benchmark settings, not quality or cross-platform performance guarantees.
 
 ## Frontend development
 
-The Rust processing crate now includes a pixel-budgeted sampling foundation
-with generation and cancellation checks at call boundaries. It is not exposed
-through WASM and does not make synchronous calls interruptible. The phase 3.1
+The Rust processing crate includes pixel-budgeted sampling and owned preview
+rendering tasks with generation and cancellation checks at call boundaries.
+Neither task is exposed through WASM, and neither makes synchronous setup
+operations interruptible. The phase 3.1
 frontend uses the pinned Node.js 24.15.0 toolchain in
 `frontend/.node-version`. Install and run its local checks from `frontend/`:
 

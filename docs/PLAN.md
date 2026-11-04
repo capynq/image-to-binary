@@ -593,8 +593,8 @@ Proposed commit title: `feat: make preview rendering incremental`
 
 Completion checklist:
 
-- [ ] Chunked preview matches synchronous output.
-- [ ] Cancellation and stale generations discard partial frames.
+- [x] Chunked preview matches synchronous output and an inverse-mapping oracle.
+- [x] Cancellation and stale generations discard partial frames.
 
 ##### 3.2.2.3 Add actual WASM bindings and build
 
@@ -613,10 +613,10 @@ Completion checklist:
 - [ ] Processing WASM builds and binding lifecycle tests pass.
 - [ ] Cancellation and generation behavior are verified through bindings.
 
-The remaining ordered work is defined in 3.2.2.2 and 3.2.2.3. This foundation
-does not add bindings, transferred buffers, or worker transport. Keep decoder-
-worker lifecycle out of these subphases; termination belongs to the lazy codec
-workers introduced in 4.2.
+The remaining ordered work is defined in 3.2.2.3. The Rust tasks in 3.2.2.1
+and 3.2.2.2 do not add bindings, transferred buffers, or worker transport.
+Keep decoder-worker lifecycle out of these subphases; termination belongs to
+the lazy codec workers introduced in 4.2.
 
 Acceptance checks for the complete parent phase: WASM bridge tests prove
 cancellation at chunk boundaries and preserve the shared deterministic source
