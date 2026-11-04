@@ -4,6 +4,7 @@ members = [
     "crates/processing",
     "crates/export",
     "crates/adapters",
+    "crates/wasm",
 ]
 resolver = "2"
 

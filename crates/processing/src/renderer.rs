@@ -134,6 +134,11 @@ impl RenderedFrame {
     pub fn pixels(&self) -> &[u8] {
         &self.pixels
     }
+    /// Consumes the frame and returns its RGBA8 pixels without copying.
+    #[must_use]
+    pub fn into_pixels(self) -> Vec<u8> {
+        self.pixels
+    }
 }
 
 /// Bounded glyph-cache accounting for diagnostics and acceptance checks.

@@ -1,0 +1,19 @@
+[package]
+name = "image-to-binary-wasm"
+version = "0.1.0"
+description = "WASM bindings for incremental image-to-binary preview processing"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+image-to-binary-core = { path = "../core" }
+image-to-binary-processing = { path = "../processing" }
+js-sys = "=0.3.105"
+wasm-bindgen = "=0.2.128"
+
+[lints]
+workspace = true

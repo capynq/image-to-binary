@@ -117,11 +117,28 @@ struct CacheKey {
     sampling: Sampling,
 }
 
+impl CacheKey {
+    fn of(grid: &SampleGrid) -> Self {
+        Self {
+            cell_width: grid.source_cell_width,
+            cell_height: grid.source_cell_height,
+            sampling: grid.sampling,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct CacheEntry {
     key: CacheKey,
     grid: Arc<SampleGrid>,
     bytes: u64,
+}
+
+/// Outcome of [`Sampler::prepare`]: a cache hit or a task that must be run.
+#[derive(Debug)]
+pub enum SamplingPlan {
+    Cached(Arc<SampleGrid>),
+    Task(Box<SamplingTask>),
 }
 
 /// Owns one immutable source and caches its sampled grids by geometry.
@@ -175,6 +192,100 @@ impl Sampler {
         )
     }
 
+    /// Returns a cached grid (refreshing its recency) or a new resumable task.
+    ///
+    /// # Errors
+    ///
+    /// Returns a settings, dimensions, arithmetic, or allocation error.
+    pub fn prepare(
+        &mut self,
+        cell_width: u8,
+        cell_height: u32,
+        sampling: Sampling,
+        generation: Generation,
+    ) -> Result<SamplingPlan, ContractError> {
+        let key = CacheKey {
+            cell_width,
+            cell_height,
+            sampling,
+        };
+        if let Some(grid) = self.lookup(key)? {
+            return Ok(SamplingPlan::Cached(grid));
+        }
+        self.task(cell_width, cell_height, sampling, generation)
+            .map(|task| SamplingPlan::Task(Box::new(task)))
+    }
+
+    /// Finishes a completed task from this sampler's source and admits its grid.
+    ///
+    /// Incomplete, cancelled, stale, or foreign-source tasks are never cached.
+    /// The task is validated first; if another task already cached the same
+    /// geometry, that entry's recency is refreshed and its existing `Arc` is
+    /// returned instead of admitting a duplicate.
+    ///
+    /// # Errors
+    ///
+    /// Returns a source-mismatch, generation, progress, or arithmetic error.
+    pub fn complete(
+        &mut self,
+        task: SamplingTask,
+        current_generation: Generation,
+    ) -> Result<Arc<SampleGrid>, ContractError> {
+        if !Arc::ptr_eq(&task.source, &self.source) {
+            return Err(ContractError::InvalidSettings("source"));
+        }
+        let grid = task.finish(current_generation)?;
+        if let Some(existing) = self.lookup(CacheKey::of(&grid))? {
+            return Ok(existing);
+        }
+        let grid = Arc::new(grid);
+        self.admit(&grid)?;
+        Ok(grid)
+    }
+
+    fn lookup(&mut self, key: CacheKey) -> Result<Option<Arc<SampleGrid>>, ContractError> {
+        let Some(position) = self.cache.iter().position(|entry| entry.key == key) else {
+            return Ok(None);
+        };
+        let entry = self
+            .cache
+            .remove(position)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        let grid = Arc::clone(&entry.grid);
+        self.cache.push_back(entry);
+        Ok(Some(grid))
+    }
+
+    fn admit(&mut self, grid: &Arc<SampleGrid>) -> Result<(), ContractError> {
+        let key = CacheKey::of(grid);
+        let bytes = u64::try_from(grid.cells.capacity())
+            .ok()
+            .and_then(|count| count.checked_mul(u64::try_from(size_of::<SampleCell>()).ok()?))
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        if self.cache_capacity != 0 && bytes <= self.cache_capacity {
+            while self.cache_bytes > self.cache_capacity - bytes {
+                if let Some(entry) = self.cache.pop_front() {
+                    self.cache_bytes = self
+                        .cache_bytes
+                        .checked_sub(entry.bytes)
+                        .ok_or(ContractError::ArithmeticOverflow)?;
+                } else {
+                    break;
+                }
+            }
+            self.cache_bytes = self
+                .cache_bytes
+                .checked_add(bytes)
+                .ok_or(ContractError::ArithmeticOverflow)?;
+            self.cache.push_back(CacheEntry {
+                key,
+                grid: Arc::clone(grid),
+                bytes,
+            });
+        }
+        Ok(())
+    }
+
     /// Samples the source using the requested geometry and returns a shared grid.
     ///
     /// Classic geometry uses floor division and nearest-neighbor center points.
@@ -221,52 +332,16 @@ impl Sampler {
         if !(5..=30).contains(&cell_width) {
             return Err(ContractError::InvalidSettings("cell_width"));
         }
-        let key = CacheKey {
-            cell_width,
-            cell_height,
-            sampling,
+        let generation = Generation::new(0);
+        let mut task = match self.prepare(cell_width, cell_height, sampling, generation)? {
+            SamplingPlan::Cached(grid) => return Ok(grid),
+            SamplingPlan::Task(task) => *task,
         };
-        if let Some(position) = self.cache.iter().position(|entry| entry.key == key) {
-            let entry = self
-                .cache
-                .remove(position)
-                .ok_or(ContractError::ArithmeticOverflow)?;
-            let grid = Arc::clone(&entry.grid);
-            self.cache.push_back(entry);
-            return Ok(grid);
-        }
-        let mut task = self.task(cell_width, cell_height, sampling, Generation::new(0))?;
         while matches!(
-            task.advance(u64::MAX, Generation::new(0))?,
+            task.advance(u64::MAX, generation)?,
             SamplingAdvance::InProgress(_)
         ) {}
-        let grid = Arc::new(task.finish(Generation::new(0))?);
-        let bytes = u64::try_from(grid.cells.capacity())
-            .ok()
-            .and_then(|count| count.checked_mul(u64::try_from(size_of::<SampleCell>()).ok()?))
-            .ok_or(ContractError::ArithmeticOverflow)?;
-        if self.cache_capacity != 0 && bytes <= self.cache_capacity {
-            while self.cache_bytes > self.cache_capacity - bytes {
-                if let Some(entry) = self.cache.pop_front() {
-                    self.cache_bytes = self
-                        .cache_bytes
-                        .checked_sub(entry.bytes)
-                        .ok_or(ContractError::ArithmeticOverflow)?;
-                } else {
-                    break;
-                }
-            }
-            self.cache_bytes = self
-                .cache_bytes
-                .checked_add(bytes)
-                .ok_or(ContractError::ArithmeticOverflow)?;
-            self.cache.push_back(CacheEntry {
-                key,
-                grid: Arc::clone(&grid),
-                bytes,
-            });
-        }
-        Ok(grid)
+        self.complete(task, generation)
     }
 }
 
@@ -1059,5 +1134,224 @@ mod tests {
             Err(ContractError::InvalidProgress)
         );
         assert_eq!(task.progress().completed(), 0);
+    }
+
+    fn cold_task(sampler: &mut Sampler, generation: Generation) -> SamplingTask {
+        match sampler
+            .prepare(5, 5, Sampling::Classic, generation)
+            .unwrap()
+        {
+            SamplingPlan::Task(task) => *task,
+            SamplingPlan::Cached(_) => panic!("expected a cache miss"),
+        }
+    }
+
+    fn run_to_completion(task: &mut SamplingTask, generation: Generation) {
+        while matches!(
+            task.advance(7, generation).unwrap(),
+            SamplingAdvance::InProgress(_)
+        ) {}
+    }
+
+    #[test]
+    fn prepare_and_complete_share_the_cache_with_synchronous_sampling() {
+        let source = source(20, 20, &[[1, 2, 3, 255]; 400]);
+        let mut sampler = Sampler::new(Arc::clone(&source));
+        let generation = Generation::new(3);
+        let mut task = cold_task(&mut sampler, generation);
+        run_to_completion(&mut task, generation);
+        let completed = sampler.complete(task, generation).unwrap();
+        let SamplingPlan::Cached(hit) = sampler
+            .prepare(5, 5, Sampling::Classic, Generation::new(4))
+            .unwrap()
+        else {
+            panic!("completed grid must be cached");
+        };
+        assert!(Arc::ptr_eq(&completed, &hit));
+        assert!(Arc::ptr_eq(
+            &completed,
+            &sampler.sample(5, Sampling::Classic).unwrap()
+        ));
+        let mut other = Sampler::new(source);
+        let grid = other.sample(5, Sampling::Average).unwrap();
+        assert!(matches!(
+            other.prepare(5, 5, Sampling::Average, generation),
+            Ok(SamplingPlan::Cached(hit)) if Arc::ptr_eq(&hit, &grid)
+        ));
+    }
+
+    #[test]
+    fn complete_rejects_foreign_sources_without_caching() {
+        let pixels = [[9, 8, 7, 255]; 400];
+        let mut sampler = Sampler::new(source(20, 20, &pixels));
+        let generation = Generation::new(1);
+        let mut foreign =
+            SamplingTask::new(source(20, 20, &pixels), 5, 5, Sampling::Classic, generation)
+                .unwrap();
+        run_to_completion(&mut foreign, generation);
+        assert_eq!(
+            sampler.complete(foreign, generation).unwrap_err(),
+            ContractError::InvalidSettings("source")
+        );
+        assert!(matches!(
+            sampler.prepare(5, 5, Sampling::Classic, generation),
+            Ok(SamplingPlan::Task(_))
+        ));
+    }
+
+    #[test]
+    fn complete_never_caches_incomplete_cancelled_stale_or_uncached_tasks() {
+        let source = source(20, 20, &[[1, 2, 3, 255]; 400]);
+        let mut sampler = Sampler::new(Arc::clone(&source));
+        let generation = Generation::new(2);
+        let mut partial = cold_task(&mut sampler, generation);
+        partial.advance(1, generation).unwrap();
+        assert_eq!(
+            sampler.complete(partial, generation).unwrap_err(),
+            ContractError::InvalidProgress
+        );
+        let mut cancelled = cold_task(&mut sampler, generation);
+        run_to_completion(&mut cancelled, generation);
+        cancelled.cancel();
+        assert_eq!(
+            sampler.complete(cancelled, generation).unwrap_err(),
+            ContractError::Cancelled
+        );
+        let mut stale = cold_task(&mut sampler, generation);
+        run_to_completion(&mut stale, generation);
+        assert_eq!(
+            sampler.complete(stale, Generation::new(3)).unwrap_err(),
+            ContractError::StaleGeneration
+        );
+        assert!(matches!(
+            sampler.prepare(5, 5, Sampling::Classic, generation),
+            Ok(SamplingPlan::Task(_))
+        ));
+        let mut disabled = Sampler::with_cache_capacity(source, 0);
+        let mut task = cold_task(&mut disabled, generation);
+        run_to_completion(&mut task, generation);
+        disabled.complete(task, generation).unwrap();
+        assert!(matches!(
+            disabled.prepare(5, 5, Sampling::Classic, generation),
+            Ok(SamplingPlan::Task(_))
+        ));
+    }
+
+    fn finished(
+        sampler: &Sampler,
+        cell_width: u8,
+        cell_height: u32,
+        sampling: Sampling,
+        generation: Generation,
+    ) -> SamplingTask {
+        let mut task = sampler
+            .task(cell_width, cell_height, sampling, generation)
+            .unwrap();
+        run_to_completion(&mut task, generation);
+        task
+    }
+
+    fn grid_bytes(grid: &SampleGrid) -> u64 {
+        u64::try_from(grid.cells.capacity()).unwrap()
+            * u64::try_from(size_of::<SampleCell>()).unwrap()
+    }
+
+    #[test]
+    fn duplicate_geometry_completions_share_one_cache_entry() {
+        let mut sampler = Sampler::new(source(20, 20, &[[1, 2, 3, 255]; 400]));
+        let generation = Generation::new(1);
+        let first_task = finished(&sampler, 5, 5, Sampling::Classic, generation);
+        let second_task = finished(&sampler, 5, 5, Sampling::Classic, generation);
+        let first = sampler.complete(first_task, generation).unwrap();
+        let second = sampler.complete(second_task, generation).unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(sampler.cache.len(), 1);
+        assert_eq!(sampler.cache_bytes, grid_bytes(&first));
+        assert_eq!(sampler.cache[0].bytes, grid_bytes(&first));
+        assert!(Arc::ptr_eq(&sampler.cache[0].grid, &first));
+        assert_eq!(Arc::strong_count(&first), 3);
+    }
+
+    #[test]
+    fn invalid_tasks_fail_before_a_duplicate_cache_hit() {
+        let pixels = [[1, 2, 3, 255]; 400];
+        let source = source(20, 20, &pixels);
+        let mut sampler = Sampler::new(Arc::clone(&source));
+        let generation = Generation::new(1);
+        let cached_task = finished(&sampler, 5, 5, Sampling::Classic, generation);
+        let cached = sampler.complete(cached_task, generation).unwrap();
+        let bytes = sampler.cache_bytes;
+
+        let mut partial = sampler.task(5, 5, Sampling::Classic, generation).unwrap();
+        partial.advance(1, generation).unwrap();
+        assert_eq!(
+            sampler.complete(partial, generation).unwrap_err(),
+            ContractError::InvalidProgress
+        );
+        let cancelled = finished(&sampler, 5, 5, Sampling::Classic, generation);
+        cancelled.cancel();
+        assert_eq!(
+            sampler.complete(cancelled, generation).unwrap_err(),
+            ContractError::Cancelled
+        );
+        let stale = finished(&sampler, 5, 5, Sampling::Classic, generation);
+        assert_eq!(
+            sampler.complete(stale, Generation::new(2)).unwrap_err(),
+            ContractError::StaleGeneration
+        );
+        let mut foreign =
+            SamplingTask::new(source_copy(&pixels), 5, 5, Sampling::Classic, generation).unwrap();
+        run_to_completion(&mut foreign, generation);
+        assert_eq!(
+            sampler.complete(foreign, generation).unwrap_err(),
+            ContractError::InvalidSettings("source")
+        );
+        assert_eq!(sampler.cache.len(), 1);
+        assert_eq!(sampler.cache_bytes, bytes);
+        assert!(Arc::ptr_eq(&sampler.cache[0].grid, &cached));
+    }
+
+    fn source_copy(pixels: &[[u8; 4]; 400]) -> Arc<DecodedSource> {
+        source(20, 20, pixels)
+    }
+
+    #[test]
+    fn duplicate_completion_refreshes_recency_for_lru_eviction() {
+        let source = source(20, 20, &[[1, 2, 3, 255]; 400]);
+        let bytes = grid_bytes(
+            &Sampler::new(Arc::clone(&source))
+                .sample(5, Sampling::Classic)
+                .unwrap(),
+        );
+        let mut sampler = Sampler::with_cache_capacity(source, bytes * 2);
+        let generation = Generation::new(1);
+        let tasks = [
+            finished(&sampler, 5, 5, Sampling::Classic, generation),
+            finished(&sampler, 5, 5, Sampling::Average, generation),
+            finished(&sampler, 5, 5, Sampling::Classic, generation),
+            finished(&sampler, 6, 6, Sampling::Average, generation),
+        ];
+        let [classic_task, average_task, duplicate_task, other_task] = tasks;
+        let classic = sampler.complete(classic_task, generation).unwrap();
+        sampler.complete(average_task, generation).unwrap();
+        let duplicate = sampler.complete(duplicate_task, generation).unwrap();
+        assert!(Arc::ptr_eq(&classic, &duplicate));
+        assert_eq!(sampler.cache.len(), 2);
+        assert_eq!(sampler.cache_bytes, bytes * 2);
+        let other = sampler.complete(other_task, generation).unwrap();
+        assert_eq!(sampler.cache.len(), 2);
+        assert_eq!(sampler.cache_bytes, bytes * 2);
+        assert!(matches!(
+            sampler.prepare(5, 5, Sampling::Classic, generation),
+            Ok(SamplingPlan::Cached(hit)) if Arc::ptr_eq(&hit, &classic)
+        ));
+        assert!(matches!(
+            sampler.prepare(6, 6, Sampling::Average, generation),
+            Ok(SamplingPlan::Cached(hit)) if Arc::ptr_eq(&hit, &other)
+        ));
+        assert!(matches!(
+            sampler.prepare(5, 5, Sampling::Average, generation),
+            Ok(SamplingPlan::Task(_))
+        ));
     }
 }

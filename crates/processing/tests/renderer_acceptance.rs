@@ -210,3 +210,15 @@ fn cache_zero_and_exact_single_mask_capacity_behave_as_bounded_cache() {
     assert_eq!(exact.cache_stats().entries(), 1);
     assert_eq!(exact.cache_stats().bytes(), one_mask_bytes);
 }
+
+#[test]
+fn into_pixels_moves_the_frame_buffer_without_copying() {
+    let grid = mixed_grid(3, 3);
+    let mut renderer = Renderer::new().unwrap();
+    let frame = renderer.render(&grid, options()).unwrap();
+    let copy = frame.pixels().to_vec();
+    let pointer = frame.pixels().as_ptr();
+    let pixels = frame.into_pixels();
+    assert_eq!(pixels, copy);
+    assert_eq!(pixels.as_ptr(), pointer);
+}

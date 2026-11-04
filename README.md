@@ -58,8 +58,8 @@ benchmark settings, not quality or cross-platform performance guarantees.
 
 The Rust processing crate includes pixel-budgeted sampling and owned preview
 rendering tasks with generation and cancellation checks at call boundaries.
-Neither task is exposed through WASM, and neither makes synchronous setup
-operations interruptible. The phase 3.1
+The `crates/wasm` session exposes both to WASM (see "WASM bindings"); neither
+makes synchronous setup operations interruptible. The phase 3.1
 frontend uses the pinned Node.js 24.15.0 toolchain in
 `frontend/.node-version`. Install and run its local checks from `frontend/`:
 
@@ -81,6 +81,61 @@ or run the Rust processing worker yet. Chromium checks passed at tested widths f
 through 2560 CSS px plus 640x360, and a WebKit rendered check passed.
 Firefox verification and the real React lifecycle browser probe remain
 unverified.
+
+## WASM bindings
+
+`crates/wasm` (`image-to-binary-wasm`) pins `wasm-bindgen =0.2.128` and
+`js-sys =0.3.105`; the generating `wasm-bindgen-cli` must be exactly 0.2.128.
+It exports one `ImageSession` that owns the normalized source, the sample
+cache, the renderer and at most one job, plus `PreviewFrame` and `JobStage`.
+It needs Rust 1.88.0 with the `wasm32-unknown-unknown` target and Node 24:
+
+```sh
+node crates/wasm/scripts/setup.mjs   # installs wasm-bindgen-cli 0.2.128 into .local/wasm-tools if absent
+node crates/wasm/scripts/build.mjs   # release wasm32 build + wasm-bindgen --target web into .local/wasm/pkg
+node crates/wasm/scripts/test.mjs    # native reference fixture, then node --test on the generated package
+cargo test -p image-to-binary-wasm --locked
+```
+
+Only `setup.mjs` installs anything, and only under `.local`; build and test
+never install. Explicit `CARGO_HOME`, `RUSTUP_HOME` and `PATH` win, with
+`.local` toolchains used as fallbacks. Generated output stays ignored.
+
+Contract and constraints:
+
+- `ImageSession.fromRgba(width, height, pixels)` (or `fromRgbaWithMaxPixels`)
+  validates numbers, the 50 MP ceiling, byte budget and exact length before
+  copying `pixels` once into WASM memory; JS may drop its array afterwards.
+  A 50 MP source needs about 200 MB in JS plus 200 MB in WASM at construction.
+- Numeric arguments must be JS numbers holding safe integers; null, booleans,
+  strings, NaN, fractions, negatives and out-of-range values are rejected,
+  never coerced. Generations must strictly increase (zero is valid first).
+- `startPreview` → `advance(generation, pixelBudget)` → `finish(generation)`.
+  Each advance works only in the current stage (`Sampling`, then `Preview`);
+  the call finishing a stage also performs non-interruptible setup but no
+  next-stage work. `cancel`, stale generations and terminal errors cannot be
+  revived; a newer generation can start. `dispose()` is idempotent; `free()`
+  invalidates the handle.
+- `finish` returns a frame once, only when `Ready`. `takePixels()` returns a
+  fresh `Uint8Array` copy (not a view into WASM memory) once. WASM linear
+  memory never shrinks, so released memory is reusable but not returned.
+  The copy is independent of later memory growth. `takePixels()` consumes the
+  pixel buffer, but the `PreviewFrame` wrapper still needs `free()`.
+- Errors are thrown `Error` objects named `ImageToBinaryError` with a `code`:
+  `invalid_argument`, `invalid_dimensions`, `invalid_settings`,
+  `invalid_progress`, `resource_limit_exceeded`, `arithmetic_overflow`,
+  `cancelled`, `stale_generation`, `disposed`, `no_job`, `job_incomplete`,
+  `frame_consumed`, `internal`.
+
+Scope: phases 3.2.2.3 and 3.2.2 are complete. Real normalized-RGBA bindings
+exist, validated by native tests, strict Clippy, formatting, the workspace
+wasm32 check, the target-web build and 18 Node tests covering source/grid
+validation, preview parity with native Rust references, cancellation,
+generations, copy semantics and typed declarations. The browser UI is still a
+demo fixture; worker transport, file import and the native shell are pending.
+No browser, Windows or Linux test coverage, deployment or performance claim is
+made; worker transport and browser proof remain phase 3.2.3, which is
+incomplete.
 
 ## Python reference behavior
 

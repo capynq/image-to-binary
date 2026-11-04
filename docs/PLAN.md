@@ -610,11 +610,12 @@ Proposed commit title: `feat: expose incremental processing to wasm`
 
 Completion checklist:
 
-- [ ] Processing WASM builds and binding lifecycle tests pass.
-- [ ] Cancellation and generation behavior are verified through bindings.
+- [x] Processing WASM builds and binding lifecycle tests pass.
+- [x] Cancellation and generation behavior are verified through bindings.
 
-The remaining ordered work is defined in 3.2.2.3. The Rust tasks in 3.2.2.1
-and 3.2.2.2 do not add bindings, transferred buffers, or worker transport.
+The Rust tasks in 3.2.2.1 and 3.2.2.2 added no bindings, transferred buffers,
+or worker transport; 3.2.2.3 added the real normalized-RGBA bindings. Worker
+transport remains in 3.2.3.
 Keep decoder-worker lifecycle out of these subphases; termination belongs to
 the lazy codec workers introduced in 4.2.
 
@@ -626,9 +627,9 @@ Proposed commit title: `feat: add incremental WASM processing bridge`
 
 Completion checklist:
 
-- [ ] WASM builds and bridge tests pass.
-- [ ] Cancellation is covered at cooperative chunk boundaries.
-- [ ] Deterministic source grid and settings are preserved.
+- [x] WASM builds and bridge tests pass.
+- [x] Cancellation is covered at cooperative chunk boundaries.
+- [x] Deterministic source grid and settings are preserved.
 
 #### 3.2.3 Add worker transport and browser proof
 

@@ -9,7 +9,7 @@ pub use renderer::{
     AspectGeometry, PreviewAdvance, PreviewTask, RenderError, RenderOptions, RenderedFrame,
     Renderer, RendererCacheStats,
 };
-pub use sampling::{SampleCell, SampleGrid, Sampler, SamplingAdvance, SamplingTask};
+pub use sampling::{SampleCell, SampleGrid, Sampler, SamplingAdvance, SamplingPlan, SamplingTask};
 
 use image_to_binary_core::{
     Cancellation, ContractError, Generation, Progress, Settings, SourceMetadata,

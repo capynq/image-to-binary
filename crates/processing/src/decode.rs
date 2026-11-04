@@ -53,6 +53,27 @@ impl DecodeLimits {
             max_decoded_bytes: 1024 * 1024 * 1024,
         }
     }
+
+    /// Returns the exact normalized RGBA8 byte length for `dimensions`.
+    ///
+    /// The pixel ceiling and decoded-byte budget are checked before the caller
+    /// allocates or copies pixels.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ContractError::ResourceLimitExceeded`] above either limit, or
+    /// an arithmetic error when the length is not representable.
+    pub fn rgba_len(self, dimensions: Dimensions) -> Result<usize, ContractError> {
+        self.resource.validate(dimensions)?;
+        let bytes = dimensions
+            .pixel_count()?
+            .checked_mul(4)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        if bytes > self.max_decoded_bytes {
+            return Err(ContractError::ResourceLimitExceeded);
+        }
+        usize::try_from(bytes).map_err(|_| ContractError::ResourceLimitExceeded)
+    }
 }
 
 /// An image decoded once and normalized to owned, orientation-corrected RGBA8.
@@ -63,6 +84,29 @@ pub struct DecodedSource {
 }
 
 impl DecodedSource {
+    /// Wraps already orientation-normalized, row-major RGBA8 pixels.
+    ///
+    /// Takes ownership of `pixels` without copying.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ContractError::ResourceLimitExceeded`] above the limits, or
+    /// [`ContractError::InvalidDimensions`] when `pixels.len()` is not exactly
+    /// four bytes per pixel.
+    pub fn from_rgba(
+        dimensions: Dimensions,
+        pixels: Vec<u8>,
+        limits: DecodeLimits,
+    ) -> Result<Self, ContractError> {
+        if limits.rgba_len(dimensions)? != pixels.len() {
+            return Err(ContractError::InvalidDimensions);
+        }
+        Ok(Self {
+            metadata: SourceMetadata::new(dimensions, 4)?,
+            pixels,
+        })
+    }
+
     /// Returns normalized source metadata.
     #[must_use]
     pub const fn metadata(&self) -> SourceMetadata {
@@ -346,5 +390,50 @@ mod tests {
             decode(&encoded(ImageFormat::Png), limits),
             Err(DecodeError::Contract(ContractError::ResourceLimitExceeded) | DecodeError::Image(_))
         ));
+    }
+
+    #[test]
+    fn from_rgba_takes_exact_pixels_and_rejects_bad_lengths_and_limits() {
+        let dimensions = Dimensions::new(2, 1).unwrap();
+        let pixels = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let source =
+            DecodedSource::from_rgba(dimensions, pixels.clone(), DecodeLimits::default()).unwrap();
+        assert_eq!(source.metadata().dimensions(), dimensions);
+        assert_eq!(source.metadata().channels(), 4);
+        assert_eq!(source.pixels(), pixels);
+        for length in [0, 7, 9] {
+            assert_eq!(
+                DecodedSource::from_rgba(dimensions, vec![0; length], DecodeLimits::default()),
+                Err(ContractError::InvalidDimensions)
+            );
+        }
+        let small_pixels =
+            DecodeLimits::new(ResourceLimits::new(1, 1024).unwrap(), 1024, 1024).unwrap();
+        assert_eq!(
+            DecodedSource::from_rgba(dimensions, vec![0; 8], small_pixels),
+            Err(ContractError::ResourceLimitExceeded)
+        );
+        let small_bytes = DecodeLimits::new(ResourceLimits::default(), 1024, 7).unwrap();
+        assert_eq!(
+            DecodedSource::from_rgba(dimensions, vec![0; 8], small_bytes),
+            Err(ContractError::ResourceLimitExceeded)
+        );
+    }
+
+    #[test]
+    fn rgba_len_enforces_the_fifty_megapixel_ceiling_without_allocating() {
+        let limits = DecodeLimits::default();
+        assert_eq!(
+            limits.rgba_len(Dimensions::new(10_000, 5_000).unwrap()),
+            Ok(200_000_000)
+        );
+        assert_eq!(
+            limits.rgba_len(Dimensions::new(10_000, 5_001).unwrap()),
+            Err(ContractError::ResourceLimitExceeded)
+        );
+        assert_eq!(
+            limits.rgba_len(Dimensions::new(u32::MAX, u32::MAX).unwrap()),
+            Err(ContractError::ResourceLimitExceeded)
+        );
     }
 }
