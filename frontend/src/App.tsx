@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useId, useState } from 'react'
+import { IMPORT_ACCEPT, IMPORT_GUIDANCE, formatBytes, useImportFlow } from './useImportFlow'
 import { useStudio } from './useStudio'
 
 type Theme = 'dark' | 'light'
@@ -18,7 +19,7 @@ function statusLabel(status: string): string {
     case 'idle':
       return 'Ready for an image'
     case 'importing':
-      return 'Loading demo fixture'
+      return 'Importing image'
     case 'processing':
       return 'Rendering preview'
     case 'exporting':
@@ -34,12 +35,10 @@ function statusLabel(status: string): string {
   }
 }
 
-function runAction(action: () => Promise<void>): void {
-  void action().catch(() => undefined)
-}
-
 export default function App() {
   const { controller, snapshot } = useStudio()
+  const flow = useImportFlow(controller)
+  const hintId = useId()
   const [theme, setTheme] = useState<Theme>(getInitialTheme)
   const [inspectorOpen, setInspectorOpen] = useState(true)
 
@@ -56,22 +55,48 @@ export default function App() {
   }, [theme])
 
   const hasSource = snapshot.metadata !== null
-  const hasPreview = snapshot.preview !== null
   const isBusy =
     snapshot.status === 'importing' ||
     snapshot.status === 'processing' ||
     snapshot.status === 'exporting'
   const settings = snapshot.settings
+  const isOriginal = flow.view === 'original'
+  const shown = isOriginal ? snapshot.original : snapshot.preview
+  const viewName = isOriginal ? 'original image' : 'artwork'
+  const errorMessage = flow.localError ?? (snapshot.status === 'error' ? snapshot.error : null)
+  const busyLabel =
+    snapshot.status === 'importing'
+      ? 'Importing image…'
+      : snapshot.status === 'processing'
+        ? 'Rendering preview…'
+        : 'Preparing export…'
 
   function updateSetting(key: 'cellSize' | 'fontSize' | 'threshold', value: string) {
     controller.updateSettings({ ...settings, [key]: Number(value) })
   }
 
   return (
-    <div className="app-shell">
+    <div
+      className={`app-shell ${flow.dragActive ? 'is-dragging' : ''}`}
+      onDragEnter={flow.onDragEnter}
+      onDragOver={flow.onDragOver}
+      onDragLeave={flow.onDragLeave}
+      onDrop={flow.onDrop}
+    >
       <a className="skip-link" href="#main-content">
         Skip to workspace
       </a>
+      <input
+        ref={flow.inputRef}
+        className="visually-hidden"
+        type="file"
+        name="image"
+        accept={IMPORT_ACCEPT}
+        tabIndex={-1}
+        aria-label="Choose an image file"
+        aria-describedby={hintId}
+        onChange={flow.onInputChange}
+      />
       <header className="app-header">
         <a className="brand" href="/" aria-label="Image to Binary home">
           <span className="brand-mark" aria-hidden="true">
@@ -80,14 +105,13 @@ export default function App() {
           <span>Image to Binary</span>
         </a>
         <div className="header-actions">
-          <button
-            className="button button-primary"
-            type="button"
-            onClick={() => runAction(() => controller.loadDemo())}
-          >
+          <button className="button button-primary" type="button" onClick={flow.openPicker}>
+            Open image
+          </button>
+          <button className="button button-secondary" type="button" onClick={flow.loadDemo}>
             Load demo
           </button>
-          <button className="button button-quiet" type="button" onClick={() => controller.reset()}>
+          <button className="button button-quiet" type="button" onClick={flow.reset}>
             Reset
           </button>
           <button
@@ -103,20 +127,60 @@ export default function App() {
 
       <main className="workspace" id="main-content">
         <section className="canvas-column" aria-labelledby="canvas-heading">
-          <div className="canvas-toolbar">
-            <div>
-              <p className="eyebrow">Artifact workspace</p>
-              <h1 id="canvas-heading">Artwork preview</h1>
+          <div className="canvas-head">
+            <div className="canvas-toolbar">
+              <div>
+                <p className="eyebrow">Artifact workspace</p>
+                <h1 id="canvas-heading">{isOriginal ? 'Original image' : 'Artwork preview'}</h1>
+              </div>
+              <div className="view-toggle" role="group" aria-label="Preview view">
+                <button
+                  type="button"
+                  className={isOriginal ? 'is-selected' : undefined}
+                  aria-pressed={isOriginal}
+                  disabled={!hasSource}
+                  onClick={() => flow.selectView('original')}
+                >
+                  Original
+                </button>
+                <button
+                  type="button"
+                  className={isOriginal ? undefined : 'is-selected'}
+                  aria-pressed={!isOriginal}
+                  disabled={!hasSource}
+                  onClick={() => flow.selectView('artwork')}
+                >
+                  Artwork
+                </button>
+              </div>
             </div>
+            {isBusy && (
+              <div className="busy-row">
+                <progress aria-label={busyLabel} />
+                <span>{busyLabel}</span>
+                <button className="button button-secondary" type="button" onClick={flow.cancel}>
+                  Cancel
+                </button>
+              </div>
+            )}
+            {errorMessage && (
+              <div className="error-panel" role="alert">
+                <p className="error-text">{errorMessage}</p>
+                <p className="error-guidance">{IMPORT_GUIDANCE}</p>
+                <button className="button button-secondary" type="button" onClick={flow.openPicker}>
+                  Choose another image
+                </button>
+              </div>
+            )}
           </div>
-          <div className={`artifact-frame ${hasPreview ? 'has-fixture' : ''}`}>
-            {hasPreview && snapshot.preview ? (
+          <div className={`artifact-frame ${shown ? 'has-fixture' : ''}`}>
+            {shown ? (
               <img
                 className="fixture-preview"
-                src={snapshot.preview.url}
-                alt="Binary artifact preview"
-                width={snapshot.preview.width}
-                height={snapshot.preview.height}
+                src={shown.url}
+                alt={isOriginal ? 'Original image' : 'Binary artwork preview'}
+                width={shown.width}
+                height={shown.height}
               />
             ) : (
               <div className="empty-canvas">
@@ -124,33 +188,56 @@ export default function App() {
                   ▦
                 </span>
                 <p>
-                  {hasSource
-                    ? 'Render the loaded image to see its artifact.'
-                    : 'Load a demo to place an image on the grid.'}
+                  {!hasSource
+                    ? 'Open an image or drop one anywhere in this window.'
+                    : isBusy
+                      ? `Preparing the ${viewName}…`
+                      : `The ${viewName} has not been rendered yet.`}
                 </p>
                 {!hasSource && (
+                  <div className="empty-actions">
+                    <button
+                      className="button button-primary"
+                      type="button"
+                      onClick={flow.openPicker}
+                    >
+                      Open image
+                    </button>
+                    <button
+                      className="button button-secondary"
+                      type="button"
+                      onClick={flow.loadDemo}
+                    >
+                      Load demo
+                    </button>
+                  </div>
+                )}
+                {hasSource && !isBusy && isOriginal && (
                   <button
                     className="button button-secondary"
                     type="button"
-                    onClick={() => runAction(() => controller.loadDemo())}
+                    onClick={() => flow.selectView('original')}
                   >
-                    Load demo
+                    Show original
                   </button>
                 )}
-                {hasSource && (
+                {hasSource && !isBusy && !isOriginal && (
                   <button
                     className="button button-secondary"
                     type="button"
-                    onClick={() => runAction(() => controller.preview())}
-                    disabled={isBusy}
+                    onClick={flow.renderArtwork}
                   >
-                    Render preview
+                    Render artwork
                   </button>
                 )}
               </div>
             )}
           </div>
-          <p className="canvas-caption">Rendered by the Rust engine in a background worker.</p>
+          <p className="canvas-caption" id={hintId}>
+            {flow.dragActive
+              ? 'Release to open this image.'
+              : 'Drop one BMP, GIF, JPEG, PNG, TIFF or WebP image anywhere in this window, or use Open image.'}
+          </p>
         </section>
 
         <aside
@@ -215,10 +302,10 @@ export default function App() {
               <button
                 className="button button-primary button-wide"
                 type="button"
-                onClick={() => runAction(() => controller.preview())}
+                onClick={flow.renderArtwork}
                 disabled={!hasSource || isBusy}
               >
-                {isBusy && snapshot.status === 'processing' ? 'Rendering…' : 'Render preview'}
+                {snapshot.status === 'processing' ? 'Rendering…' : 'Render artwork'}
               </button>
             </section>
             <section className="control-section" aria-labelledby="metadata-heading">
@@ -232,18 +319,32 @@ export default function App() {
                     <dd>{snapshot.metadata.name}</dd>
                   </div>
                   <div>
-                    <dt>Source size</dt>
+                    <dt>Dimensions</dt>
                     <dd>
                       {snapshot.metadata.width} × {snapshot.metadata.height} px
                     </dd>
                   </div>
+                  {snapshot.metadata.inputBytes !== undefined && (
+                    <div>
+                      <dt>File size</dt>
+                      <dd>{formatBytes(snapshot.metadata.inputBytes)}</dd>
+                    </div>
+                  )}
                   <div>
                     <dt>Source</dt>
-                    <dd>{snapshot.metadata.source}</dd>
+                    <dd>{snapshot.metadata.source === 'demo' ? 'Built-in demo' : 'Local file'}</dd>
                   </div>
+                  {snapshot.original && (
+                    <div>
+                      <dt>Original preview</dt>
+                      <dd>
+                        {snapshot.original.width} × {snapshot.original.height} px
+                      </dd>
+                    </div>
+                  )}
                   {snapshot.preview && (
                     <div>
-                      <dt>Preview size</dt>
+                      <dt>Artwork preview</dt>
                       <dd>
                         {snapshot.preview.width} × {snapshot.preview.height} px
                       </dd>
@@ -251,7 +352,7 @@ export default function App() {
                   )}
                 </dl>
               ) : (
-                <p className="section-help">Load an image to inspect its metadata.</p>
+                <p className="section-help">Open an image to inspect its metadata.</p>
               )}
             </section>
             <section className="control-section export-section" aria-labelledby="export-heading">
@@ -259,7 +360,7 @@ export default function App() {
                 <h2 id="export-heading">Export</h2>
               </div>
               <p className="section-help" id="export-help">
-                Export is not available yet. Text and PNG downloads arrive in later phases.
+                Export is not available yet.
               </p>
               <button
                 className="button button-secondary button-wide"
@@ -269,15 +370,6 @@ export default function App() {
               >
                 Export text
               </button>
-              {isBusy && (
-                <button
-                  className="button button-quiet button-wide"
-                  type="button"
-                  onClick={() => controller.cancel()}
-                >
-                  Cancel
-                </button>
-              )}
             </section>
           </div>
         </aside>
@@ -285,10 +377,8 @@ export default function App() {
 
       <footer className="status-bar" role="status" aria-live="polite">
         <span className={`status-dot ${hasSource ? 'is-active' : ''}`} aria-hidden="true" />
-        <span>{snapshot.error ?? statusLabel(snapshot.status)}</span>
-        <span className="status-note">
-          Rust worker renders a built-in demo image. File import and export come later.
-        </span>
+        <span>{statusLabel(snapshot.status)}</span>
+        <span className="status-note">Images are processed locally in your browser.</span>
       </footer>
     </div>
   )

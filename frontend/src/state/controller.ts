@@ -126,9 +126,13 @@ export function createStudioController(options: StudioControllerOptions = {}): S
   const fail = (operation: ActiveOperation, error: unknown): void => {
     if (isCurrent(operation)) {
       activeOperation = null
-      const message = error instanceof Error ? error.message : String(error)
-      const suffix = ownedImport === null ? '' : ' Previous image remains available.'
-      setSnapshot({ status: 'error', error: `${message}${suffix}`, progress: 0 })
+      const message = (error instanceof Error ? error.message : String(error)).trimEnd()
+      const separator = /[.!?…]$/.test(message) ? ' ' : '. '
+      const text =
+        ownedImport === null || message === ''
+          ? message
+          : `${message}${separator}Previous image remains available.`
+      setSnapshot({ status: 'error', error: text, progress: 0 })
     }
   }
 

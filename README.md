@@ -98,8 +98,7 @@ worker. It covered worker rendering, input buffer transfer, newest-generation
 cancellation, live UI heartbeats during processing, golden parity with the
 native reference, and real React StrictMode ownership transitions. Firefox,
 Windows and Linux remain unverified. No general performance guarantee is made.
-The import UI (3.3.4), PNG download (3.4) and
-text export (6.3) remain pending, so Export is disabled.
+PNG download (3.4) and text export (6.3) remain pending, so Export is disabled.
 
 Phases 3.3.3.1 and 3.3.3.2 connect encoded imports and bounded original-preview
 requests through the worker, adapter and controller. File reads are lazy,
@@ -116,7 +115,12 @@ verified transferred buffers, failed/cancelled/superseded replacement retention,
 bounded originals, and object-URL cleanup. A 3000x2000 source produced a
 1600x1066 original while timer and animation-frame heartbeats continued. These
 development-server probes do not claim production-bundle file-import coverage.
-The import UI remains in 3.3.4.
+Phase 3.3.4 adds the native file picker, whole-window single-file drop,
+Original/Artwork selection and metadata. Accepted imports open the bounded
+original automatically; failed or cancelled replacements preserve the current
+image and view. Local Chromium and WebKit checks cover keyboard controls,
+long names, narrow/short windows, both themes and production reflow at device
+scale 4. Manual screen-reader testing remains unavailable.
 
 ## WASM bindings
 
@@ -151,7 +155,7 @@ Contract and constraints:
   frame or page. Decoding is synchronous, and codec allocations are best
   effort. Node/WASM tests cover all six codecs, orientation, first page, stable
   error codes and buffer ownership. Worker and adapter wiring is implemented;
-  the browser file UI remains in 3.3.4.
+  the browser file UI is implemented in 3.3.4.
 - `startOriginalPreview(generation)` starts a bounded preview of the original
   image. It uses the same `advance`/`cancel`/`finish` lifecycle as
   `startPreview`, and generations are strictly increasing and shared across
@@ -162,7 +166,7 @@ Contract and constraints:
   at most 10.24 MB (1600 x 1600 x 4). Calls are synchronous, and a call already
   in progress is not preempted; cancellation and stale checks happen only at
   call boundaries. Worker API browser acceptance passed in 3.3.3.3; the import
-  UI remains in 3.3.4.
+  UI acceptance is complete in 3.3.4.
 - Numeric arguments must be JS numbers holding safe integers; null, booleans,
   strings, NaN, fractions, negatives and out-of-range values are rejected,
   never coerced. Generations must strictly increase (zero is valid first).
@@ -190,7 +194,7 @@ formatting, the workspace wasm32 check, the target-web build and 59 real Node
 binding tests covering codec/orientation fixtures, source/grid validation,
 preview parity, cancellation, generations, copy semantics and declarations.
 The worker and file adapter/controller consume these bindings, with browser
-acceptance complete in 3.3.3.3. Import UI (3.3.4), exports (3.4) and the native
+acceptance complete through the import UI in 3.3.4. Exports (3.4) and the native
 shell remain pending. No Firefox, Windows or Linux test coverage, deployment or
 performance claim is made.
 

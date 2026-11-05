@@ -676,9 +676,9 @@ Proposed commit title: `feat: add browser import and preview`
 
 Completion checklist:
 
-- [ ] Import and metadata tests pass.
-- [ ] Preview parity passes.
-- [ ] Loading, error, and cancellation states reviewed.
+- [x] Import and metadata tests pass.
+- [x] Preview parity passes.
+- [x] Loading, error, and cancellation states reviewed.
 
 #### 3.3.1 Add the encoded-image WASM boundary
 
@@ -933,10 +933,11 @@ Ordered steps:
    before editing components.
 2. Add an accessible file picker and drop target (keyboard operable, labeled,
    with a visible focus state and announced status) for the supported formats.
-3. Show metadata (name, dimensions, channels, size) with long file names kept
+3. Show metadata (name, normalized dimensions, encoded size) with long file names kept
    readable through wrapping or middle truncation with the full name
    available. Showing the detected format is a deferred metadata decision, not
-   a requirement here.
+   a requirement here. Normalized RGBA channel count stays an API detail because
+   it does not describe the original file's channels.
 4. Show loading, progress, readable and actionable errors, and a cancel
    control that stays usable during processing.
 5. Add the original/artwork selection on the shared source grid without
@@ -961,10 +962,20 @@ Proposed commit title: `feat: add browser import and preview selection`
 
 Completion checklist:
 
-- [ ] Picker, drop, and metadata tests pass.
-- [ ] Original/artwork selection and preview parity pass.
-- [ ] Real-browser desktop and narrow-width keyboard and accessibility
+- [x] Picker, drop, and metadata tests pass.
+- [x] Original/artwork selection and preview parity pass.
+- [x] Real-browser desktop and narrow-width keyboard and accessibility
   semantics reviewed; manual assistive-technology status reported.
+
+Validation: 184 frontend tests, formatting, type checking and production build
+pass. Local Chromium and WebKit cover picker/drop for nine native fixtures,
+same-file selection, original/artwork pixel parity, failed replacement and
+cancellation retention, keyboard controls and accessible names. Geometry checks
+cover 320–2560 CSS pixels, short windows, light/dark themes and 200% text;
+production checks cover a 320x200 viewport at device scale 4. This is reflow
+and device-scale evidence, not native browser zoom or physical display testing.
+Manual screen-reader testing, Firefox, Windows and Linux are unavailable.
+Evidence is stored locally under ignored `docs/reports/playwright/`.
 
 Parent 3.3 stays incomplete until 3.3.1 to 3.3.4 are all committed and its
 own checklist above is satisfied. PNG and text export belong to 3.4 and 6.3,
