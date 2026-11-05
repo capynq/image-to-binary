@@ -680,6 +680,176 @@ Completion checklist:
 - [ ] Preview parity passes.
 - [ ] Loading, error, and cancellation states reviewed.
 
+#### 3.3.1 Add the encoded-image WASM boundary
+
+Objective: let the browser hand encoded bytes of the six existing common
+codecs (BMP, GIF, JPEG, PNG, TIFF, WebP) to the existing Rust `decode` and get
+an orientation-normalized RGBA8 session or a stable error. No new codecs; extra
+HEIC/AVIF stays in 4.2.
+
+Ordered steps:
+
+1. Add a WASM entry point that takes a `Uint8Array` of encoded bytes and calls
+   the existing `image_to_binary_processing::decode` with `DecodeLimits`; do
+   not add a second decode path.
+2. Before copying, validate at runtime that the input is a `Uint8Array` and
+   that its encoded length is within the encoded-byte limit. Reject wrong-type
+   or oversized input with a coded error without copying.
+3. Copy into WASM memory with fallible allocation (`try_reserve_exact`), and
+   use fallible allocation for output buffers too. A failed reservation
+   returns a coded reservation-failure error instead of trapping. Decoder
+   limits are best effort: do not claim that every allocation made inside the
+   decoder is non-trapping.
+4. Detect the format only through the Rust decode, after the copy. Do not add
+   a duplicated JS format sniff or a JS format-detection requirement.
+5. Build the session from the `DecodedSource` without a second pixel copy, and
+   expose source metadata: post-orientation width, height, and channels. These
+   are sufficient. Exposing the detected format is optional, and whether the UI
+   shows it is a deferred metadata decision.
+6. Map `DecodeError` and `ContractError` variants to stable `ErrorCode`
+   strings, covering wrong input type, unsupported format, encoded too large,
+   malformed, resource limit, and reservation failure.
+7. Add real Node/WASM tests against the built package: all six codecs,
+   EXIF orientation dimension swap, malformed and truncated input, wrong-type
+   input, pixel, encoded-byte and decoded-byte limits, and caller buffer
+   ownership (the caller's array is not retained or mutated, and the session
+   works after the caller's buffer is detached or overwritten).
+
+Acceptance checks: each codec fixture decodes once to the expected normalized
+dimensions and channels; wrong-type or oversized input fails before any copy;
+input and output reservation failures return coded errors; every failure
+exposes a stable `code`; Rust fmt, clippy and tests, the WASM build, and the
+Node tests pass.
+
+Proposed commit title: `feat: add encoded-image wasm decode boundary`
+
+Completion checklist:
+
+- [ ] Six-codec, orientation, malformed, and limit tests pass in Node/WASM.
+- [ ] Type and size checks run before copying; input and output allocation is
+  fallible with a coded error; decoder limits are documented as best effort.
+- [ ] Error codes and ownership behavior are documented in Rustdoc and tested.
+
+#### 3.3.2 Add bounded original preview core and WASM
+
+Objective: produce a bounded original-image preview frame from a decoded
+session, so the browser never receives full-source pixels for display.
+
+Ordered steps:
+
+1. Add a core function that computes preview dimensions with a longest side of
+   at most 1600 pixels, using checked arithmetic, never upscaling, and keeping
+   the aspect ratio of the orientation-normalized source.
+2. Resample from the normalized source into a bounded RGBA8 buffer with a
+   fallible allocation, sized before allocating.
+3. Expose the preview through WASM as an owned frame that follows the
+   existing `PreviewFrame` take-once contract. Do not transfer or expose the
+   full source.
+4. Check cancellation and generation staleness at the start and end of the call
+   and at every internal boundary the work is split on. Document that a
+   synchronous decode or resample already in progress is not preempted.
+5. Add Rust unit tests and Node/WASM tests for the dimension math, aspect
+   ratio, orientation, small sources that stay unscaled, bounded output size,
+   frame ownership, and cancelled or stale rejection.
+
+Acceptance checks: output longest side is at most 1600 for every fixture
+including extreme aspect ratios; output size is bounded by the preview, not the
+source; the frame is owned and consumed once; stale and cancelled calls return
+stable errors; the docs make no claim of synchronous preemption.
+
+Proposed commit title: `feat: add bounded original preview frame`
+
+Completion checklist:
+
+- [ ] Dimension, aspect, and orientation tests pass in core and WASM.
+- [ ] No full-source transfer; output memory is bounded.
+- [ ] Cancellation and stale checks are tested at boundaries.
+
+#### 3.3.3 Add encoded worker import and adapter ownership
+
+Objective: move import through the processing worker and adapter so the
+encoded bytes, decoded session, and artifacts have one clear owner and
+lifecycle.
+
+Ordered steps:
+
+1. Transfer the encoded `ArrayBuffer` to the worker (transfer, not clone) and
+   define the import message and result types without binary payloads in JSON
+   state.
+2. Keep the scheduler's physical slot held through the synchronous decode
+   until it returns, so no other job runs on that worker in the meantime.
+3. Record source metadata and a source lifecycle state (empty, importing,
+   ready, failed, disposed) in the adapter, and dispose the previous session
+   only when a replacement is accepted.
+4. Free original and artwork preview artifacts (frames, bitmaps, object URLs)
+   on replace, failure, cancel, and dispose.
+5. Make late results, cancellation, and replacement requests return typed
+   errors that preserve the currently accepted source and its metadata.
+6. Add worker and adapter tests for transfer, slot retention, lifecycle
+   transitions, artifact cleanup, and the late, cancel and replacement error
+   cases.
+
+Acceptance checks: encoded bytes are detached on the sender after transfer; a
+failed, cancelled, or superseded import never disturbs the accepted source;
+artifacts are released in every terminal path; the frontend format check,
+type check, and unit tests pass.
+
+Proposed commit title: `feat: import encoded images in processing worker`
+
+Completion checklist:
+
+- [ ] Transfer and slot-retention tests pass.
+- [ ] Source lifecycle and artifact cleanup tests pass.
+- [ ] Late, cancel, and replacement errors preserve the accepted source.
+
+#### 3.3.4 Add import UI and original/artwork selection
+
+Objective: give users an accessible way to import an image and switch between
+the original and artwork views, validated in a real browser.
+
+Ordered steps:
+
+1. Use the local responsive and desktop UX skills for all product UI changes
+   before editing components.
+2. Add an accessible file picker and drop target (keyboard operable, labeled,
+   with a visible focus state and announced status) for the supported formats.
+3. Show metadata (name, dimensions, channels, size) with long file names kept
+   readable through wrapping or middle truncation with the full name
+   available. Showing the detected format is a deferred metadata decision, not
+   a requirement here.
+4. Show loading, progress, readable and actionable errors, and a cancel
+   control that stays usable during processing.
+5. Add the original/artwork selection on the shared source grid without
+   changing processing settings. Split, zoom, and pan stay in 7.2.
+6. Validate in a real browser at desktop and narrow widths: supported
+   fixtures import once, previews match the core golden fixtures, and
+   keyboard and accessibility semantics (roles, names, labels, focus order,
+   live-region announcements) are verified. Store screenshots and traces under
+   `docs/reports/`.
+7. Browser automation does not count as screen-reader testing. If no manual
+   assistive-technology (screen reader) run is available, report that
+   explicitly instead of claiming screen-reader tests passed.
+
+Acceptance checks: picker and drop both import each supported fixture exactly
+once; long names, errors, and cancellation are fully readable; controls remain
+usable while processing; keyboard operation and accessibility semantics are
+verified in the browser acceptance run; manual assistive-technology testing is
+either reported as done with its details or explicitly reported as
+unavailable; any unavailable browser environment is reported explicitly.
+
+Proposed commit title: `feat: add browser import and preview selection`
+
+Completion checklist:
+
+- [ ] Picker, drop, and metadata tests pass.
+- [ ] Original/artwork selection and preview parity pass.
+- [ ] Real-browser desktop and narrow-width keyboard and accessibility
+  semantics reviewed; manual assistive-technology status reported.
+
+Parent 3.3 stays incomplete until 3.3.1 to 3.3.4 are all committed and its
+own checklist above is satisfied. PNG and text export belong to 3.4 and 6.3,
+and extra HEIC/AVIF formats belong to 4.2.
+
 ### 3.4 Implement browser export and lifecycle
 
 Objective: export PNG in the browser while correctly resetting and disposing
