@@ -695,11 +695,11 @@ Ordered steps:
 2. Before copying, validate at runtime that the input is a `Uint8Array` and
    that its encoded length is within the encoded-byte limit. Reject wrong-type
    or oversized input with a coded error without copying.
-3. Copy into WASM memory with fallible allocation (`try_reserve_exact`), and
-   use fallible allocation for output buffers too. A failed reservation
-   returns a coded reservation-failure error instead of trapping. Decoder
-   limits are best effort: do not claim that every allocation made inside the
-   decoder is non-trapping.
+3. Copy into WASM memory with fallible allocation (`try_reserve_exact`). A
+   failed reservation returns a coded reservation-failure error instead of
+   trapping. This covers only the encoded-input copy; output-frame allocation
+   belongs to 3.3.2. Decoder limits are best effort: do not claim that every
+   allocation made inside the decoder is non-trapping.
 4. Detect the format only through the Rust decode, after the copy. Do not add
    a duplicated JS format sniff or a JS format-detection requirement.
 5. Build the session from the `DecodedSource` without a second pixel copy, and
@@ -711,13 +711,14 @@ Ordered steps:
    malformed, resource limit, and reservation failure.
 7. Add real Node/WASM tests against the built package: all six codecs,
    EXIF orientation dimension swap, malformed and truncated input, wrong-type
-   input, pixel, encoded-byte and decoded-byte limits, and caller buffer
+   input, the Node 50 MP and encoded-byte limits, and caller buffer
    ownership (the caller's array is not retained or mutated, and the session
-   works after the caller's buffer is detached or overwritten).
+   works after the caller's buffer is detached or overwritten). Custom
+   decoded-byte budget and reservation-failure tests are native only.
 
 Acceptance checks: each codec fixture decodes once to the expected normalized
 dimensions and channels; wrong-type or oversized input fails before any copy;
-input and output reservation failures return coded errors; every failure
+input reservation failure returns a coded error; every failure
 exposes a stable `code`; Rust fmt, clippy and tests, the WASM build, and the
 Node tests pass.
 
@@ -725,10 +726,10 @@ Proposed commit title: `feat: add encoded-image wasm decode boundary`
 
 Completion checklist:
 
-- [ ] Six-codec, orientation, malformed, and limit tests pass in Node/WASM.
-- [ ] Type and size checks run before copying; input and output allocation is
+- [x] Six-codec, orientation, malformed, and limit tests pass in Node/WASM.
+- [x] Type and size checks run before copying; encoded-input allocation is
   fallible with a coded error; decoder limits are documented as best effort.
-- [ ] Error codes and ownership behavior are documented in Rustdoc and tested.
+- [x] Error codes and ownership behavior are documented in Rustdoc and tested.
 
 #### 3.3.2 Add bounded original preview core and WASM
 

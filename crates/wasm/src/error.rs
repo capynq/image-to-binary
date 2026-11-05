@@ -3,7 +3,7 @@
 use std::fmt;
 
 use image_to_binary_core::ContractError;
-use image_to_binary_processing::RenderError;
+use image_to_binary_processing::{DecodeError, RenderError};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ErrorCode {
@@ -19,6 +19,10 @@ pub(crate) enum ErrorCode {
     NoJob,
     JobIncomplete,
     FrameConsumed,
+    EncodedTooLarge,
+    UnsupportedFormat,
+    DecodeFailed,
+    ReservationFailed,
     Internal,
 }
 
@@ -37,6 +41,10 @@ impl ErrorCode {
             Self::NoJob => "no_job",
             Self::JobIncomplete => "job_incomplete",
             Self::FrameConsumed => "frame_consumed",
+            Self::EncodedTooLarge => "encoded_too_large",
+            Self::UnsupportedFormat => "unsupported_format",
+            Self::DecodeFailed => "decode_failed",
+            Self::ReservationFailed => "reservation_failed",
             Self::Internal => "internal",
         }
     }
@@ -100,9 +108,38 @@ impl From<RenderError> for BindingError {
     }
 }
 
+impl From<DecodeError> for BindingError {
+    fn from(error: DecodeError) -> Self {
+        match error {
+            DecodeError::EncodedInputTooLarge => Self::new(
+                ErrorCode::EncodedTooLarge,
+                "encoded input exceeds the 256 MiB limit",
+            ),
+            DecodeError::UnsupportedFormat => Self::new(
+                ErrorCode::UnsupportedFormat,
+                "the image format is not supported",
+            ),
+            DecodeError::Contract(inner) => Self::from(inner),
+            DecodeError::ResourceLimit(diagnostic) => Self::new(
+                ErrorCode::ResourceLimitExceeded,
+                format!("the image exceeds a decoder resource limit: {diagnostic}"),
+            ),
+            DecodeError::Image(inner) => Self::new(
+                ErrorCode::DecodeFailed,
+                format!("the image data could not be decoded: {inner}"),
+            ),
+            DecodeError::Io(inner) => Self::new(
+                ErrorCode::DecodeFailed,
+                format!("the image data could not be read: {inner}"),
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image_to_binary_processing::{decode, DecodeLimits};
 
     #[test]
     fn contract_errors_map_to_stable_codes() {
@@ -118,6 +155,37 @@ mod tests {
             (ContractError::InvalidProgress, "invalid_progress"),
             (ContractError::Cancelled, "cancelled"),
             (ContractError::StaleGeneration, "stale_generation"),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(BindingError::from(error).code().as_str(), expected);
+        }
+    }
+
+    #[test]
+    fn decode_errors_map_to_stable_codes() {
+        let malformed =
+            decode(&[137, 80, 78, 71, 13, 10, 26, 10], DecodeLimits::default()).unwrap_err();
+        assert!(matches!(malformed, DecodeError::Image(_)));
+        let cases = [
+            (DecodeError::EncodedInputTooLarge, "encoded_too_large"),
+            (DecodeError::UnsupportedFormat, "unsupported_format"),
+            (
+                DecodeError::Contract(ContractError::ResourceLimitExceeded),
+                "resource_limit_exceeded",
+            ),
+            (
+                DecodeError::Contract(ContractError::InvalidDimensions),
+                "invalid_dimensions",
+            ),
+            (
+                DecodeError::Io(std::io::Error::other("read failed")),
+                "decode_failed",
+            ),
+            (
+                DecodeError::ResourceLimit(String::from("Memory limit exceeded")),
+                "resource_limit_exceeded",
+            ),
+            (malformed, "decode_failed"),
         ];
         for (error, expected) in cases {
             assert_eq!(BindingError::from(error).code().as_str(), expected);

@@ -1,15 +1,22 @@
-//! Writes native preview references (JSON, base64 RGBA8) for the WASM binding tests.
+//! Writes native preview references and generated encoded fixtures (JSON, base64)
+//! for the WASM binding tests.
 
 use std::error::Error;
 use std::fmt::Write as _;
 use std::fs;
+use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use image_to_binary_core::{Dimensions, Sampling};
+use image::codecs::gif::GifEncoder;
+use image::{Delay, DynamicImage, Frame, ImageBuffer, ImageFormat, Luma, Rgba};
+use image_to_binary_core::{ContractError, Dimensions, Sampling};
 use image_to_binary_processing::{
-    DecodeLimits, DecodedSource, RenderOptions, RenderedFrame, Renderer, Sampler,
+    decode, DecodeError, DecodeLimits, DecodedSource, RenderOptions, RenderedFrame, Renderer,
+    Sampler,
 };
+use tiff::encoder::colortype::RGB8;
+use tiff::encoder::TiffEncoder;
 
 struct Case {
     name: &'static str,
@@ -153,6 +160,183 @@ fn render_case(case: &Case, pixels: Vec<u8>) -> Result<Vec<(u8, RenderedFrame)>,
     Ok(frames)
 }
 
+const PREVIEW_CELL: u8 = 5;
+const PREVIEW_FONT: u8 = 10;
+const PREVIEW_THRESHOLD: u8 = 128;
+const ENCODED_WIDTH: u32 = 23;
+const ENCODED_HEIGHT: u32 = 17;
+const PAGE_SIZE: u32 = 10;
+const PIXEL_LIMIT_SIDE: u32 = 7072;
+
+struct Fixture {
+    name: &'static str,
+    bytes: Vec<u8>,
+    white_first: bool,
+}
+
+struct Rejected {
+    name: &'static str,
+    code: &'static str,
+    bytes: Vec<u8>,
+}
+
+fn encode(image: &DynamicImage, format: ImageFormat) -> Result<Vec<u8>, Box<dyn Error>> {
+    let mut output = Cursor::new(Vec::new());
+    image.write_to(&mut output, format)?;
+    Ok(output.into_inner())
+}
+
+fn exif_oriented(mut jpeg: Vec<u8>) -> Result<Vec<u8>, Box<dyn Error>> {
+    let exif = [
+        b'E', b'x', b'i', b'f', 0, 0, b'I', b'I', 42, 0, 8, 0, 0, 0, 1, 0, 0x12, 0x01, 3, 0, 1, 0,
+        0, 0, 6, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    let mut segment = vec![0xff, 0xe1, 0, u8::try_from(exif.len() + 2)?];
+    segment.extend_from_slice(&exif);
+    jpeg.splice(2..2, segment);
+    Ok(jpeg)
+}
+
+fn two_frame_gif() -> Result<Vec<u8>, Box<dyn Error>> {
+    let frame = |value: u8| {
+        Frame::from_parts(
+            ImageBuffer::from_pixel(PAGE_SIZE, PAGE_SIZE, Rgba([value, value, value, 255])),
+            0,
+            0,
+            Delay::from_numer_denom_ms(1, 1),
+        )
+    };
+    let mut output = Cursor::new(Vec::new());
+    GifEncoder::new(&mut output).encode_frames([frame(255), frame(0)])?;
+    Ok(output.into_inner())
+}
+
+fn two_page_tiff() -> Result<Vec<u8>, Box<dyn Error>> {
+    let pixels = usize::try_from(PAGE_SIZE * PAGE_SIZE * 3)?;
+    let mut output = Cursor::new(Vec::new());
+    let mut encoder = TiffEncoder::new(&mut output)?;
+    encoder.write_image::<RGB8>(PAGE_SIZE, PAGE_SIZE, &vec![255; pixels])?;
+    encoder.write_image::<RGB8>(PAGE_SIZE, PAGE_SIZE, &vec![0; pixels])?;
+    Ok(output.into_inner())
+}
+
+fn encoded_fixtures() -> Result<Vec<Fixture>, Box<dyn Error>> {
+    let image = DynamicImage::ImageRgba8(
+        ImageBuffer::from_raw(
+            ENCODED_WIDTH,
+            ENCODED_HEIGHT,
+            rgba(ENCODED_WIDTH, ENCODED_HEIGHT),
+        )
+        .ok_or("fixture pixels match the dimensions")?,
+    );
+    let mut fixtures = Vec::new();
+    for (name, format) in [
+        ("bmp", ImageFormat::Bmp),
+        ("gif", ImageFormat::Gif),
+        ("jpeg", ImageFormat::Jpeg),
+        ("png", ImageFormat::Png),
+        ("tiff", ImageFormat::Tiff),
+        ("webp", ImageFormat::WebP),
+    ] {
+        fixtures.push(Fixture {
+            name,
+            bytes: encode(&image, format)?,
+            white_first: false,
+        });
+    }
+    fixtures.push(Fixture {
+        name: "jpeg_exif_rotated",
+        bytes: exif_oriented(encode(&image, ImageFormat::Jpeg)?)?,
+        white_first: false,
+    });
+    fixtures.push(Fixture {
+        name: "gif_first_frame",
+        bytes: two_frame_gif()?,
+        white_first: true,
+    });
+    fixtures.push(Fixture {
+        name: "tiff_first_page",
+        bytes: two_page_tiff()?,
+        white_first: true,
+    });
+    Ok(fixtures)
+}
+
+fn rejected_fixtures(fixtures: &[Fixture]) -> Result<Vec<Rejected>, Box<dyn Error>> {
+    let png = fixtures
+        .iter()
+        .find(|fixture| fixture.name == "png")
+        .ok_or("png fixture exists")?;
+    let mut truncated = png.bytes.clone();
+    truncated.truncate(40);
+    if !matches!(
+        decode(&truncated, DecodeLimits::default()),
+        Err(DecodeError::Image(_))
+    ) {
+        return Err("truncated png must fail as a malformed image".into());
+    }
+    let oversized = DynamicImage::ImageLuma8(ImageBuffer::from_pixel(
+        PIXEL_LIMIT_SIDE,
+        PIXEL_LIMIT_SIDE,
+        Luma([0]),
+    ));
+    let oversized = encode(&oversized, ImageFormat::Png)?;
+    if !matches!(
+        decode(&oversized, DecodeLimits::default()),
+        Err(DecodeError::Contract(ContractError::ResourceLimitExceeded))
+    ) {
+        return Err("oversized png must exceed the pixel ceiling".into());
+    }
+    Ok(vec![
+        Rejected {
+            name: "truncated_png",
+            code: "decode_failed",
+            bytes: truncated,
+        },
+        Rejected {
+            name: "pixel_limit_png",
+            code: "resource_limit_exceeded",
+            bytes: oversized,
+        },
+    ])
+}
+
+fn preview_of(source: DecodedSource) -> Result<RenderedFrame, Box<dyn Error>> {
+    let mut sampler = Sampler::new(Arc::new(source));
+    let mut renderer = Renderer::new()?;
+    let grid = sampler.sample(PREVIEW_CELL, Sampling::Classic)?;
+    let options = RenderOptions {
+        cell_size: PREVIEW_CELL,
+        font_size: PREVIEW_FONT,
+        threshold: PREVIEW_THRESHOLD,
+        sampling: Sampling::Classic,
+        ..RenderOptions::default()
+    };
+    Ok(renderer.render_preview(&grid, options)?)
+}
+
+fn encoded_entry(fixture: &Fixture) -> Result<String, Box<dyn Error>> {
+    let source = decode(&fixture.bytes, DecodeLimits::default())?;
+    if fixture.white_first && source.pixels()[..4] != [255, 255, 255, 255] {
+        return Err(format!("{}: the first frame must be white", fixture.name).into());
+    }
+    let metadata = source.metadata();
+    let (width, height) = (
+        metadata.dimensions().width(),
+        metadata.dimensions().height(),
+    );
+    let channels = metadata.channels();
+    let preview = preview_of(source)?;
+    Ok(format!(
+        r#"{{"name":"{}","width":{width},"height":{height},"channels":{channels},"previewWidth":{},"previewHeight":{},"bytes":"{}","preview":"{}"}}"#,
+        fixture.name,
+        preview.width(),
+        preview.height(),
+        base64(&fixture.bytes),
+        base64(preview.pixels())
+    ))
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let path = std::env::args_os()
         .nth(1)
@@ -188,6 +372,27 @@ fn main() -> Result<(), Box<dyn Error>> {
             )?;
         }
         json.push_str("]}");
+    }
+    json.push_str("],\"encoded\":[");
+    let fixtures = encoded_fixtures()?;
+    for (index, fixture) in fixtures.iter().enumerate() {
+        if index > 0 {
+            json.push(',');
+        }
+        json.push_str(&encoded_entry(fixture)?);
+    }
+    json.push_str("],\"rejected\":[");
+    for (index, rejected) in rejected_fixtures(&fixtures)?.iter().enumerate() {
+        if index > 0 {
+            json.push(',');
+        }
+        write!(
+            json,
+            "{{\"name\":\"{}\",\"code\":\"{}\",\"bytes\":\"{}\"}}",
+            rejected.name,
+            rejected.code,
+            base64(&rejected.bytes)
+        )?;
     }
     json.push_str("]}");
     if let Some(parent) = path.parent() {

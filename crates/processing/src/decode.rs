@@ -129,6 +129,8 @@ pub enum DecodeError {
     UnsupportedFormat,
     /// A core dimension or allocation contract failed.
     Contract(ContractError),
+    /// The decoder reported that a configured dimension or allocation limit was exceeded.
+    ResourceLimit(String),
     /// The image crate rejected malformed or unsupported image data.
     Image(image::ImageError),
     /// The image reader could not inspect its input.
@@ -141,6 +143,7 @@ impl fmt::Display for DecodeError {
             Self::EncodedInputTooLarge => formatter.write_str("encoded input exceeds limit"),
             Self::UnsupportedFormat => formatter.write_str("unsupported image format"),
             Self::Contract(error) => error.fmt(formatter),
+            Self::ResourceLimit(diagnostic) => formatter.write_str(diagnostic),
             Self::Image(error) => error.fmt(formatter),
             Self::Io(error) => error.fmt(formatter),
         }
@@ -157,7 +160,10 @@ impl From<ContractError> for DecodeError {
 
 impl From<image::ImageError> for DecodeError {
     fn from(error: image::ImageError) -> Self {
-        Self::Image(error)
+        match error {
+            image::ImageError::Limits(limit) => Self::ResourceLimit(limit.to_string()),
+            other => Self::Image(other),
+        }
     }
 }
 
@@ -242,7 +248,13 @@ mod tests {
     use std::io::Cursor;
 
     use image::codecs::gif::GifEncoder;
-    use image::{Delay, DynamicImage, Frame, ImageBuffer, ImageFormat, Luma, LumaA, Rgba};
+    use image::error::{
+        ImageFormatHint, LimitError, LimitErrorKind, ParameterError, ParameterErrorKind,
+        UnsupportedError, UnsupportedErrorKind,
+    };
+    use image::{
+        Delay, DynamicImage, Frame, ImageBuffer, ImageError, ImageFormat, Luma, LumaA, Rgba,
+    };
     use tiff::encoder::colortype::RGB8;
     use tiff::encoder::TiffEncoder as RawTiffEncoder;
 
@@ -324,6 +336,10 @@ mod tests {
             decode(b"not-an-image", DecodeLimits::default()),
             Err(DecodeError::UnsupportedFormat | DecodeError::Image(_))
         ));
+        assert!(matches!(
+            decode(&[137, 80, 78, 71, 13, 10, 26, 10], DecodeLimits::default()),
+            Err(DecodeError::Image(_))
+        ));
         let limits = DecodeLimits::new(ResourceLimits::default(), 2, 1024 * 1024 * 1024).unwrap();
         assert!(matches!(
             decode(&[0; 3], limits),
@@ -341,7 +357,8 @@ mod tests {
         .unwrap();
         assert!(matches!(
             decode(&encoded(ImageFormat::Png), limits),
-            Err(DecodeError::Contract(ContractError::ResourceLimitExceeded) | DecodeError::Image(_))
+            Err(DecodeError::Contract(ContractError::ResourceLimitExceeded)
+                | DecodeError::ResourceLimit(_))
         ));
     }
 
@@ -388,7 +405,41 @@ mod tests {
         let limits = DecodeLimits::new(ResourceLimits::default(), 256 * 1024 * 1024, 4).unwrap();
         assert!(matches!(
             decode(&encoded(ImageFormat::Png), limits),
-            Err(DecodeError::Contract(ContractError::ResourceLimitExceeded) | DecodeError::Image(_))
+            Err(DecodeError::Contract(ContractError::ResourceLimitExceeded)
+                | DecodeError::ResourceLimit(_))
+        ));
+    }
+
+    #[test]
+    fn image_limit_errors_classify_as_resource_limits() {
+        for kind in [
+            LimitErrorKind::DimensionError,
+            LimitErrorKind::InsufficientMemory,
+        ] {
+            let source = ImageError::Limits(LimitError::from_kind(kind));
+            let expected = source.to_string();
+            let error = DecodeError::from(source);
+            assert!(matches!(&error, DecodeError::ResourceLimit(text) if *text == expected));
+            assert_eq!(error.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn non_limit_image_errors_stay_image_errors() {
+        let parameter = ImageError::Parameter(ParameterError::from_kind(
+            ParameterErrorKind::DimensionMismatch,
+        ));
+        assert!(matches!(
+            DecodeError::from(parameter),
+            DecodeError::Image(ImageError::Parameter(_))
+        ));
+        let unsupported = ImageError::Unsupported(UnsupportedError::from_format_and_kind(
+            ImageFormatHint::Unknown,
+            UnsupportedErrorKind::GenericFeature(String::from("feature")),
+        ));
+        assert!(matches!(
+            DecodeError::from(unsupported),
+            DecodeError::Image(ImageError::Unsupported(_))
         ));
     }
 

@@ -7,9 +7,11 @@
 use std::mem;
 use std::sync::Arc;
 
-use image_to_binary_core::{ContractError, Dimensions, Generation, ResourceLimits, Sampling};
+use image_to_binary_core::{
+    ContractError, Dimensions, Generation, ResourceLimits, Sampling, SourceMetadata,
+};
 use image_to_binary_processing::{
-    DecodeLimits, DecodedSource, PreviewAdvance, PreviewTask, RenderOptions, RenderedFrame,
+    decode, DecodeLimits, DecodedSource, PreviewAdvance, PreviewTask, RenderOptions, RenderedFrame,
     Renderer, Sampler, SamplingAdvance, SamplingPlan, SamplingTask,
 };
 
@@ -115,6 +117,51 @@ impl SourcePlan {
             pixels,
             self.limits,
         )?)
+    }
+}
+
+fn reserve_zeroed(len: usize) -> Result<Vec<u8>, BindingError> {
+    let mut buffer = Vec::new();
+    buffer.try_reserve_exact(len).map_err(|_| {
+        BindingError::new(
+            ErrorCode::ReservationFailed,
+            "could not reserve memory for the encoded input",
+        )
+    })?;
+    buffer.resize(len, 0);
+    Ok(buffer)
+}
+
+/// Validated encoded-input length; the 256 MiB ceiling is checked before any
+/// byte is copied into WASM memory.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct EncodedPlan {
+    len: usize,
+}
+
+impl EncodedPlan {
+    pub(crate) fn new(len: usize) -> Result<Self, BindingError> {
+        if u64::try_from(len).unwrap_or(u64::MAX) > MAX_ENCODED_BYTES {
+            return Err(BindingError::new(
+                ErrorCode::EncodedTooLarge,
+                "encoded input exceeds the 256 MiB limit",
+            ));
+        }
+        Ok(Self { len })
+    }
+
+    /// Reserves the zeroed destination fallibly; failure is a coded error, not a trap.
+    pub(crate) fn allocate(self) -> Result<Vec<u8>, BindingError> {
+        reserve_zeroed(self.len)
+    }
+
+    /// Decodes once with the default limits and moves the normalized pixels into
+    /// a session without cloning them. The encoded copy is dropped before the
+    /// session is built. Decoder allocations are best effort.
+    pub(crate) fn decode_session(encoded: Vec<u8>) -> Result<Session, BindingError> {
+        let source = decode(&encoded, DecodeLimits::default())?;
+        drop(encoded);
+        Session::new(source)
     }
 }
 
@@ -296,6 +343,7 @@ impl Job {
 
 #[derive(Debug)]
 struct Live {
+    metadata: SourceMetadata,
     sampler: Sampler,
     renderer: Renderer,
     job: Option<Job>,
@@ -418,9 +466,12 @@ pub(crate) struct Session {
 }
 
 impl Session {
+    /// Takes ownership of `source`; its pixels are moved, never cloned.
     pub(crate) fn new(source: DecodedSource) -> Result<Self, BindingError> {
+        let metadata = source.metadata();
         Ok(Self {
             live: Some(Live {
+                metadata,
                 sampler: Sampler::new(Arc::new(source)),
                 renderer: Renderer::new()?,
                 job: None,
@@ -487,6 +538,11 @@ impl Session {
     pub(crate) fn progress(&self) -> Result<(u64, u64), BindingError> {
         let live = self.live_ref()?;
         Ok(live.job.as_ref().map_or((0, 0), |job| job.phase.progress()))
+    }
+
+    /// Returns the immutable post-orientation metadata, or `disposed`.
+    pub(crate) fn source_metadata(&self) -> Result<SourceMetadata, BindingError> {
+        Ok(self.live_ref()?.metadata)
     }
 }
 
@@ -795,5 +851,68 @@ mod tests {
         let mut frame = drive(&mut session, 6.0, MAX_SAFE);
         let expected = reference(41, 29, 5, 10, 128, Sampling::Classic);
         assert_eq!(frame.take_pixels().unwrap(), expected.pixels());
+    }
+
+    fn bmp_1x2() -> Vec<u8> {
+        let mut bytes = b"BM".to_vec();
+        for value in [62_u32, 0, 54, 40] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes.extend_from_slice(&1_i32.to_le_bytes());
+        bytes.extend_from_slice(&2_i32.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&24_u16.to_le_bytes());
+        for value in [0_u32, 8, 2835, 2835, 0, 0] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes.extend_from_slice(&[30, 20, 10, 0, 60, 50, 40, 0]);
+        bytes
+    }
+
+    #[test]
+    fn encoded_plan_checks_the_ceiling_before_allocating() {
+        let ceiling = usize::try_from(MAX_ENCODED_BYTES).unwrap();
+        assert_eq!(
+            code(EncodedPlan::new(ceiling + 1)),
+            ErrorCode::EncodedTooLarge
+        );
+        assert_eq!(
+            code(EncodedPlan::new(usize::MAX)),
+            ErrorCode::EncodedTooLarge
+        );
+        assert_eq!(EncodedPlan::new(ceiling).unwrap().len, ceiling);
+        assert_eq!(EncodedPlan::new(3).unwrap().allocate().unwrap(), vec![0; 3]);
+        assert_eq!(
+            code(reserve_zeroed(usize::MAX)),
+            ErrorCode::ReservationFailed
+        );
+    }
+
+    #[test]
+    fn encoded_sessions_expose_normalized_metadata_until_disposed() {
+        let mut session = EncodedPlan::decode_session(bmp_1x2()).unwrap();
+        let metadata = session.source_metadata().unwrap();
+        assert_eq!(metadata.dimensions(), Dimensions::new(1, 2).unwrap());
+        assert_eq!(metadata.channels(), 4);
+        session.dispose();
+        assert_eq!(code(session.source_metadata()), ErrorCode::Disposed);
+        assert_eq!(code(session.source_metadata()), ErrorCode::Disposed);
+        let rgba = new_session(7, 3).source_metadata().unwrap();
+        assert_eq!(rgba.dimensions(), Dimensions::new(7, 3).unwrap());
+        assert_eq!(rgba.channels(), 4);
+    }
+
+    #[test]
+    fn encoded_failures_use_stable_codes_and_build_no_session() {
+        assert_eq!(
+            code(EncodedPlan::decode_session(b"%PDF-1.7".to_vec())),
+            ErrorCode::UnsupportedFormat
+        );
+        let mut truncated = bmp_1x2();
+        truncated.truncate(30);
+        assert_eq!(
+            code(EncodedPlan::decode_session(truncated)),
+            ErrorCode::DecodeFailed
+        );
     }
 }

@@ -1,8 +1,10 @@
 //! WASM bindings exposing one incremental, cancellable preview session.
 //!
 //! Source pixels, sample grids, glyph masks and raster buffers stay private to
-//! the session. Every fallible export throws an `Error` whose `code` property
-//! is a stable machine-readable string; failures are never reported as traps.
+//! the session. Sources enter as RGBA8 or as encoded BMP, GIF, JPEG, PNG, TIFF
+//! and WebP bytes. Every fallible export throws an `Error` whose `code` property
+//! is a stable machine-readable string; binding failures are never reported as
+//! traps, but allocations made inside codecs are best effort.
 
 mod error;
 mod numbers;
@@ -13,7 +15,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::error::{BindingError, ErrorCode};
 use crate::numbers::js_count;
-use crate::session::{Frame, Session, SourcePlan, Stage};
+use crate::session::{EncodedPlan, Frame, Session, SourcePlan, Stage};
 
 fn to_js(error: &BindingError) -> JsValue {
     let js_error = JsError::new(error.message());
@@ -57,6 +59,19 @@ fn build_session(
     pixels: &Uint8Array,
 ) -> Result<ImageSession, JsValue> {
     lift(copy_source(plan, pixels)).map(|inner| ImageSession { inner })
+}
+
+fn copy_encoded(bytes: &Uint8Array) -> Result<Session, BindingError> {
+    if !bytes.is_instance_of::<Uint8Array>() {
+        return Err(BindingError::new(
+            ErrorCode::InvalidArgument,
+            "bytes must be a Uint8Array",
+        ));
+    }
+    let plan = EncodedPlan::new(usize::try_from(bytes.length()).unwrap_or(usize::MAX))?;
+    let mut buffer = plan.allocate()?;
+    bytes.copy_to(&mut buffer);
+    EncodedPlan::decode_session(buffer)
 }
 
 /// Position of the current job in the sampling then preview pipeline.
@@ -156,6 +171,60 @@ impl ImageSession {
             SourcePlan::new(number(width), number(height), Some(number(max_pixels))),
             pixels,
         )
+    }
+
+    /// Decodes BMP, GIF, JPEG, PNG, TIFF or WebP bytes with the Rust decoder and
+    /// builds a session from the orientation-normalized RGBA8 result.
+    ///
+    /// The runtime type and the 256 MiB length ceiling are checked before any
+    /// byte is copied. `bytes` is then copied once into fallibly reserved WASM
+    /// memory; the caller's array is never retained or mutated and the copy is
+    /// freed before the session is returned. Decoded pixels are moved into the
+    /// session, not cloned. GIF and TIFF yield their first frame or page.
+    ///
+    /// Decoding is synchronous and runs to completion: it cannot be cancelled or
+    /// preempted mid-call. The 50 MP and 1 GiB decoded-byte ceilings are checked
+    /// from headers before pixels are allocated, but allocations made inside
+    /// codecs are best effort and may still trap on out-of-memory.
+    ///
+    /// # Errors
+    ///
+    /// Throws `invalid_argument`, `encoded_too_large`, `reservation_failed`,
+    /// `unsupported_format`, `decode_failed`, `invalid_dimensions` or
+    /// `resource_limit_exceeded`.
+    #[wasm_bindgen(js_name = fromEncoded)]
+    pub fn from_encoded(bytes: &Uint8Array) -> Result<ImageSession, JsValue> {
+        lift(copy_encoded(bytes)).map(|inner| ImageSession { inner })
+    }
+
+    /// Immutable post-orientation source width in pixels.
+    ///
+    /// # Errors
+    ///
+    /// Throws `disposed`.
+    #[wasm_bindgen(getter, js_name = sourceWidth)]
+    pub fn source_width(&self) -> Result<u32, JsValue> {
+        lift(self.inner.source_metadata()).map(|metadata| metadata.dimensions().width())
+    }
+
+    /// Immutable post-orientation source height in pixels.
+    ///
+    /// # Errors
+    ///
+    /// Throws `disposed`.
+    #[wasm_bindgen(getter, js_name = sourceHeight)]
+    pub fn source_height(&self) -> Result<u32, JsValue> {
+        lift(self.inner.source_metadata()).map(|metadata| metadata.dimensions().height())
+    }
+
+    /// Normalized source channel count (always 4, RGBA8).
+    ///
+    /// # Errors
+    ///
+    /// Throws `disposed`.
+    #[wasm_bindgen(getter, js_name = sourceChannels)]
+    pub fn source_channels(&self) -> Result<u8, JsValue> {
+        lift(self.inner.source_metadata()).map(image_to_binary_core::SourceMetadata::channels)
     }
 
     /// Starts a job superseding any current one. `generation` must exceed every

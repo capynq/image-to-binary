@@ -127,6 +127,15 @@ Contract and constraints:
   validates numbers, the 50 MP ceiling, byte budget and exact length before
   copying `pixels` once into WASM memory; JS may drop its array afterwards.
   A 50 MP source needs about 200 MB in JS plus 200 MB in WASM at construction.
+- `ImageSession.fromEncoded(bytes)` decodes BMP, GIF, JPEG, PNG, TIFF or WebP
+  bytes with the Rust decoder. The getters `sourceWidth`, `sourceHeight` and
+  `sourceChannels` return post-orientation metadata (channels is always 4).
+  The type and 256 MiB length are checked before the single fallible copy, and
+  the caller's array is never retained or mutated. GIF and TIFF use the first
+  frame or page. Decoding is synchronous, and codec allocations are best
+  effort. Node/WASM tests cover all six codecs, orientation, first page, stable
+  error codes and buffer ownership. The browser file UI remains 3.3.3/3.3.4 and
+  the bounded original preview remains 3.3.2.
 - Numeric arguments must be JS numbers holding safe integers; null, booleans,
   strings, NaN, fractions, negatives and out-of-range values are rejected,
   never coerced. Generations must strictly increase (zero is valid first).
