@@ -1006,6 +1006,118 @@ Completion checklist:
 - [ ] Reset/replacement lifecycle tests pass.
 - [ ] Resource cleanup reviewed.
 
+#### 3.4.1 Render artwork in bounded rows
+
+Objective: reuse the deterministic sampled grid and glyph composition for
+export without allocating a full output RGBA frame.
+
+Ordered steps:
+
+1. Extract shared pixel composition behind the existing renderer contract.
+2. Add an owned row renderer with checked dimensions and bounded row storage.
+3. Compare concatenated rows byte-for-byte with existing rendering fixtures;
+   cover partial cells, alpha, invalid dimensions and cancellation boundaries.
+
+Acceptance checks: existing preview pixels are unchanged; row output matches
+the full renderer; allocations are bounded by row width rather than height.
+
+Proposed commit title: `feat: add bounded artwork row rendering`
+
+Completion checklist:
+
+- [ ] Row parity and failure-contract tests pass.
+- [ ] Formatting, strict Clippy and focused processing tests pass.
+- [ ] Independent review confirms shared composition and bounded storage.
+
+#### 3.4.2 Encode PNG incrementally
+
+Objective: retain a PNG encoder across bounded advances and drain owned encoded
+chunks without retaining a full rendered frame.
+
+Ordered steps:
+
+1. Combine row rendering with the pinned encoder's owned stream writer.
+2. Encapsulate sink ownership and draining; enforce encoded-byte and row budgets.
+3. Test decoded pixel parity, finalization, cancellation and sink failures.
+
+Acceptance checks: each advance obeys its documented row budget; terminal jobs
+release resources; completed chunks move out once; encoded storage limits are
+explicit. Browser Blob accumulation retains encoded bytes and is not constant
+memory. Encoding within one row remains synchronous.
+
+Proposed commit title: `feat: add incremental PNG export task`
+
+Completion checklist:
+
+- [ ] Pixel parity, chunk ownership and failure tests pass.
+- [ ] Formatting, strict Clippy and focused export tests pass.
+- [ ] Independent ownership and resource review passes.
+
+#### 3.4.3 Expose export through WASM
+
+Objective: expose generation-bound incremental export and owned binary chunks.
+
+Ordered steps:
+
+1. Add typed export start, advance, drain and finish contracts with stable errors.
+2. Share generation/cancellation ownership with original and artwork previews.
+3. Verify actual Node/WASM parity, declarations, stale jobs and copied chunks.
+
+Acceptance checks: no binary payload enters JSON state; disposed or superseded
+jobs cannot publish; drained arrays remain valid after subsequent WASM calls.
+
+Proposed commit title: `feat: expose incremental PNG export to wasm`
+
+Completion checklist:
+
+- [ ] Native and actual WASM parity/lifecycle tests pass.
+- [ ] Target build, declarations and static checks pass.
+- [ ] Independent boundary review passes.
+
+#### 3.4.4 Transfer export chunks through the worker
+
+Objective: schedule export in the existing single physical processing slot.
+
+Ordered steps:
+
+1. Add typed chunk messages and transfer owned buffers with bounded advances.
+2. Accumulate encoded chunks into an adapter-owned Blob with explicit limits.
+3. Test replacement, cancel, reset, disposal and stale chunk cleanup.
+
+Acceptance checks: newest-job semantics remain intact; no stale Blob publishes;
+preview and export use the same accepted source and settings snapshot.
+
+Proposed commit title: `feat: add worker PNG export transport`
+
+Completion checklist:
+
+- [ ] Scheduler, transfer and Blob lifecycle tests pass.
+- [ ] Frontend formatting, types and production build pass.
+- [ ] Independent transport/ownership review passes.
+
+#### 3.4.5 Add PNG download and browser acceptance
+
+Objective: expose accessible PNG download with explicit object-URL ownership.
+
+Ordered steps:
+
+1. Add export progress, cancellation, actionable failure and download controls.
+2. Release download URLs on replacement, reset and disposal.
+3. Validate actual downloaded PNG pixels, keyboard operation, responsive layout
+   and repeated import/export cleanup in available browser engines.
+
+Acceptance checks: downloaded pixels match native fixtures; reset removes
+exportable state; resource counters stabilize across repeated operations.
+Report unavailable browser, native and assistive-technology environments.
+
+Proposed commit title: `feat: add browser PNG download`
+
+Completion checklist:
+
+- [ ] Real-browser download parity and lifecycle acceptance pass.
+- [ ] Responsive and keyboard review passes.
+- [ ] README status and parent 3.4 checklist reflect verified evidence.
+
 ### 4.1 Add native HEIC/AVIF dependencies and build scripts
 
 Objective: make native HEIC/AVIF decoding explicit, pinned, and reproducible.
