@@ -97,9 +97,8 @@ both the development server and the production bundle with the real Rust
 worker. It covered worker rendering, input buffer transfer, newest-generation
 cancellation, live UI heartbeats during processing, golden parity with the
 native reference, and real React StrictMode ownership transitions. Firefox,
-Windows and Linux remain unverified. The earlier WebKit layout check predates
-worker integration and is not proof of current worker behavior. No general
-performance guarantee is made. The import UI (3.3.4), PNG download (3.4) and
+Windows and Linux remain unverified. No general performance guarantee is made.
+The import UI (3.3.4), PNG download (3.4) and
 text export (6.3) remain pending, so Export is disabled.
 
 Phases 3.3.3.1 and 3.3.3.2 connect encoded imports and bounded original-preview
@@ -108,8 +107,16 @@ encoded buffers are transferred, and decode yields before publishing its
 source so queued cancellation can be observed. The controller owns original
 and artwork previews independently: settings invalidate artwork only, and
 failed replacements retain the accepted source and both previews. The 184
-frontend tests cover these contracts. Complete browser acceptance (3.3.3.3)
-and the import UI (3.3.4) remain pending.
+frontend tests cover these contracts.
+
+Phase 3.3.3 browser acceptance passed through the real worker APIs in local
+Chromium and WebKit: nine existing native fixtures matched original/artwork
+pixels, including rotated JPEG and first-frame/page GIF/TIFF. The probes also
+verified transferred buffers, failed/cancelled/superseded replacement retention,
+bounded originals, and object-URL cleanup. A 3000x2000 source produced a
+1600x1066 original while timer and animation-frame heartbeats continued. These
+development-server probes do not claim production-bundle file-import coverage.
+The import UI remains in 3.3.4.
 
 ## WASM bindings
 
@@ -154,8 +161,8 @@ Contract and constraints:
   `Arc` decoded source and never clones the full source. Output reservation is
   at most 10.24 MB (1600 x 1600 x 4). Calls are synchronous, and a call already
   in progress is not preempted; cancellation and stale checks happen only at
-  call boundaries. Browser acceptance (3.3.3.3) and the import UI (3.3.4)
-  remain pending.
+  call boundaries. Worker API browser acceptance passed in 3.3.3.3; the import
+  UI remains in 3.3.4.
 - Numeric arguments must be JS numbers holding safe integers; null, booleans,
   strings, NaN, fractions, negatives and out-of-range values are rejected,
   never coerced. Generations must strictly increase (zero is valid first).
@@ -182,9 +189,9 @@ Scope: phase 3.2 and the encoded-source and original-preview bindings in
 formatting, the workspace wasm32 check, the target-web build and 59 real Node
 binding tests covering codec/orientation fixtures, source/grid validation,
 preview parity, cancellation, generations, copy semantics and declarations.
-The worker and file adapter/controller consume these bindings. Browser
-acceptance (3.3.3.3), import UI (3.3.4), exports (3.4) and the native shell
-remain pending. No Firefox, Windows or Linux test coverage, deployment or
+The worker and file adapter/controller consume these bindings, with browser
+acceptance complete in 3.3.3.3. Import UI (3.3.4), exports (3.4) and the native
+shell remain pending. No Firefox, Windows or Linux test coverage, deployment or
 performance claim is made.
 
 ## Python reference behavior

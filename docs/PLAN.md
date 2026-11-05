@@ -803,9 +803,9 @@ Proposed commit title: `feat: import encoded images in processing worker`
 
 Completion checklist:
 
-- [ ] Transfer and slot-retention tests pass.
-- [ ] Source lifecycle and artifact cleanup tests pass.
-- [ ] Late, cancel, and replacement errors preserve the accepted source.
+- [x] Transfer and slot-retention tests pass.
+- [x] Source lifecycle and artifact cleanup tests pass.
+- [x] Late, cancel, and replacement errors preserve the accepted source.
 
 Parent 3.3.3 keeps the scope, acceptance checks, and checklist above. It is
 delivered as the three ordered, independently reviewable commits below and
@@ -909,9 +909,18 @@ Proposed commit title: `docs: record browser import acceptance`
 
 Completion checklist:
 
-- [ ] Probes pass on existing fixtures with no new binary fixtures or specs.
-- [ ] Old-source preservation and cancellation pass through the real worker.
-- [ ] README and plan acceptance summary are tracked; reports stay ignored.
+- [x] Probes pass on existing fixtures with no new binary fixtures or specs.
+- [x] Old-source preservation and cancellation pass through the real worker.
+- [x] README and plan acceptance summary are tracked; reports stay ignored.
+
+Acceptance recorded on one macOS host through real Chromium and WebKit module
+workers. Nine existing encoded fixtures matched native original/artwork pixels;
+failed, cancelled and superseded replacement retained the accepted source.
+Post-transfer cancellation, bounded originals and URL cleanup passed. The
+integrated source passed 184 frontend tests, format, typecheck and production
+build. Detailed receipts remain ignored under docs/reports. Phase 3.3.3 is
+complete; parent 3.3 still requires the import UI in 3.3.4. Firefox and native
+Windows/Linux verification are not claimed.
 
 #### 3.3.4 Add import UI and original/artwork selection
 
