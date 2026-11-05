@@ -3,7 +3,6 @@ import type {
   ExportFormat,
   ImportInput,
   ImportedResult,
-  ImportedSource,
   PreviewArtifact,
   ProcessingAdapter,
   StudioSettings,
@@ -61,7 +60,7 @@ export function createStudioController(options: StudioControllerOptions = {}): S
   let disposed = false
   let operationSequence = 0
   let activeOperation: ActiveOperation | null = null
-  let source: ImportedSource | null = null
+  let ownedImport: ImportedResult | null = null
   let previewArtifact: PreviewArtifact | null = null
 
   const getSnapshot = (): StudioSnapshot => snapshot
@@ -81,6 +80,12 @@ export function createStudioController(options: StudioControllerOptions = {}): S
     previewArtifact?.dispose()
     previewArtifact = null
     setSnapshot({ preview: null })
+  }
+
+  const releaseImport = (): void => {
+    const previous = ownedImport
+    ownedImport = null
+    disposeQuietly(previous)
   }
 
   const invalidate = (): void => {
@@ -108,7 +113,7 @@ export function createStudioController(options: StudioControllerOptions = {}): S
     if (isCurrent(operation)) {
       activeOperation = null
       const message = error instanceof Error ? error.message : String(error)
-      const suffix = source === null ? '' : ' Previous demo remains available.'
+      const suffix = ownedImport === null ? '' : ' Previous demo remains available.'
       setSnapshot({ status: 'error', error: `${message}${suffix}`, progress: 0 })
     }
   }
@@ -121,9 +126,11 @@ export function createStudioController(options: StudioControllerOptions = {}): S
     try {
       const imported: ImportedResult = await adapter.import(session, input, operation)
       if (!isCurrent(operation)) {
+        disposeQuietly(imported)
         return
       }
-      source = imported.source
+      const previous = ownedImport
+      ownedImport = imported
       activeOperation = null
       releasePreview()
       setSnapshot({
@@ -131,6 +138,7 @@ export function createStudioController(options: StudioControllerOptions = {}): S
         metadata: Object.freeze({ ...imported.metadata }),
         progress: 1,
       })
+      disposeQuietly(previous)
     } catch (error) {
       const current = isCurrent(operation)
       fail(operation, error)
@@ -142,12 +150,13 @@ export function createStudioController(options: StudioControllerOptions = {}): S
     if (disposed) {
       throw new Error('Studio controller is disposed.')
     }
-    if (source === null) {
+    const owned = ownedImport
+    if (owned === null) {
       throw new Error('Import an image before previewing.')
     }
     const operation = beginOperation('processing')
     try {
-      const artifact = await adapter.preview(session, source, snapshot.settings, operation)
+      const artifact = await adapter.preview(session, owned.source, snapshot.settings, operation)
       if (!isCurrent(operation)) {
         artifact.dispose()
         return
@@ -200,7 +209,7 @@ export function createStudioController(options: StudioControllerOptions = {}): S
       releasePreview()
       setSnapshot({
         settings: cloneSettings(settings),
-        status: source === null ? 'idle' : 'ready',
+        status: ownedImport === null ? 'idle' : 'ready',
         error: null,
       })
     },
@@ -209,12 +218,19 @@ export function createStudioController(options: StudioControllerOptions = {}): S
       if (disposed) {
         throw new Error('Studio controller is disposed.')
       }
-      if (source === null) {
+      const owned = ownedImport
+      if (owned === null) {
         throw new Error('Import an image before exporting.')
       }
       const operation = beginOperation('exporting')
       try {
-        const result = await adapter.export(session, source, format, snapshot.settings, operation)
+        const result = await adapter.export(
+          session,
+          owned.source,
+          format,
+          snapshot.settings,
+          operation,
+        )
         if (!isCurrent(operation)) {
           throw new StaleOperationError()
         }
@@ -231,7 +247,7 @@ export function createStudioController(options: StudioControllerOptions = {}): S
         return
       }
       invalidate()
-      source = null
+      releaseImport()
       releasePreview()
       setSnapshot({ status: 'idle', metadata: null, progress: 0, error: null })
     },
@@ -248,13 +264,19 @@ export function createStudioController(options: StudioControllerOptions = {}): S
       }
       invalidate()
       releasePreview()
+      releaseImport()
       adapter.dispose(session)
       disposed = true
-      source = null
       setSnapshot({ status: 'disposed', metadata: null, progress: 0, error: null })
       listeners.clear()
     },
   }
 
   return controller
+}
+
+function disposeQuietly(resource: { dispose(): void } | null): void {
+  try {
+    resource?.dispose()
+  } catch {}
 }

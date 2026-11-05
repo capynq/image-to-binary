@@ -33,6 +33,8 @@ export type ImportInput = DemoFixtureInput | File
 export interface ImportedResult {
   readonly source: ImportedSource
   readonly metadata: StudioMetadata
+  /** Idempotently releases the source; the controller calls it once it stops owning the result. */
+  dispose(): void
 }
 
 export interface PreviewSnapshot {

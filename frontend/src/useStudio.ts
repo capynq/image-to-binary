@@ -1,11 +1,13 @@
 import { useEffect, useRef, useSyncExternalStore } from 'react'
+import { createWorkerProcessingAdapter } from './processing/browserWorker'
 import { createStudioController } from './state/controller'
 import type { StudioController } from './state/controller'
 
 /**
  * Binds a controller to React's concurrent-safe external-store subscription API.
  * A supplied controller is borrowed and never disposed by this hook; an omitted
- * controller is owned by the hook and disposed after its final unmount.
+ * controller is owned by the hook, backed by the lazily created Rust worker
+ * adapter, and disposed after its final unmount.
  */
 export function useStudio(controller?: StudioController): {
   readonly controller: StudioController
@@ -22,7 +24,7 @@ export function useStudio(controller?: StudioController): {
 } {
   const ownedController = useRef<StudioController | null>(null)
   if (controller === undefined && ownedController.current === null) {
-    ownedController.current = createStudioController()
+    ownedController.current = createStudioController({ adapter: createWorkerProcessingAdapter() })
   }
   const activeController = controller ?? ownedController.current
   if (activeController === null) {

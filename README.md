@@ -72,15 +72,35 @@ npm run build
 npm run format:check
 ```
 
-The phase 3.1 frontend scaffold and phase 3.2.1 internal latest-job scheduler
-foundation are complete. The scheduler is not connected to the UI or a worker;
-its cancellation is cooperative and cannot interrupt a synchronous WASM call.
-The browser adapter remains a deterministic demo fixture for validating the
-React state and adapter contracts; it does not convert user files, export PNG,
-or run the Rust processing worker yet. Chromium checks passed at tested widths from 320
-through 2560 CSS px plus 640x360, and a WebKit rendered check passed.
-Firefox verification and the real React lifecycle browser probe remain
-unverified.
+`npm run dev`, `npm run build` and `npm run typecheck` first run
+`npm run wasm:build` (`node ../crates/wasm/scripts/build.mjs`). That step needs
+the Rust toolchain and the already installed `wasm-bindgen-cli` 0.2.128, installs
+nothing, and writes the ignored package in `.local/wasm/pkg`, which the worker
+imports. `npm test` never builds WASM and never uses the network.
+
+The phase 3.1 frontend scaffold, the phase 3.2.1 latest-job scheduler and the
+phase 3.2.3 worker transport are implemented, and parent phase 3.2 is complete.
+The app runs the Rust WASM engine
+in a lazily created module worker: "Load demo" imports a deterministic 256×192
+RGBA fixture through the worker, and "Render preview" returns real Rust preview
+pixels that the main thread encodes to a PNG object URL. Input buffers are
+transferred to the worker, but JS to WASM still copies the source once and each
+returned preview frame is a copy out of WASM memory, so these memory-copy costs
+remain. Cancellation is cooperative between bounded `advance` calls and cannot
+interrupt a single synchronous WASM call. Work yields through `MessageChannel`
+between calls, and the yielder periodically (every eighth yield) uses a timer
+task instead, so timers are not starved by `MessageChannel` yields alone; this
+is fairness between yields, not preemption of any single call.
+
+Browser evidence is local and bounded: on one macOS host, isolated Chromium ran
+both the development server and the production bundle with the real Rust
+worker. It covered worker rendering, input buffer transfer, newest-generation
+cancellation, live UI heartbeats during processing, golden parity with the
+native reference, and real React StrictMode ownership transitions. Firefox,
+Windows and Linux remain unverified. The earlier WebKit layout check predates
+worker integration and is not proof of current worker behavior. No general
+performance guarantee is made. Browser file import (3.3), PNG download (3.4) and
+text export (6.3) are not implemented, so Export is disabled.
 
 ## WASM bindings
 
@@ -131,11 +151,10 @@ Scope: phases 3.2.2.3 and 3.2.2 are complete. Real normalized-RGBA bindings
 exist, validated by native tests, strict Clippy, formatting, the workspace
 wasm32 check, the target-web build and 18 Node tests covering source/grid
 validation, preview parity with native Rust references, cancellation,
-generations, copy semantics and typed declarations. The browser UI is still a
-demo fixture; worker transport, file import and the native shell are pending.
-No browser, Windows or Linux test coverage, deployment or performance claim is
-made; worker transport and browser proof remain phase 3.2.3, which is
-incomplete.
+generations, copy semantics and typed declarations. The browser worker
+transport consumes these bindings, and phases 3.2.3 and 3.2 are complete. File
+import (next, 3.3), exports (3.4) and the native shell are pending. No Firefox,
+Windows or Linux test coverage, deployment or performance claim is made.
 
 ## Python reference behavior
 

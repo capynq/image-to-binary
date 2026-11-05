@@ -3,6 +3,15 @@ export {
   UnsupportedExportError,
   UnsupportedInputError,
 } from './demoAdapter'
+export { createBrowserProcessingAdapter, ExportUnavailableError } from './browserAdapter'
+export { createProcessingClient, ProcessingWorkerError } from './workerClient'
+export type {
+  PreviewPixels,
+  ProcessingClient,
+  ProcessingClientOptions,
+  RgbaImport,
+  SourceHandle,
+} from './workerClient'
 export type {
   DemoFixtureInput,
   ExportFormat,

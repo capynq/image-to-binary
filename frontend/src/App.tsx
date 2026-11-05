@@ -3,15 +3,6 @@ import { useStudio } from './useStudio'
 
 type Theme = 'dark' | 'light'
 
-function downloadBlob(blob: Blob, filename: string): void {
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = filename
-  link.click()
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
-}
-
 function getInitialTheme(): Theme {
   try {
     const storedTheme = window.localStorage.getItem('image-to-binary-theme')
@@ -74,15 +65,6 @@ export default function App() {
 
   function updateSetting(key: 'cellSize' | 'fontSize' | 'threshold', value: string) {
     controller.updateSettings({ ...settings, [key]: Number(value) })
-  }
-
-  async function exportText() {
-    try {
-      const blob = await controller.exportDemo('text')
-      downloadBlob(blob, `${snapshot.metadata?.name ?? 'image-to-binary'}.txt`)
-    } catch {
-      return
-    }
   }
 
   return (
@@ -168,7 +150,7 @@ export default function App() {
               </div>
             )}
           </div>
-          <p className="canvas-caption">Preview uses the same source grid as the export.</p>
+          <p className="canvas-caption">Rendered by the Rust engine in a background worker.</p>
         </section>
 
         <aside
@@ -276,12 +258,14 @@ export default function App() {
               <div className="section-heading">
                 <h2 id="export-heading">Export</h2>
               </div>
-              <p className="section-help">Download the rendered artifact as plain UTF-8 text.</p>
+              <p className="section-help" id="export-help">
+                Export is not available yet. Text and PNG downloads arrive in later phases.
+              </p>
               <button
                 className="button button-secondary button-wide"
                 type="button"
-                onClick={() => void exportText()}
-                disabled={!hasSource || isBusy}
+                aria-describedby="export-help"
+                disabled
               >
                 Export text
               </button>
@@ -303,7 +287,7 @@ export default function App() {
         <span className={`status-dot ${hasSource ? 'is-active' : ''}`} aria-hidden="true" />
         <span>{snapshot.error ?? statusLabel(snapshot.status)}</span>
         <span className="status-note">
-          Demo adapter: fixture only. Real image conversion comes next.
+          Rust worker renders a built-in demo image. File import and export come later.
         </span>
       </footer>
     </div>

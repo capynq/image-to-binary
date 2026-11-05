@@ -1,7 +1,8 @@
 # Image to Binary migration plan
 
 Status: subphases 0.2, 1.1, 1.2, 1.3, 2.1, 2.2, 2.3, 2.4, and 2.5 are
-committed. Subphase 3.1 is complete; no later completion is claimed.
+committed. Subphase 3.1 is complete.
+Subphases 3.2.1 through 3.2.3, and therefore parent 3.2, are also complete.
 See the validation records below.
 
 ## Initial prototype baseline
@@ -521,8 +522,8 @@ Completion checklist:
 ### 3.2 Add WASM worker scheduling, cancellation, and generations
 
 Objective: run Rust WASM processing off the browser UI thread with predictable
-latest-job behavior. This parent phase remains incomplete until its bridge and
-browser acceptance checks pass.
+latest-job behavior. This parent phase is complete: its bridge and browser
+acceptance checks have passed.
 
 Prerequisites: 3.1; 2.x core contracts.
 
@@ -648,9 +649,9 @@ Proposed commit title: `feat: connect processing scheduler to worker`
 
 Completion checklist:
 
-- [ ] Processing worker lifecycle and stale-result tests pass.
-- [ ] Browser memory transfer behavior is reviewed.
-- [ ] UI responsiveness is verified in the browser.
+- [x] Processing worker lifecycle and stale-result tests pass.
+- [x] Browser memory transfer behavior is reviewed.
+- [x] UI responsiveness is verified in the browser.
 
 ### 3.3 Implement browser import and preview
 

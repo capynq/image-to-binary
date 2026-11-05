@@ -8,8 +8,12 @@
   },
   "scripts": {
     "dev": "vite",
+    "predev": "npm run wasm:build",
     "build": "tsc -b && vite build",
+    "prebuild": "npm run wasm:build",
     "typecheck": "tsc -b",
+    "pretypecheck": "npm run wasm:build",
+    "wasm:build": "node ../crates/wasm/scripts/build.mjs",
     "test": "vitest run",
     "format": "prettier --write src tsconfig*.json vite.config.ts package.json .prettierrc.json",
     "format:check": "prettier --check src tsconfig*.json vite.config.ts package.json .prettierrc.json"

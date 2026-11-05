@@ -42,14 +42,14 @@ export interface DemoAdapterOptions {
 
 export class UnsupportedInputError extends Error {
   constructor() {
-    super('File conversion is not available until the browser processing worker phase.')
+    super('File conversion is not available until the file import phase.')
     this.name = 'UnsupportedInputError'
   }
 }
 
 export class UnsupportedExportError extends Error {
   constructor() {
-    super('PNG export is not available until the browser processing worker phase.')
+    super('PNG export is not available until the PNG export phase.')
     this.name = 'UnsupportedExportError'
   }
 }
@@ -87,7 +87,17 @@ export function createDemoProcessingAdapter(options: DemoAdapterOptions = {}): P
         assertOperationActive(demoSession, context, guard)
         const source = { __importedSource: Symbol('demo-source'), __demoSource: true } as DemoSource
         demoSession.sources.set(source, true)
-        return { source, metadata: { name: 'Demo fixture', width: 4, height: 4, source: 'demo' } }
+        let released = false
+        return {
+          source,
+          metadata: { name: 'Demo fixture', width: 4, height: 4, source: 'demo' },
+          dispose(): void {
+            if (!released) {
+              released = true
+              demoSession.sources.delete(source)
+            }
+          },
+        }
       } finally {
         finishOperation(demoSession, guard)
       }
@@ -158,11 +168,11 @@ export function createDemoProcessingAdapter(options: DemoAdapterOptions = {}): P
   }
 }
 
-function isDemoFixture(input: ImportInput): input is DemoFixtureInput {
+export function isDemoFixture(input: ImportInput): input is DemoFixtureInput {
   return typeof input === 'object' && input !== null && 'kind' in input && input.kind === 'demo'
 }
 
-function defaultUrlApi(): UrlApi {
+export function defaultUrlApi(): UrlApi {
   return {
     createObjectURL: (object) => URL.createObjectURL(object),
     revokeObjectURL: (url) => URL.revokeObjectURL(url),
