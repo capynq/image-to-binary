@@ -102,6 +102,14 @@ worker integration and is not proof of current worker behavior. No general
 performance guarantee is made. Browser file import (3.3), PNG download (3.4) and
 text export (6.3) are not implemented, so Export is disabled.
 
+Phase 3.3.3.1 adds encoded imports and bounded original-preview requests to
+the worker protocol and client. Both use the existing scheduler and source
+ownership rules; encoded buffers are transferred, and decode yields before
+publishing its source so queued cancellation can be observed. The frontend's
+165 tests cover this transport with a mock engine. File adapter/controller
+wiring (3.3.3.2), real-browser acceptance (3.3.3.3), and the import UI (3.3.4)
+remain pending.
+
 ## WASM bindings
 
 `crates/wasm` (`image-to-binary-wasm`) pins `wasm-bindgen =0.2.128` and

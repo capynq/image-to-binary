@@ -3,12 +3,16 @@ import {
   eventData,
   isArrayBuffer,
   isWorkerReply,
+  validateEncodedImport,
+  validateImageMetadata,
   validatePreviewFrame,
   validateRgbaImage,
 } from './protocol'
 import type {
+  ImportEncodedRequest,
   ImportedReply,
   ImportRequest,
+  OriginalPreviewRequest,
   PreviewParameters,
   PreviewRequest,
   PreviewedReply,
@@ -47,6 +51,15 @@ export interface RgbaImport {
 /** A producer runs inside the scheduled operation, so conversion work is serialized too. */
 export type RgbaImportSource = RgbaImport | (() => RgbaImport | Promise<RgbaImport>)
 
+/** Encoded BMP, GIF, JPEG, PNG, TIFF or WebP bytes. Importing transfers (detaches) `bytes`. */
+export interface EncodedImport {
+  readonly name: string
+  readonly bytes: ArrayBuffer
+}
+
+/** A producer runs inside the scheduled operation and is skipped if the operation is superseded first. */
+export type EncodedImportSource = EncodedImport | (() => EncodedImport | Promise<EncodedImport>)
+
 /** Preview pixels owned by the receiver. */
 export interface PreviewPixels {
   readonly width: number
@@ -68,6 +81,8 @@ export interface ProcessingClientOptions {
  */
 export interface ProcessingClient {
   importRgba(source: RgbaImportSource, operationId: number): Promise<SourceHandle>
+  /** Decoded dimensions come from the worker reply; the returned name must equal the input name. */
+  importEncoded(source: EncodedImportSource, operationId: number): Promise<SourceHandle>
   /** `finalize` runs inside the scheduled operation; its result is released if superseded. */
   preview<T extends Releasable>(
     source: SourceHandle,
@@ -80,6 +95,13 @@ export interface ProcessingClient {
     parameters: PreviewParameters,
     operationId: number,
   ): Promise<PreviewPixels>
+  /** Bounded original-image preview of a retained source; `finalize` follows the `preview` contract. */
+  originalPreview<T extends Releasable>(
+    source: SourceHandle,
+    operationId: number,
+    finalize: (pixels: PreviewPixels) => Promise<T>,
+  ): Promise<T>
+  originalPreviewPixels(source: SourceHandle, operationId: number): Promise<PreviewPixels>
   cancel(operationId: number): void
   dispose(): void
 }
@@ -101,6 +123,11 @@ interface PendingRequest {
   cancelSent: boolean
   readonly resolve: (reply: ImportedReply | PreviewedReply) => void
   readonly reject: (reason: Error) => void
+}
+
+interface PreparedImport {
+  readonly request: ImportRequest | ImportEncodedRequest
+  readonly buffer: ArrayBuffer
 }
 
 export function createProcessingClient(options: ProcessingClientOptions): ProcessingClient {
@@ -125,14 +152,7 @@ class WorkerProcessingClient implements ProcessingClient {
   }
 
   importRgba(source: RgbaImportSource, operationId: number): Promise<SourceHandle> {
-    let input: RgbaImportSource | null = source
-    const result = this.schedule<SourceHandle>(operationId, async (context) => {
-      const supplied = input
-      input = null
-      if (supplied === null) throw new Error('The import input was released.')
-      const image = typeof supplied === 'function' ? await supplied() : supplied
-      context.checkpoint()
-      this.assertUsable()
+    return this.scheduleImport<RgbaImport>(operationId, source, (image, generation) => {
       if (!isArrayBuffer(image.pixels)) {
         throw new TypeError('Import pixels must be an ArrayBuffer.')
       }
@@ -143,33 +163,42 @@ class WorkerProcessingClient implements ProcessingClient {
         image.pixels.byteLength,
       )
       if (invalid !== null) throw new RangeError(invalid.message)
-      if (this.sources.size >= this.maxSources) {
-        throw new RangeError(`At most ${this.maxSources} sources can be retained at once.`)
+      return {
+        request: {
+          type: 'import',
+          requestId: generation,
+          operationId,
+          name: image.name,
+          width: image.width,
+          height: image.height,
+          pixels: image.pixels,
+        },
+        buffer: image.pixels,
       }
-      const request: ImportRequest = {
-        type: 'import',
-        requestId: context.generation,
-        operationId,
-        name: image.name,
-        width: image.width,
-        height: image.height,
-        pixels: image.pixels,
-      }
-      const reply = await this.request('import', request, [image.pixels])
-      if (reply.type !== 'imported') throw this.protocolViolation('Unexpected import reply.')
-      if (
-        reply.name !== request.name ||
-        reply.width !== request.width ||
-        reply.height !== request.height
-      ) {
-        throw this.protocolViolation('The worker returned metadata that differs from the request.')
-      }
-      return this.registerSource(reply)
     })
-    result.catch(() => {
-      input = null
+  }
+
+  importEncoded(source: EncodedImportSource, operationId: number): Promise<SourceHandle> {
+    return this.scheduleImport<EncodedImport>(operationId, source, (image, generation) => {
+      if (typeof image.name !== 'string') {
+        throw new TypeError('Encoded image name must be a string.')
+      }
+      if (!isArrayBuffer(image.bytes)) {
+        throw new TypeError('Encoded image bytes must be an ArrayBuffer.')
+      }
+      const invalid = validateEncodedImport(image.name, image.bytes.byteLength)
+      if (invalid !== null) throw new RangeError(invalid.message)
+      return {
+        request: {
+          type: 'importEncoded',
+          requestId: generation,
+          operationId,
+          name: image.name,
+          bytes: image.bytes,
+        },
+        buffer: image.bytes,
+      }
     })
-    return result
   }
 
   preview<T extends Releasable>(
@@ -178,29 +207,18 @@ class WorkerProcessingClient implements ProcessingClient {
     operationId: number,
     finalize: (pixels: PreviewPixels) => Promise<T>,
   ): Promise<T> {
-    const terminal = this.terminalError()
-    if (terminal !== null) return Promise.reject(terminal)
-    if (this.sources.get(source.sourceId) !== source) {
-      return Promise.reject(this.unownedSource())
-    }
-    return this.schedule<T>(operationId, async (context) => {
-      context.checkpoint()
-      this.assertUsable()
-      if (this.sources.get(source.sourceId) !== source) throw this.unownedSource()
-      const request: PreviewRequest = {
+    return this.schedulePreview<T>(
+      source,
+      operationId,
+      (generation): PreviewRequest => ({
         type: 'preview',
-        requestId: context.generation,
+        requestId: generation,
         operationId,
         sourceId: source.sourceId,
         parameters: { ...parameters },
-      }
-      const reply = await this.request('preview', request, [])
-      if (reply.type !== 'previewed') throw this.protocolViolation('Unexpected preview reply.')
-      if (validatePreviewFrame(reply.width, reply.height, reply.pixels.byteLength) !== null) {
-        throw this.protocolViolation('The worker returned an inconsistent preview frame.')
-      }
-      return await finalize({ width: reply.width, height: reply.height, pixels: reply.pixels })
-    })
+      }),
+      finalize,
+    )
   }
 
   previewPixels(
@@ -209,6 +227,30 @@ class WorkerProcessingClient implements ProcessingClient {
     operationId: number,
   ): Promise<PreviewPixels> {
     return this.preview(source, parameters, operationId, (pixels) =>
+      Promise.resolve({ ...pixels, dispose: () => undefined }),
+    )
+  }
+
+  originalPreview<T extends Releasable>(
+    source: SourceHandle,
+    operationId: number,
+    finalize: (pixels: PreviewPixels) => Promise<T>,
+  ): Promise<T> {
+    return this.schedulePreview<T>(
+      source,
+      operationId,
+      (generation): OriginalPreviewRequest => ({
+        type: 'originalPreview',
+        requestId: generation,
+        operationId,
+        sourceId: source.sourceId,
+      }),
+      finalize,
+    )
+  }
+
+  originalPreviewPixels(source: SourceHandle, operationId: number): Promise<PreviewPixels> {
+    return this.originalPreview(source, operationId, (pixels) =>
       Promise.resolve({ ...pixels, dispose: () => undefined }),
     )
   }
@@ -226,6 +268,78 @@ class WorkerProcessingClient implements ProcessingClient {
     if (this.disposed) return
     this.disposed = true
     this.teardown(new Error('Processing client is disposed.'))
+  }
+
+  /**
+   * Shared import path. The producer (if any) runs inside the scheduled job, then a
+   * checkpoint and the source cap are enforced before the endpoint is opened or any
+   * buffer is transferred. `prepare` validates and builds the request.
+   */
+  private scheduleImport<I extends { readonly name: string }>(
+    operationId: number,
+    source: I | (() => I | Promise<I>),
+    prepare: (image: I, generation: number) => PreparedImport,
+  ): Promise<SourceHandle> {
+    let input: I | (() => I | Promise<I>) | null = source
+    const result = this.schedule<SourceHandle>(operationId, async (context) => {
+      const supplied = input
+      input = null
+      if (supplied === null) throw new Error('The import input was released.')
+      const image =
+        typeof supplied === 'function'
+          ? await (supplied as () => I | Promise<I>)()
+          : (supplied as I)
+      context.checkpoint()
+      this.assertUsable()
+      const prepared = prepare(image, context.generation)
+      if (this.sources.size >= this.maxSources) {
+        throw new RangeError(`At most ${this.maxSources} sources can be retained at once.`)
+      }
+      const request = prepared.request
+      const reply = await this.request('import', request, [prepared.buffer])
+      if (reply.type !== 'imported') throw this.protocolViolation('Unexpected import reply.')
+      if (
+        reply.name !== request.name ||
+        (request.type === 'import' &&
+          (reply.width !== request.width || reply.height !== request.height))
+      ) {
+        throw this.protocolViolation('The worker returned metadata that differs from the request.')
+      }
+      if (validateImageMetadata(reply.name, reply.width, reply.height) !== null) {
+        throw this.protocolViolation('The worker returned invalid source metadata.')
+      }
+      return this.registerSource(reply)
+    })
+    result.catch(() => {
+      input = null
+    })
+    return result
+  }
+
+  /** Shared preview path: source ownership is checked before scheduling and again inside the job. */
+  private schedulePreview<T extends Releasable>(
+    source: SourceHandle,
+    operationId: number,
+    build: (generation: number) => PreviewRequest | OriginalPreviewRequest,
+    finalize: (pixels: PreviewPixels) => Promise<T>,
+  ): Promise<T> {
+    const terminal = this.terminalError()
+    if (terminal !== null) return Promise.reject(terminal)
+    if (this.sources.get(source.sourceId) !== source) {
+      return Promise.reject(this.unownedSource())
+    }
+    return this.schedule<T>(operationId, async (context) => {
+      context.checkpoint()
+      this.assertUsable()
+      if (this.sources.get(source.sourceId) !== source) throw this.unownedSource()
+      const reply = await this.request('preview', build(context.generation), [])
+      if (reply.type !== 'previewed') throw this.protocolViolation('Unexpected preview reply.')
+      if (validatePreviewFrame(reply.width, reply.height, reply.pixels.byteLength) !== null) {
+        throw this.protocolViolation('The worker returned an inconsistent preview frame.')
+      }
+      context.checkpoint()
+      return await finalize({ width: reply.width, height: reply.height, pixels: reply.pixels })
+    })
   }
 
   private schedule<T extends Releasable>(
@@ -268,7 +382,7 @@ class WorkerProcessingClient implements ProcessingClient {
 
   private request(
     kind: 'import' | 'preview',
-    message: ImportRequest | PreviewRequest,
+    message: ImportRequest | ImportEncodedRequest | PreviewRequest | OriginalPreviewRequest,
     transfer: Transferable[],
   ): Promise<ImportedReply | PreviewedReply> {
     const endpoint = this.openEndpoint()

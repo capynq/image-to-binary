@@ -9,6 +9,7 @@ async function loadEngine(): Promise<ProcessingEngine> {
     readyStage: JobStage.Ready,
     failedStage: JobStage.Failed,
     createSession: (width, height, pixels) => ImageSession.fromRgba(width, height, pixels),
+    createEncodedSession: (bytes) => ImageSession.fromEncoded(bytes),
   }
 }
 

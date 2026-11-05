@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { eventData } from './protocol'
 import { TASK_YIELD_TIMER_INTERVAL } from './taskYield'
 import { createProcessingClient, ProcessingWorkerError } from './workerClient'
-import type { Releasable } from './workerClient'
+import type { PreviewPixels, ProcessingClient, Releasable, SourceHandle } from './workerClient'
 import { createWorkerHost } from './workerHost'
 import {
   ControlledEndpoint,
@@ -233,17 +233,17 @@ describe('client failure handling with a controlled endpoint', () => {
     client.dispose()
   })
 
-  it('disposes a late stale preview exactly once and then runs the newest job', async () => {
+  it('skips finalizing a stale preview reply and then runs the newest job', async () => {
     const endpoint = new ControlledEndpoint()
     const client = createProcessingClient({ createEndpoint: () => endpoint })
     const handle = await importViaEndpoint(client, endpoint, 1, 1)
-    let disposals = 0
-    const releasable: Releasable = {
-      dispose: () => {
-        disposals += 1
-      },
-    }
-    const first = settle(client.preview(handle, PARAMS, 2, () => Promise.resolve(releasable)))
+    let finalized = 0
+    const first = settle(
+      client.preview(handle, PARAMS, 2, () => {
+        finalized += 1
+        return Promise.resolve({ dispose: () => undefined })
+      }),
+    )
     await until(() => endpoint.requests('preview').length === 1, 'first preview')
     const second = settle(client.previewPixels(handle, PARAMS, 3))
     expect((await first).ok).toBe(false)
@@ -258,7 +258,6 @@ describe('client failure handling with a controlled endpoint', () => {
       height: 1,
       pixels: new ArrayBuffer(8),
     })
-    await until(() => disposals === 1, 'stale disposal')
     await until(() => endpoint.requests('preview').length === 2, 'newest preview')
     const secondRequest = endpoint.requests('preview')[1]
     endpoint.emitMessage({
@@ -270,7 +269,7 @@ describe('client failure handling with a controlled endpoint', () => {
       pixels: new ArrayBuffer(8),
     })
     expect((await second).ok).toBe(true)
-    expect(disposals).toBe(1)
+    expect(finalized).toBe(0)
     client.dispose()
   })
 
@@ -536,5 +535,323 @@ describe('cancellation around worker initialization and the first advance', () =
     const next = await client.previewPixels(handle, PARAMS, 3)
     expect(next.width).toBe(2)
     expect(engine.log.indexOf('cancel:2')).toBeLessThan(engine.log.indexOf('start:3'))
+  })
+})
+
+type PreviewKind = 'preview' | 'originalPreview'
+
+/** Starts a regular or original preview through the same client entry points the adapter uses. */
+function startPreview<T extends Releasable>(
+  kind: PreviewKind,
+  client: ProcessingClient,
+  handle: SourceHandle,
+  operationId: number,
+  finalize: (pixels: PreviewPixels) => Promise<T>,
+): Promise<T> {
+  return kind === 'preview'
+    ? client.preview(handle, PARAMS, operationId, finalize)
+    : client.originalPreview(handle, operationId, finalize)
+}
+
+/** Replays a valid 2x1 `previewed` reply for the indexed request of `kind`. */
+function emitPreviewed(
+  endpoint: ControlledEndpoint,
+  kind: PreviewKind,
+  index: number,
+  operationId: number,
+): void {
+  endpoint.emitMessage({
+    type: 'previewed',
+    requestId: endpoint.requests(kind)[index]?.requestId,
+    operationId,
+    width: 2,
+    height: 1,
+    pixels: new ArrayBuffer(8),
+  })
+}
+
+/** Lets already-queued microtasks drain; no worker or timer work is pending when it is used. */
+function flush(): Promise<void> {
+  return new Promise<void>((resolve) => setTimeout(resolve, 0))
+}
+
+function countingClient(): {
+  readonly client: ProcessingClient
+  readonly endpoint: ControlledEndpoint
+  readonly created: () => number
+} {
+  const endpoint = new ControlledEndpoint()
+  let created = 0
+  const client = createProcessingClient({
+    createEndpoint: () => {
+      created += 1
+      return endpoint
+    },
+  })
+  return { client, endpoint, created: () => created }
+}
+
+describe('encoded import and original preview transport', () => {
+  it('imports encoded bytes over a linked pair, detaching them and returning decoded metadata', async () => {
+    const engine = new FakeEngine()
+    engine.encodedMetadata = { width: 3, height: 5, channels: 4 }
+    const { client } = track(createLinkedPair(engine))
+    const bytes = new ArrayBuffer(6)
+    const handle = await client.importEncoded({ name: 'photo.png', bytes }, 1)
+    expect(bytes.byteLength).toBe(0)
+    expect(handle).toMatchObject({ name: 'photo.png', width: 3, height: 5 })
+    expect(engine.encodedInputs).toEqual([6])
+  })
+
+  it('does not create an endpoint or transfer when an encoded producer is cancelled while awaiting', async () => {
+    const { client, endpoint, created } = countingClient()
+    const bytes = new ArrayBuffer(4)
+    let release: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let produced = 0
+    const run = settle(
+      client.importEncoded(async () => {
+        produced += 1
+        await gate
+        return { name: 'a.png', bytes }
+      }, 1),
+    )
+    await until(() => produced === 1, 'encoded producer')
+    client.cancel(1)
+    expect((await run).ok).toBe(false)
+    release()
+    await flush()
+    expect(created()).toBe(0)
+    expect(endpoint.posted).toHaveLength(0)
+    expect(bytes.byteLength).toBe(4)
+    client.dispose()
+  })
+
+  it('never invokes a queued encoded producer that is superseded before it becomes active', async () => {
+    const { client, endpoint } = countingClient()
+    let release: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let first = 0
+    let second = 0
+    let third = 0
+    const run1 = settle(
+      client.importEncoded(async () => {
+        first += 1
+        await gate
+        return { name: 'a.png', bytes: new ArrayBuffer(4) }
+      }, 1),
+    )
+    await until(() => first === 1, 'active producer')
+    const run2 = settle(
+      client.importEncoded(() => {
+        second += 1
+        return { name: 'b.png', bytes: new ArrayBuffer(4) }
+      }, 2),
+    )
+    const run3 = settle(
+      client.importEncoded(() => {
+        third += 1
+        return { name: 'c.png', bytes: new ArrayBuffer(4) }
+      }, 3),
+    )
+    expect((await run1).ok).toBe(false)
+    expect((await run2).ok).toBe(false)
+
+    release()
+    await until(() => endpoint.requests('importEncoded').length === 1, 'newest encoded request')
+    expect(second).toBe(0)
+    expect(third).toBe(1)
+    endpoint.emitMessage({
+      type: 'imported',
+      requestId: endpoint.requests('importEncoded')[0]?.requestId,
+      operationId: 3,
+      sourceId: 1,
+      name: 'c.png',
+      width: 2,
+      height: 1,
+    })
+    expect((await run3).ok).toBe(true)
+    client.dispose()
+  })
+
+  it('keeps one physical slot across an active original preview, a pending encoded import and a newer original preview', async () => {
+    const { client, endpoint } = countingClient()
+    const handle = await importViaEndpoint(client, endpoint, 1, 1)
+    let produced = 0
+    const active = settle(client.originalPreviewPixels(handle, 2))
+    await until(() => endpoint.requests('originalPreview').length === 1, 'active original preview')
+    const queued = settle(
+      client.importEncoded(() => {
+        produced += 1
+        return { name: 'q.png', bytes: new ArrayBuffer(4) }
+      }, 3),
+    )
+    const newest = settle(client.originalPreviewPixels(handle, 4))
+    expect((await active).ok).toBe(false)
+    expect((await queued).ok).toBe(false)
+    expect(endpoint.requests('cancel')).toHaveLength(1)
+    expect(endpoint.requests('originalPreview')).toHaveLength(1)
+
+    endpoint.emitMessage({
+      type: 'cancelled',
+      requestId: endpoint.requests('originalPreview')[0]?.requestId,
+      operationId: 2,
+    })
+    await until(() => endpoint.requests('originalPreview').length === 2, 'newest original preview')
+    emitPreviewed(endpoint, 'originalPreview', 1, 4)
+    expect((await newest).ok).toBe(true)
+
+    expect(produced).toBe(0)
+    expect(endpoint.requests('importEncoded')).toHaveLength(0)
+    const ids = endpoint.posted.flatMap(({ message }) => {
+      const record = message as { readonly type: string; readonly requestId: number }
+      return record.type === 'import' || record.type === 'originalPreview' ? [record.requestId] : []
+    })
+    expect(ids).toHaveLength(3)
+    expect(new Set(ids).size).toBe(3)
+    expect(ids).toEqual([...ids].sort((a, b) => a - b))
+    client.dispose()
+  })
+
+  it.each<PreviewKind>(['preview', 'originalPreview'])(
+    'disposes a %s finalizer artifact completed after supersession exactly once and passes the newest',
+    async (kind) => {
+      const { client, endpoint } = countingClient()
+      const handle = await importViaEndpoint(client, endpoint, 1, 1)
+      let release: () => void = () => undefined
+      const gate = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      let created = 0
+      let disposals = 0
+      const first = settle(
+        startPreview(kind, client, handle, 2, async () => {
+          created += 1
+          await gate
+          return {
+            dispose: () => {
+              disposals += 1
+            },
+          }
+        }),
+      )
+      await until(() => endpoint.requests(kind).length === 1, 'first request')
+      emitPreviewed(endpoint, kind, 0, 2)
+      await until(() => created === 1, 'finalizer start')
+
+      const newest = settle(
+        startPreview(kind, client, handle, 3, (pixels) =>
+          Promise.resolve({ ...pixels, dispose: () => undefined }),
+        ),
+      )
+      expect((await first).ok).toBe(false)
+      expect(disposals).toBe(0)
+      expect(endpoint.requests(kind)).toHaveLength(1)
+
+      release()
+      await until(() => disposals === 1, 'artifact disposal')
+      await until(() => endpoint.requests(kind).length === 2, 'newest request')
+      emitPreviewed(endpoint, kind, 1, 3)
+      expect((await newest).ok).toBe(true)
+      expect(disposals).toBe(1)
+      client.dispose()
+    },
+  )
+
+  it.each<PreviewKind>(['preview', 'originalPreview'])(
+    'skips the finalizer when a %s is cancelled before its reply arrives',
+    async (kind) => {
+      const { client, endpoint } = countingClient()
+      const handle = await importViaEndpoint(client, endpoint, 1, 1)
+      let finalized = 0
+      const run = settle(
+        startPreview(kind, client, handle, 2, () => {
+          finalized += 1
+          return Promise.resolve({ dispose: () => undefined })
+        }),
+      )
+      await until(() => endpoint.requests(kind).length === 1, 'request')
+      client.cancel(2)
+      expect((await run).ok).toBe(false)
+      emitPreviewed(endpoint, kind, 0, 2)
+      await flush()
+      expect(finalized).toBe(0)
+      client.dispose()
+    },
+  )
+
+  it.each([
+    ['an oversized width', 1601, 1, 1601 * 4],
+    ['an oversized height', 1, 1601, 1601 * 4],
+    ['a wrong RGBA length', 2, 1, 7],
+  ])(
+    'fails the session on a malformed original preview reply with %s',
+    async (_name, width, height, bytes) => {
+      const { client, endpoint } = countingClient()
+      const handle = await importViaEndpoint(client, endpoint, 1, 1)
+      let finalized = 0
+      const run = settle(
+        client.originalPreview(handle, 2, () => {
+          finalized += 1
+          return Promise.resolve({ dispose: () => undefined })
+        }),
+      )
+      await until(() => endpoint.requests('originalPreview').length === 1, 'original request')
+      endpoint.emitMessage({
+        type: 'previewed',
+        requestId: endpoint.requests('originalPreview')[0]?.requestId,
+        operationId: 2,
+        width,
+        height,
+        pixels: new ArrayBuffer(bytes),
+      })
+      expect((await run).ok).toBe(false)
+      expect(finalized).toBe(0)
+      expect(endpoint.terminated).toBe(1)
+    },
+  )
+
+  it.each<[string, string, () => ArrayBuffer, string]>([
+    ['an empty name', '', () => new ArrayBuffer(4), 'Source name'],
+    ['an overlong name', 'x'.repeat(257), () => new ArrayBuffer(4), 'Source name'],
+    ['empty bytes', 'a.png', () => new ArrayBuffer(0), 'must not be empty'],
+    ['a typed array', 'a.png', () => new Uint8Array(4) as unknown as ArrayBuffer, 'ArrayBuffer'],
+  ])(
+    'rejects encoded input with %s before creating an endpoint',
+    async (_label, name, make, message) => {
+      const { client, endpoint, created } = countingClient()
+      const bytes = make()
+      const length = bytes.byteLength
+      await expect(client.importEncoded({ name, bytes }, 1)).rejects.toThrow(message)
+      expect(bytes.byteLength).toBe(length)
+      expect(created()).toBe(0)
+      expect(endpoint.posted).toHaveLength(0)
+      client.dispose()
+    },
+  )
+
+  it('enforces the source cap for encoded imports without detaching the rejected bytes', async () => {
+    const engine = new FakeEngine()
+    const { client } = track(createLinkedPair(engine, { maxSources: 1 }))
+    await client.importEncoded({ name: 'a.png', bytes: new ArrayBuffer(4) }, 1)
+    const bytes = new ArrayBuffer(4)
+    await expect(client.importEncoded({ name: 'b.png', bytes }, 2)).rejects.toThrow('retained')
+    expect(bytes.byteLength).toBe(4)
+    expect(engine.encodedInputs).toEqual([4])
+  })
+
+  it('rejects original previews for released or foreign handles without posting a request', async () => {
+    const a = track(createLinkedPair(new FakeEngine()))
+    const b = track(createLinkedPair(new FakeEngine()))
+    const handle = await a.client.importEncoded({ name: 'a.png', bytes: new ArrayBuffer(4) }, 1)
+    await expect(
+      b.client.originalPreview(handle, 1, () => Promise.resolve({ dispose: () => undefined })),
+    ).rejects.toThrow('source handle')
+    handle.dispose()
+    await expect(a.client.originalPreviewPixels(handle, 2)).rejects.toThrow('source handle')
   })
 })

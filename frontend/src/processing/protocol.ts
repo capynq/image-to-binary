@@ -10,6 +10,7 @@ export const MAX_SOURCE_PIXELS = 50_000_000
 export const MAX_RETAINED_SOURCES = 2
 export const MAX_SOURCE_NAME_LENGTH = 256
 export const MAX_PREVIEW_DIMENSION = 1600
+export const MAX_ENCODED_BYTES = 256 * 1024 * 1024
 
 export type PreviewSampling = 'classic' | 'average'
 
@@ -40,6 +41,19 @@ export interface PreviewRequest extends RequestIdentity {
   readonly parameters: PreviewParameters
 }
 
+/** Transfers ownership of `bytes` (an encoded BMP, GIF, JPEG, PNG, TIFF or WebP file) to the worker. */
+export interface ImportEncodedRequest extends RequestIdentity {
+  readonly type: 'importEncoded'
+  readonly name: string
+  readonly bytes: ArrayBuffer
+}
+
+/** Requests the bounded original-image preview of a retained source; answered with `previewed`. */
+export interface OriginalPreviewRequest extends RequestIdentity {
+  readonly type: 'originalPreview'
+  readonly sourceId: number
+}
+
 export interface CancelRequest extends RequestIdentity {
   readonly type: 'cancel'
 }
@@ -49,7 +63,13 @@ export interface ReleaseSourceRequest {
   readonly sourceId: number
 }
 
-export type WorkerRequest = ImportRequest | PreviewRequest | CancelRequest | ReleaseSourceRequest
+export type WorkerRequest =
+  | ImportRequest
+  | ImportEncodedRequest
+  | PreviewRequest
+  | OriginalPreviewRequest
+  | CancelRequest
+  | ReleaseSourceRequest
 
 export interface ImportedReply extends RequestIdentity {
   readonly type: 'imported'
@@ -130,6 +150,26 @@ export function validateRgbaImage(
     return {
       code: 'invalid_argument',
       message: 'Pixel buffer length must equal width × height × 4.',
+    }
+  }
+  return null
+}
+
+/** Validates an encoded import before any byte is copied into the engine. */
+export function validateEncodedImport(name: string, byteLength: number): ValidationFailure | null {
+  if (name.length === 0 || name.length > MAX_SOURCE_NAME_LENGTH) {
+    return {
+      code: 'invalid_argument',
+      message: `Source name must be 1 to ${MAX_SOURCE_NAME_LENGTH} characters.`,
+    }
+  }
+  if (!Number.isSafeInteger(byteLength) || byteLength < 1) {
+    return { code: 'invalid_argument', message: 'Encoded image bytes must not be empty.' }
+  }
+  if (byteLength > MAX_ENCODED_BYTES) {
+    return {
+      code: 'resource_limit_exceeded',
+      message: `Encoded image exceeds the ${MAX_ENCODED_BYTES.toLocaleString('en-US')} byte limit.`,
     }
   }
   return null
@@ -225,6 +265,10 @@ export function isWorkerRequest(value: unknown): value is WorkerRequest {
       )
     case 'preview':
       return hasIdentity(value) && isCount(value.sourceId) && isPreviewParameters(value.parameters)
+    case 'importEncoded':
+      return hasIdentity(value) && typeof value.name === 'string' && isArrayBuffer(value.bytes)
+    case 'originalPreview':
+      return hasIdentity(value) && isSourceId(value.sourceId)
     case 'cancel':
       return hasIdentity(value)
     case 'releaseSource':

@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { isWorkerReply, isWorkerRequest, validatePreviewFrame, validateRgbaImage } from './protocol'
+import {
+  MAX_ENCODED_BYTES,
+  isWorkerReply,
+  isWorkerRequest,
+  validateEncodedImport,
+  validatePreviewFrame,
+  validateRgbaImage,
+} from './protocol'
 
 const parameters = { cellSize: 12, fontSize: 16, threshold: 128, sampling: 'classic' }
 
@@ -130,5 +137,80 @@ describe('protocol guards', () => {
     expect(validateRgbaImage('n', 0, 1, 0)?.code).toBe('invalid_dimensions')
     expect(validateRgbaImage('n', 10_000, 10_000, 8)?.code).toBe('resource_limit_exceeded')
     expect(validateRgbaImage('n', 2, 1, 7)?.code).toBe('invalid_argument')
+  })
+})
+
+describe('encoded import and original preview protocol', () => {
+  it('accepts well-formed encoded import and original preview requests', () => {
+    expect(
+      isWorkerRequest({
+        type: 'importEncoded',
+        requestId: 1,
+        operationId: 1,
+        name: 'photo.png',
+        bytes: new ArrayBuffer(3),
+      }),
+    ).toBe(true)
+    expect(
+      isWorkerRequest({ type: 'originalPreview', requestId: 2, operationId: 1, sourceId: 1 }),
+    ).toBe(true)
+  })
+
+  it.each([
+    [
+      'typed array bytes',
+      { type: 'importEncoded', requestId: 1, operationId: 1, name: 'n', bytes: new Uint8Array(3) },
+    ],
+    ['missing bytes', { type: 'importEncoded', requestId: 1, operationId: 1, name: 'n' }],
+    [
+      'non-string name',
+      { type: 'importEncoded', requestId: 1, operationId: 1, name: 5, bytes: new ArrayBuffer(3) },
+    ],
+    [
+      'zero request id',
+      { type: 'importEncoded', requestId: 0, operationId: 1, name: 'n', bytes: new ArrayBuffer(3) },
+    ],
+    [
+      'missing operation id',
+      { type: 'importEncoded', requestId: 1, name: 'n', bytes: new ArrayBuffer(3) },
+    ],
+    ['missing source id', { type: 'originalPreview', requestId: 1, operationId: 1 }],
+    ['zero source id', { type: 'originalPreview', requestId: 1, operationId: 1, sourceId: 0 }],
+    [
+      'fractional source id',
+      { type: 'originalPreview', requestId: 1, operationId: 1, sourceId: 1.5 },
+    ],
+    [
+      'zero request id original',
+      { type: 'originalPreview', requestId: 0, operationId: 1, sourceId: 1 },
+    ],
+  ])('rejects a malformed request with %s', (_name, value) => {
+    expect(isWorkerRequest(value)).toBe(false)
+  })
+
+  it('limits encoded imports by name and byte length without allocating', () => {
+    expect(validateEncodedImport('n', 1)).toBeNull()
+    expect(validateEncodedImport('x'.repeat(256), MAX_ENCODED_BYTES)).toBeNull()
+    expect(validateEncodedImport('', 1)?.code).toBe('invalid_argument')
+    expect(validateEncodedImport('x'.repeat(257), 1)?.code).toBe('invalid_argument')
+    expect(validateEncodedImport('n', 0)?.code).toBe('invalid_argument')
+    expect(validateEncodedImport('n', -1)?.code).toBe('invalid_argument')
+    expect(validateEncodedImport('n', 1.5)?.code).toBe('invalid_argument')
+    expect(validateEncodedImport('n', MAX_ENCODED_BYTES + 1)?.code).toBe('resource_limit_exceeded')
+  })
+
+  it('bounds original preview replies with the preview frame limits', () => {
+    const reply = { type: 'previewed', requestId: 1, operationId: 1 }
+    expect(
+      isWorkerReply({
+        ...reply,
+        width: 1600,
+        height: 900,
+        pixels: new ArrayBuffer(1600 * 900 * 4),
+      }),
+    ).toBe(true)
+    expect(
+      isWorkerReply({ ...reply, width: 1601, height: 1, pixels: new ArrayBuffer(1601 * 4) }),
+    ).toBe(false)
   })
 })

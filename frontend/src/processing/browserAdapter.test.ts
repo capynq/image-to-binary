@@ -38,6 +38,22 @@ class FakeClient implements ProcessingClient {
     }
   }
 
+  importEncoded(): Promise<SourceHandle> {
+    return Promise.reject(new Error('Encoded import is not used by this test.'))
+  }
+
+  originalPreview<T extends Releasable>(
+    _source: SourceHandle,
+    _operationId: number,
+    finalize: (pixels: PreviewPixels) => Promise<T>,
+  ): Promise<T> {
+    return finalize({ width: 2, height: 1, pixels: new ArrayBuffer(8) })
+  }
+
+  originalPreviewPixels(): Promise<PreviewPixels> {
+    return Promise.resolve({ width: 2, height: 1, pixels: new ArrayBuffer(8) })
+  }
+
   preview<T extends Releasable>(
     _source: SourceHandle,
     _parameters: unknown,

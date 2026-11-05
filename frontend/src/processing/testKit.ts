@@ -65,18 +65,35 @@ export class FakeSession implements EngineSession {
   disposeCalls = 0
   freed = false
   advances = 0
+  readonly budgets: number[] = []
+  private original = false
 
-  constructor(private readonly engine: FakeEngine) {}
+  constructor(
+    private readonly engine: FakeEngine,
+    readonly sourceWidth = 2,
+    readonly sourceHeight = 1,
+    readonly sourceChannels = 4,
+  ) {}
 
   startPreview(generation: number): number {
     this.engine.log.push(`start:${generation}`)
+    this.original = false
     this.engine.onStart?.(generation)
     this.advances = 0
     return FAKE_STAGES.sampling
   }
 
-  advance(): number {
+  startOriginalPreview(generation: number): number {
+    this.engine.log.push(`original:${generation}`)
+    this.original = true
+    this.engine.onStart?.(generation)
+    this.advances = 0
+    return FAKE_STAGES.sampling
+  }
+
+  advance(_generation: number, pixelBudget: number): number {
     this.advances += 1
+    this.budgets.push(pixelBudget)
     this.engine.notifyAdvance()
     if (this.advances >= this.engine.steps) return FAKE_STAGES.ready
     return this.advances * 2 >= this.engine.steps ? FAKE_STAGES.preview : FAKE_STAGES.sampling
@@ -88,7 +105,8 @@ export class FakeSession implements EngineSession {
 
   finish(generation: number): EngineFrame {
     this.engine.log.push(`finish:${generation}`)
-    const frame = new FakeFrame(2, 1)
+    const size = this.original ? this.engine.originalFrameSize : { width: 2, height: 1 }
+    const frame = new FakeFrame(size.width, size.height)
     this.engine.frames.push(frame)
     return frame
   }
@@ -111,6 +129,11 @@ export class FakeEngine implements ProcessingEngine {
   readonly frames: FakeFrame[] = []
   readonly steps: number
   failNextCreate: string | null = null
+  failNextEncoded: string | null = null
+  encodedMetadata = { width: 2, height: 1, channels: 4 }
+  originalFrameSize = { width: 2, height: 1 }
+  readonly encodedInputs: number[] = []
+  onEncodedCreate: (() => void) | null = null
   onStart: ((generation: number) => void) | null = null
   private waiters: Array<() => void> = []
 
@@ -127,6 +150,20 @@ export class FakeEngine implements ProcessingEngine {
     if (pixels.byteLength !== width * height * 4) throw new Error('bad pixel length')
     const session = new FakeSession(this)
     this.sessions.push(session)
+    return session
+  }
+
+  createEncodedSession(bytes: Uint8Array): EngineSession {
+    this.encodedInputs.push(bytes.byteLength)
+    if (this.failNextEncoded !== null) {
+      const code = this.failNextEncoded
+      this.failNextEncoded = null
+      throw Object.assign(new Error('The fake engine could not decode the bytes.'), { code })
+    }
+    const { width, height, channels } = this.encodedMetadata
+    const session = new FakeSession(this, width, height, channels)
+    this.sessions.push(session)
+    this.onEncodedCreate?.()
     return session
   }
 

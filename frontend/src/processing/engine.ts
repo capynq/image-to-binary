@@ -16,6 +16,12 @@ export interface EngineFrame {
 
 /** The subset of `ImageSession` the worker drives; the generated class satisfies it. */
 export interface EngineSession {
+  /** Immutable post-orientation width in pixels. */
+  readonly sourceWidth: number
+  /** Immutable post-orientation height in pixels. */
+  readonly sourceHeight: number
+  /** Normalized channel count; always 4 (RGBA8). */
+  readonly sourceChannels: number
   startPreview(
     generation: number,
     cellSize: number,
@@ -23,6 +29,8 @@ export interface EngineSession {
     threshold: number,
     sampling: PreviewSampling,
   ): EngineStage
+  /** Starts the bounded original-image preview job; shares advance, cancel and finish. */
+  startOriginalPreview(generation: number): EngineStage
   advance(generation: number, pixelBudget: number): EngineStage
   cancel(generation: number): void
   finish(generation: number): EngineFrame
@@ -35,4 +43,6 @@ export interface ProcessingEngine {
   readonly readyStage: EngineStage
   readonly failedStage: EngineStage
   createSession(width: number, height: number, pixels: Uint8Array): EngineSession
+  /** Decodes encoded image bytes synchronously; throws coded errors on failure. */
+  createEncodedSession(bytes: Uint8Array): EngineSession
 }

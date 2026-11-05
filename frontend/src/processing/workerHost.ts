@@ -1,8 +1,18 @@
 import type { EngineFrame, EngineSession, ProcessingEngine } from './engine'
-import { MAX_RETAINED_SOURCES, eventData, isWorkerRequest, validateRgbaImage } from './protocol'
+import {
+  MAX_RETAINED_SOURCES,
+  eventData,
+  isWorkerRequest,
+  validateEncodedImport,
+  validateImageMetadata,
+  validatePreviewFrame,
+  validateRgbaImage,
+} from './protocol'
 import type {
   ImportedReply,
   ImportRequest,
+  ImportEncodedRequest,
+  OriginalPreviewRequest,
   PreviewedReply,
   PreviewRequest,
   WorkerReply,
@@ -22,6 +32,8 @@ export interface HostEndpoint {
 export interface WorkerHostOptions {
   /** Work units per `advance` call; the host yields to the task queue between calls. */
   readonly pixelBudget?: number
+  /** Creates the per-job task yielder; defaults to `createTaskYielder`. */
+  readonly createYielder?: () => TaskYielder
 }
 
 export interface WorkerHost {
@@ -39,6 +51,8 @@ interface ActiveJob {
   readonly sourceId: number | null
   cancelled: boolean
 }
+
+type JobRequest = ImportRequest | ImportEncodedRequest | PreviewRequest | OriginalPreviewRequest
 
 type Outcome =
   | { readonly kind: 'reply'; readonly reply: WorkerReply; readonly transfer: Transferable[] }
@@ -81,6 +95,7 @@ export function createWorkerHost(
   options: WorkerHostOptions = {},
 ): WorkerHost {
   const pixelBudget = options.pixelBudget ?? DEFAULT_PIXEL_BUDGET
+  const createYielder = options.createYielder ?? createTaskYielder
   const sources = new Map<number, SourceRecord>()
   const doomed = new Set<SourceRecord>()
   let active: ActiveJob | null = null
@@ -140,8 +155,43 @@ export function createWorkerHost(
     }
   }
 
+  const importEncodedSource = async (
+    request: ImportEncodedRequest,
+    job: ActiveJob,
+    yielder: TaskYielder,
+    engine: ProcessingEngine,
+  ): Promise<ImportedReply> => {
+    const invalid = validateEncodedImport(request.name, request.bytes.byteLength)
+    if (invalid !== null) throw new JobFailure(invalid.code, invalid.message)
+    if (sources.size >= MAX_RETAINED_SOURCES) {
+      throw new JobFailure('resource_limit_exceeded', 'The retained source limit was reached.')
+    }
+    assertRunning(job)
+    const session = engine.createEncodedSession(new Uint8Array(request.bytes))
+    let published = false
+    try {
+      const { width, height } = readNormalizedMetadata(session, request.name)
+      await yielder.yield()
+      assertRunning(job)
+      const sourceId = nextSourceId++
+      sources.set(sourceId, { session })
+      published = true
+      return {
+        type: 'imported',
+        requestId: request.requestId,
+        operationId: request.operationId,
+        sourceId,
+        name: request.name,
+        width,
+        height,
+      }
+    } finally {
+      if (!published) closeSession(session)
+    }
+  }
+
   const previewSource = async (
-    request: PreviewRequest,
+    request: PreviewRequest | OriginalPreviewRequest,
     job: ActiveJob,
     yielder: TaskYielder,
     engine: ProcessingEngine,
@@ -150,13 +200,18 @@ export function createWorkerHost(
     if (record === undefined) {
       throw new JobFailure('unknown_source', 'The source is not available in the worker.')
     }
-    const { cellSize, fontSize, threshold, sampling } = request.parameters
     const generation = request.requestId
     let started = false
     let finished = false
     try {
       assertRunning(job)
-      let stage = record.session.startPreview(generation, cellSize, fontSize, threshold, sampling)
+      let stage: number
+      if (request.type === 'preview') {
+        const { cellSize, fontSize, threshold, sampling } = request.parameters
+        stage = record.session.startPreview(generation, cellSize, fontSize, threshold, sampling)
+      } else {
+        stage = record.session.startOriginalPreview(generation)
+      }
       started = true
       while (stage !== engine.readyStage) {
         if (stage === engine.failedStage) {
@@ -174,6 +229,10 @@ export function createWorkerHost(
       assertRunning(job)
       if (taken.buffer.byteLength !== taken.width * taken.height * 4) {
         throw new JobFailure('internal', 'The preview frame size is inconsistent.')
+      }
+      if (request.type === 'originalPreview') {
+        const bounded = validatePreviewFrame(taken.width, taken.height, taken.buffer.byteLength)
+        if (bounded !== null) throw new JobFailure('internal', bounded.message)
       }
       return {
         type: 'previewed',
@@ -194,7 +253,7 @@ export function createWorkerHost(
   }
 
   const execute = async (
-    request: ImportRequest | PreviewRequest,
+    request: JobRequest,
     job: ActiveJob,
     yielder: TaskYielder,
   ): Promise<Outcome> => {
@@ -206,6 +265,13 @@ export function createWorkerHost(
       assertRunning(job)
       if (request.type === 'import') {
         return { kind: 'reply', reply: await importSource(request, job, engine), transfer: [] }
+      }
+      if (request.type === 'importEncoded') {
+        return {
+          kind: 'reply',
+          reply: await importEncodedSource(request, job, yielder, engine),
+          transfer: [],
+        }
       }
       const reply = await previewSource(request, job, yielder, engine)
       return { kind: 'reply', reply, transfer: [reply.pixels] }
@@ -235,15 +301,16 @@ export function createWorkerHost(
     dispose()
   }
 
-  const run = async (request: ImportRequest | PreviewRequest): Promise<void> => {
+  const run = async (request: JobRequest): Promise<void> => {
     const job: ActiveJob = {
       requestId: request.requestId,
       operationId: request.operationId,
-      sourceId: request.type === 'preview' ? request.sourceId : null,
+      sourceId:
+        request.type === 'preview' || request.type === 'originalPreview' ? request.sourceId : null,
       cancelled: false,
     }
     active = job
-    const yielder = createTaskYielder()
+    const yielder = createYielder()
     let outcome: Outcome
     try {
       outcome = await execute(request, job, yielder)
@@ -314,7 +381,9 @@ export function createWorkerHost(
         releaseSource(data.sourceId)
         return
       case 'import':
+      case 'importEncoded':
       case 'preview':
+      case 'originalPreview':
         if (data.requestId <= lastAcceptedRequestId) {
           raiseFatal('The worker received a replayed or out-of-order request id.')
           return
@@ -373,6 +442,19 @@ function closeFrame(frame: EngineFrame): void {
   try {
     frame.free()
   } catch {}
+}
+
+function readNormalizedMetadata(
+  session: EngineSession,
+  name: string,
+): { readonly width: number; readonly height: number } {
+  const width = session.sourceWidth
+  const height = session.sourceHeight
+  const channels = session.sourceChannels
+  if (channels !== 4 || validateImageMetadata(name, width, height) !== null) {
+    throw new JobFailure('internal', 'The decoded source metadata is invalid.')
+  }
+  return { width, height }
 }
 
 function takeFrame(frame: EngineFrame): {

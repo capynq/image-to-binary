@@ -842,9 +842,9 @@ Proposed commit title: `feat: add encoded import worker transport`
 
 Completion checklist:
 
-- [ ] Production `fromEncoded` wiring and mock-based protocol tests pass.
-- [ ] Queue ownership, limits, slot retention, and transfer tests pass.
-- [ ] Cancel and late-result error tests pass.
+- [x] Production `fromEncoded` wiring and mock-based protocol tests pass.
+- [x] Queue ownership, limits, slot retention, and transfer tests pass.
+- [x] Cancel and late-result error tests pass.
 
 ##### 3.3.3.2 Add file adapter and paired preview ownership
 
