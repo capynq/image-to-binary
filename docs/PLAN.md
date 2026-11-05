@@ -782,8 +782,11 @@ Ordered steps:
 3. Record source metadata and a source lifecycle state (empty, importing,
    ready, failed, disposed) in the adapter, and dispose the previous session
    only when a replacement is accepted.
-4. Free original and artwork preview artifacts (frames, bitmaps, object URLs)
-   on replace, failure, cancel, and dispose.
+4. Retain the accepted original and artwork artifacts (frames, bitmaps, object
+   URLs) when a replacement fails, is cancelled, or is superseded, and dispose
+   only the new unaccepted late artifacts then. Dispose the accepted pair on a
+   successful replace, reset, and dispose. Settings changes invalidate the
+   artwork only and retain the original.
 5. Make late results, cancellation, and replacement requests return typed
    errors that preserve the currently accepted source and its metadata.
 6. Add worker and adapter tests for transfer, slot retention, lifecycle
@@ -792,8 +795,9 @@ Ordered steps:
 
 Acceptance checks: encoded bytes are detached on the sender after transfer; a
 failed, cancelled, or superseded import never disturbs the accepted source;
-artifacts are released in every terminal path; the frontend format check,
-type check, and unit tests pass.
+new unaccepted artifacts are released in every terminal path, and the accepted
+pair is released only on a successful replace, reset, or dispose; the frontend
+format check, type check, and unit tests pass.
 
 Proposed commit title: `feat: import encoded images in processing worker`
 
@@ -802,6 +806,112 @@ Completion checklist:
 - [ ] Transfer and slot-retention tests pass.
 - [ ] Source lifecycle and artifact cleanup tests pass.
 - [ ] Late, cancel, and replacement errors preserve the accepted source.
+
+Parent 3.3.3 keeps the scope, acceptance checks, and checklist above. It is
+delivered as the three ordered, independently reviewable commits below and
+stays incomplete until all three are committed and its own checklist is
+satisfied. The split adds no scope and changes no phase status.
+
+##### 3.3.3.1 Add encoded worker transport
+
+Objective: carry encoded-input and original-preview requests through the
+processing worker protocol with one queue owner and no adapter or UI change.
+
+Ordered steps:
+
+1. Add the production `fromEncoded` wiring from the worker protocol, client,
+   engine, and host to the real WASM decode already implemented in 3.3.1; this
+   wiring is required here and adds no second decode path. Also add the
+   original-preview request.
+2. Transfer the encoded buffer rather than cloning it, and keep binary payloads
+   out of JSON state.
+3. Keep one queue owner, with the physical slot held through the synchronous
+   decode until it returns.
+4. Enforce encoded-size and request limits before transfer, and define
+   cancellation and typed late-result handling.
+5. Only the tests in this substep use mocks; production code uses the real
+   WASM decode through the new wiring.
+
+Acceptance checks: the production `fromEncoded` wiring reaches the 3.3.1
+decode; encoded bytes are detached on the sender after transfer; limits fail
+before transfer; no second job runs on the worker while decode holds the slot;
+cancel and late results return typed errors. The frontend format check, type
+check, and unit tests pass.
+
+Proposed commit title: `feat: add encoded import worker transport`
+
+Completion checklist:
+
+- [ ] Production `fromEncoded` wiring and mock-based protocol tests pass.
+- [ ] Queue ownership, limits, slot retention, and transfer tests pass.
+- [ ] Cancel and late-result error tests pass.
+
+##### 3.3.3.2 Add file adapter and paired preview ownership
+
+Objective: give the adapter and controller one lifecycle for the accepted
+source and its original and artwork previews.
+
+Ordered steps:
+
+1. Read `File` bytes lazily, only for an accepted import, and record source
+   metadata from the file and the decode result.
+2. Track source lifecycle (empty, importing, ready, failed, disposed) in the
+   adapter, and release the previous source handle only when a replacement is
+   accepted.
+3. Retain the accepted original and artwork pair when a replacement fails, is
+   cancelled, or is superseded, and dispose only the new unaccepted late
+   artifacts then. Dispose the accepted pair on a successful replace, reset, and
+   dispose. Settings changes invalidate the artwork only and retain the
+   original.
+4. Reject stale results and replacement requests with typed errors that
+   preserve the accepted source and its metadata.
+5. Cover each path with adapter and controller tests.
+
+Acceptance checks: file reads are lazy; a failed, cancelled, or superseded
+import never disturbs the accepted source or its original and artwork pair;
+new unaccepted artifacts are disposed in those paths; the accepted pair is
+disposed only on a successful replace, reset, or dispose; a settings change
+invalidates the artwork and keeps the original. The frontend format check, type
+check, and unit tests pass.
+
+Proposed commit title: `feat: own file import and paired previews in adapter`
+
+Completion checklist:
+
+- [ ] Lazy read and metadata tests pass.
+- [ ] Accepted-pair retention and disposal tests pass.
+- [ ] Artwork-only invalidation and stale/replacement tests pass.
+
+##### 3.3.3.3 Record browser import acceptance
+
+Objective: prove the full import path in a real browser through the real
+worker, and record the result.
+
+Ordered steps:
+
+1. Reuse the existing native-generated encoded fixtures. Add no new binary
+   fixtures and no Playwright test specs.
+2. Run project CLI browser probes against the real worker, covering import,
+   the bounded original preview, preserving the old source on failed,
+   cancelled, and superseded replacement, and cancellation.
+3. Keep probe output and reports under ignored `docs/reports/`, and state any
+   browser that was unavailable instead of claiming it passed.
+4. Commit a tracked README and `docs/PLAN.md` acceptance summary. Mark this
+   subphase and parent 3.3.3 complete only after their acceptance checks pass;
+   parent 3.3 remains incomplete until 3.3.4 also passes.
+
+Acceptance checks: the existing fixtures import once through the real worker
+with the expected dimensions; the original preview stays within its bound;
+failed, cancelled, and superseded imports keep the accepted source; reports
+stay ignored and only the README and plan summary are tracked.
+
+Proposed commit title: `docs: record browser import acceptance`
+
+Completion checklist:
+
+- [ ] Probes pass on existing fixtures with no new binary fixtures or specs.
+- [ ] Old-source preservation and cancellation pass through the real worker.
+- [ ] README and plan acceptance summary are tracked; reports stay ignored.
 
 #### 3.3.4 Add import UI and original/artwork selection
 
