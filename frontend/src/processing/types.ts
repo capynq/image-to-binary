@@ -21,7 +21,9 @@ export interface StudioMetadata {
   readonly name: string
   readonly width: number
   readonly height: number
-  readonly source: 'demo'
+  readonly source: 'demo' | 'file'
+  /** Size in bytes of the encoded input file; absent for the demo fixture. */
+  readonly inputBytes?: number
 }
 
 export interface DemoFixtureInput {
@@ -51,6 +53,7 @@ export interface StudioSnapshot {
   readonly settings: StudioSettings
   readonly metadata: StudioMetadata | null
   readonly preview: PreviewSnapshot | null
+  readonly original: PreviewSnapshot | null
   readonly error: string | null
 }
 
@@ -74,6 +77,9 @@ export interface PreviewArtifact {
   dispose(): void
 }
 
+/** `artwork` renders the converted output; `original` shows the bounded imported image. */
+export type PreviewKind = 'artwork' | 'original'
+
 /** Adapter boundary for import, deterministic rendering, export, and lifecycle ownership. */
 export interface ProcessingAdapter {
   createSession(): ProcessingSession
@@ -87,6 +93,7 @@ export interface ProcessingAdapter {
     source: ImportedSource,
     settings: StudioSettings,
     context: JobContext,
+    kind?: PreviewKind,
   ): Promise<PreviewArtifact>
   export(
     session: ProcessingSession,

@@ -1,13 +1,17 @@
 import { createDemoImage } from './demoImage'
 import { defaultUrlApi, isDemoFixture, UnsupportedInputError } from './demoAdapter'
+import { validateEncodedImport } from './protocol'
 import { renderPreviewPng } from './previewRenderer'
 import type { PreviewRenderer } from './previewRenderer'
 import type {
+  ImportInput,
   ImportedResult,
   ImportedSource,
   PreviewArtifact,
+  PreviewKind,
   ProcessingAdapter,
   ProcessingSession,
+  StudioMetadata,
   UrlApi,
 } from './types'
 import { validateSettings } from './types'
@@ -71,6 +75,30 @@ export function createBrowserProcessingAdapter(options: BrowserAdapterOptions): 
     }
     return record
   }
+  const retain = (
+    state: SessionState,
+    handle: SourceHandle,
+    metadata: StudioMetadata,
+  ): ImportedResult => {
+    if (state.disposed) {
+      handle.dispose()
+      throw new Error('Processing session is disposed.')
+    }
+    const source = {} as ImportedSource
+    const record: SourceRecord = { handle, released: false }
+    state.sources.set(source, record)
+    return {
+      source,
+      metadata,
+      dispose(): void {
+        if (!record.released) {
+          record.released = true
+          state.sources.delete(source)
+          handle.dispose()
+        }
+      },
+    }
+  }
   const createArtifact = async (pixels: PreviewPixels): Promise<PreviewArtifact> => {
     const blob = await renderPreview(pixels)
     const url = urlApi.createObjectURL(blob)
@@ -101,33 +129,51 @@ export function createBrowserProcessingAdapter(options: BrowserAdapterOptions): 
     async import(session, input, context): Promise<ImportedResult> {
       const state = assertSession(session)
       assertActive(state)
-      if (!isDemoFixture(input)) {
+      if (isDemoFixture(input)) {
+        const handle = await clientOf(state).importRgba(makeDemoImage, context.operationId)
+        return retain(state, handle, {
+          name: handle.name,
+          width: handle.width,
+          height: handle.height,
+          source: 'demo',
+        })
+      }
+      if (!isFileInput(input)) {
         throw new UnsupportedInputError()
       }
-      const handle = await clientOf(state).importRgba(makeDemoImage, context.operationId)
-      if (state.disposed) {
-        handle.dispose()
-        throw new Error('Processing session is disposed.')
-      }
-      const source = {} as ImportedSource
-      const record: SourceRecord = { handle, released: false }
-      state.sources.set(source, record)
-      return {
-        source,
-        metadata: { name: handle.name, width: handle.width, height: handle.height, source: 'demo' },
-        dispose(): void {
-          if (!record.released) {
-            record.released = true
-            state.sources.delete(source)
-            handle.dispose()
-          }
-        },
-      }
+      const file = input
+      const name = file.name
+      const inputBytes = file.size
+      const invalid = validateEncodedImport(name, inputBytes)
+      if (invalid !== null) throw new RangeError(invalid.message)
+      const handle = await clientOf(state).importEncoded(
+        async () => ({ name, bytes: await file.arrayBuffer() }),
+        context.operationId,
+      )
+      return retain(state, handle, {
+        name: handle.name,
+        width: handle.width,
+        height: handle.height,
+        source: 'file',
+        inputBytes,
+      })
     },
-    async preview(session, source, settings, context): Promise<PreviewArtifact> {
+    async preview(
+      session,
+      source,
+      settings,
+      context,
+      kind: PreviewKind = 'artwork',
+    ): Promise<PreviewArtifact> {
       const state = assertSession(session)
       assertActive(state)
       const record = sourceOf(state, source)
+      if (kind === 'original') {
+        return clientOf(state).originalPreview(record.handle, context.operationId, createArtifact)
+      }
+      if (kind !== 'artwork') {
+        throw new RangeError('Unknown preview kind.')
+      }
       validateSettings(settings)
       return clientOf(state).preview(
         record.handle,
@@ -157,4 +203,9 @@ export function createBrowserProcessingAdapter(options: BrowserAdapterOptions): 
       client?.dispose()
     },
   }
+}
+
+/** Narrows an import input to a real `File`; MIME type and extension are never consulted. */
+function isFileInput(input: ImportInput): input is File {
+  return typeof File === 'function' && input instanceof File
 }

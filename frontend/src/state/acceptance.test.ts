@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createDemoProcessingAdapter } from '../processing/demoAdapter'
-import type { JobContext, ProcessingAdapter } from '../processing/types'
+import type { JobContext, ProcessingAdapter, StudioMetadata } from '../processing/types'
 import { DEFAULT_SETTINGS } from '../processing/types'
 import { createStudioController, StaleOperationError } from './controller'
 
@@ -175,7 +175,7 @@ describe('phase 3.1 acceptance contracts', () => {
   })
 
   it('freezes nested snapshots and isolates adapter-owned metadata', async () => {
-    let adapterMetadata: { name: string; width: number; height: number; source: 'demo' } | undefined
+    let adapterMetadata: { -readonly [K in keyof StudioMetadata]: StudioMetadata[K] } | undefined
     const base = createDemoProcessingAdapter()
     const adapter: ProcessingAdapter = {
       createSession: () => base.createSession(),
@@ -218,7 +218,7 @@ describe('phase 3.1 acceptance contracts', () => {
       controller.import(new File(['input'], 'input.png', { type: 'image/png' })),
     ).rejects.toThrow('File conversion')
     expect(controller.getSnapshot().preview).toEqual(previous)
-    expect(controller.getSnapshot().error).toContain('Previous demo remains available.')
+    expect(controller.getSnapshot().error).toContain('Previous image remains available.')
     const exported = await controller.exportDemo('text')
     expect(await exported.text()).toBe('1010\n0101\n1010\n0101')
   })

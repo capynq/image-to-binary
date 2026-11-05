@@ -4,6 +4,8 @@ import type {
   ImportInput,
   ImportedResult,
   PreviewArtifact,
+  PreviewKind,
+  PreviewSnapshot,
   ProcessingAdapter,
   StudioSettings,
   StudioSnapshot,
@@ -29,7 +31,11 @@ export interface StudioController {
   loadDemo(): Promise<void>
   import(input: ImportInput): Promise<void>
   updateSettings(settings: StudioSettings): void
-  preview(): Promise<void>
+  /**
+   * Renders `kind` (default `artwork`) and publishes it only if the operation is still current.
+   * Rejects an unknown kind before any state changes.
+   */
+  preview(kind?: PreviewKind): Promise<void>
   exportDemo(format?: ExportFormat): Promise<Blob>
   reset(): void
   cancel(): void
@@ -53,6 +59,7 @@ export function createStudioController(options: StudioControllerOptions = {}): S
     settings: cloneSettings(options.settings ?? DEFAULT_SETTINGS),
     metadata: null,
     preview: null,
+    original: null,
     error: null,
   })
   validateSettings(snapshot.settings)
@@ -61,7 +68,7 @@ export function createStudioController(options: StudioControllerOptions = {}): S
   let operationSequence = 0
   let activeOperation: ActiveOperation | null = null
   let ownedImport: ImportedResult | null = null
-  let previewArtifact: PreviewArtifact | null = null
+  const artifacts: Record<PreviewKind, PreviewArtifact | null> = { artwork: null, original: null }
 
   const getSnapshot = (): StudioSnapshot => snapshot
 
@@ -76,16 +83,23 @@ export function createStudioController(options: StudioControllerOptions = {}): S
     emit()
   }
 
-  const releasePreview = (): void => {
-    previewArtifact?.dispose()
-    previewArtifact = null
-    setSnapshot({ preview: null })
+  const releaseArtifact = (kind: PreviewKind): void => {
+    const previous = artifacts[kind]
+    artifacts[kind] = null
+    setSnapshot(viewPatch(kind, null))
+    disposeQuietly(previous)
   }
 
-  const releaseImport = (): void => {
-    const previous = ownedImport
-    ownedImport = null
-    disposeQuietly(previous)
+  /** Atomically swaps the source and clears both artifacts; releases old resources afterwards. */
+  const replaceOwned = (next: ImportedResult | null, patch: Partial<StudioSnapshot>): void => {
+    const previous = [artifacts.artwork, artifacts.original, ownedImport]
+    artifacts.artwork = null
+    artifacts.original = null
+    ownedImport = next
+    setSnapshot({ ...patch, preview: null, original: null })
+    for (const resource of previous) {
+      disposeQuietly(resource)
+    }
   }
 
   const invalidate = (): void => {
@@ -113,7 +127,7 @@ export function createStudioController(options: StudioControllerOptions = {}): S
     if (isCurrent(operation)) {
       activeOperation = null
       const message = error instanceof Error ? error.message : String(error)
-      const suffix = ownedImport === null ? '' : ' Previous demo remains available.'
+      const suffix = ownedImport === null ? '' : ' Previous image remains available.'
       setSnapshot({ status: 'error', error: `${message}${suffix}`, progress: 0 })
     }
   }
@@ -129,16 +143,12 @@ export function createStudioController(options: StudioControllerOptions = {}): S
         disposeQuietly(imported)
         return
       }
-      const previous = ownedImport
-      ownedImport = imported
       activeOperation = null
-      releasePreview()
-      setSnapshot({
+      replaceOwned(imported, {
         status: 'ready',
         metadata: Object.freeze({ ...imported.metadata }),
         progress: 1,
       })
-      disposeQuietly(previous)
     } catch (error) {
       const current = isCurrent(operation)
       fail(operation, error)
@@ -146,9 +156,12 @@ export function createStudioController(options: StudioControllerOptions = {}): S
     }
   }
 
-  const preview = async (): Promise<void> => {
+  const preview = async (kind: PreviewKind = 'artwork'): Promise<void> => {
     if (disposed) {
       throw new Error('Studio controller is disposed.')
+    }
+    if (kind !== 'artwork' && kind !== 'original') {
+      throw new RangeError('Unknown preview kind.')
     }
     const owned = ownedImport
     if (owned === null) {
@@ -156,23 +169,33 @@ export function createStudioController(options: StudioControllerOptions = {}): S
     }
     const operation = beginOperation('processing')
     try {
-      const artifact = await adapter.preview(session, owned.source, snapshot.settings, operation)
+      const artifact = await adapter.preview(
+        session,
+        owned.source,
+        snapshot.settings,
+        operation,
+        kind,
+      )
       if (!isCurrent(operation)) {
-        artifact.dispose()
+        disposeQuietly(artifact)
         return
       }
-      previewArtifact?.dispose()
-      previewArtifact = artifact
+      const previous = artifacts[kind]
+      artifacts[kind] = artifact
       activeOperation = null
       setSnapshot({
+        ...viewPatch(
+          kind,
+          Object.freeze({
+            url: artifact.url,
+            width: artifact.width,
+            height: artifact.height,
+          }),
+        ),
         status: 'ready',
-        preview: Object.freeze({
-          url: artifact.url,
-          width: artifact.width,
-          height: artifact.height,
-        }),
         progress: 1,
       })
+      disposeQuietly(previous)
     } catch (error) {
       const current = isCurrent(operation)
       fail(operation, error)
@@ -206,7 +229,7 @@ export function createStudioController(options: StudioControllerOptions = {}): S
         throw error
       }
       invalidate()
-      releasePreview()
+      releaseArtifact('artwork')
       setSnapshot({
         settings: cloneSettings(settings),
         status: ownedImport === null ? 'idle' : 'ready',
@@ -247,9 +270,7 @@ export function createStudioController(options: StudioControllerOptions = {}): S
         return
       }
       invalidate()
-      releaseImport()
-      releasePreview()
-      setSnapshot({ status: 'idle', metadata: null, progress: 0, error: null })
+      replaceOwned(null, { status: 'idle', metadata: null, progress: 0, error: null })
     },
     cancel: () => {
       if (disposed || activeOperation === null) {
@@ -263,8 +284,7 @@ export function createStudioController(options: StudioControllerOptions = {}): S
         return
       }
       invalidate()
-      releasePreview()
-      releaseImport()
+      replaceOwned(null, { metadata: null })
       adapter.dispose(session)
       disposed = true
       setSnapshot({ status: 'disposed', metadata: null, progress: 0, error: null })
@@ -279,4 +299,8 @@ function disposeQuietly(resource: { dispose(): void } | null): void {
   try {
     resource?.dispose()
   } catch {}
+}
+
+function viewPatch(kind: PreviewKind, view: PreviewSnapshot | null): Partial<StudioSnapshot> {
+  return kind === 'artwork' ? { preview: view } : { original: view }
 }

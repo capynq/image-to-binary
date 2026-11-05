@@ -779,9 +779,9 @@ Ordered steps:
    state.
 2. Keep the scheduler's physical slot held through the synchronous decode
    until it returns, so no other job runs on that worker in the meantime.
-3. Record source metadata and a source lifecycle state (empty, importing,
-   ready, failed, disposed) in the adapter, and dispose the previous session
-   only when a replacement is accepted.
+3. Keep source handles and metadata ownership in the adapter, and expose
+   import, ready, error and disposed states through the controller. Release
+   the previous source handle only when a replacement is accepted.
 4. Retain the accepted original and artwork artifacts (frames, bitmaps, object
    URLs) when a replacement fails, is cancelled, or is superseded, and dispose
    only the new unaccepted late artifacts then. Dispose the accepted pair on a
@@ -855,9 +855,9 @@ Ordered steps:
 
 1. Read `File` bytes lazily, only for an accepted import, and record source
    metadata from the file and the decode result.
-2. Track source lifecycle (empty, importing, ready, failed, disposed) in the
-   adapter, and release the previous source handle only when a replacement is
-   accepted.
+2. Keep source ownership in the adapter and transient import states in the
+   controller, without duplicating UI state inside the adapter. Release the
+   previous source handle only when a replacement is accepted.
 3. Retain the accepted original and artwork pair when a replacement fails, is
    cancelled, or is superseded, and dispose only the new unaccepted late
    artifacts then. Dispose the accepted pair on a successful replace, reset, and
@@ -878,9 +878,9 @@ Proposed commit title: `feat: own file import and paired previews in adapter`
 
 Completion checklist:
 
-- [ ] Lazy read and metadata tests pass.
-- [ ] Accepted-pair retention and disposal tests pass.
-- [ ] Artwork-only invalidation and stale/replacement tests pass.
+- [x] Lazy read and metadata tests pass.
+- [x] Accepted-pair retention and disposal tests pass.
+- [x] Artwork-only invalidation and stale/replacement tests pass.
 
 ##### 3.3.3.3 Record browser import acceptance
 

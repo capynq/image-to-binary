@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import { createBrowserProcessingAdapter, ExportUnavailableError } from './browserAdapter'
 import type { BrowserAdapterOptions } from './browserAdapter'
-import type { JobContext, ProcessingAdapter } from './types'
+import { createDemoProcessingAdapter, UnsupportedPreviewKindError } from './demoAdapter'
+import type { JobContext, PreviewKind, ProcessingAdapter } from './types'
 import { DEFAULT_SETTINGS } from './types'
 import type {
+  EncodedImportSource,
   PreviewPixels,
   ProcessingClient,
   Releasable,
@@ -15,20 +17,21 @@ const context = (operationId: number): JobContext => ({ operationId, generation:
 
 class FakeClient implements ProcessingClient {
   imported: Uint8Array | null = null
+  encoded: { readonly name: string; readonly bytes: Uint8Array } | null = null
+  gate: Promise<void> | null = null
   handleDisposals = 0
   clientDisposals = 0
   cancelled: number[] = []
   previews = 0
+  originals = 0
 
-  async importRgba(source: RgbaImportSource): Promise<SourceHandle> {
-    const image = typeof source === 'function' ? await source() : source
-    this.imported = new Uint8Array(image.pixels)
+  private handleFor(name: string, width: number, height: number): SourceHandle {
     let released = false
     return {
       sourceId: 1,
-      name: image.name,
-      width: image.width,
-      height: image.height,
+      name,
+      width,
+      height,
       dispose: () => {
         if (!released) {
           released = true
@@ -38,8 +41,17 @@ class FakeClient implements ProcessingClient {
     }
   }
 
-  importEncoded(): Promise<SourceHandle> {
-    return Promise.reject(new Error('Encoded import is not used by this test.'))
+  async importRgba(source: RgbaImportSource): Promise<SourceHandle> {
+    const image = typeof source === 'function' ? await source() : source
+    this.imported = new Uint8Array(image.pixels)
+    return this.handleFor(image.name, image.width, image.height)
+  }
+
+  async importEncoded(source: EncodedImportSource): Promise<SourceHandle> {
+    if (this.gate !== null) await this.gate
+    const image = typeof source === 'function' ? await source() : source
+    this.encoded = { name: image.name, bytes: new Uint8Array(image.bytes) }
+    return this.handleFor(image.name, 3, 2)
   }
 
   originalPreview<T extends Releasable>(
@@ -47,6 +59,7 @@ class FakeClient implements ProcessingClient {
     _operationId: number,
     finalize: (pixels: PreviewPixels) => Promise<T>,
   ): Promise<T> {
+    this.originals += 1
     return finalize({ width: 2, height: 1, pixels: new ArrayBuffer(8) })
   }
 
@@ -75,6 +88,30 @@ class FakeClient implements ProcessingClient {
   dispose(): void {
     this.clientDisposals += 1
   }
+}
+
+interface FileProbe {
+  readonly file: File
+  readonly probe: { reads: number }
+}
+
+function fileProbe(
+  name: string,
+  bytes: readonly number[],
+  options: { readonly size?: number; readonly type?: string } = {},
+): FileProbe {
+  const probe = { reads: 0 }
+  const file = new File([new Uint8Array(bytes)], name, { type: options.type ?? '' })
+  Object.defineProperty(file, 'arrayBuffer', {
+    value: () => {
+      probe.reads += 1
+      return Promise.resolve(new Uint8Array(bytes).buffer)
+    },
+  })
+  if (options.size !== undefined) {
+    Object.defineProperty(file, 'size', { value: options.size })
+  }
+  return { file, probe }
 }
 
 function harness(overrides: Partial<BrowserAdapterOptions> = {}): {
@@ -134,6 +171,127 @@ describe('browser processing adapter', () => {
     const session = adapter.createSession()
     await expect(adapter.import(session, {} as File, context(1))).rejects.toThrow('File conversion')
     expect(clients).toHaveLength(0)
+  })
+
+  it('imports a real file through a lazy producer with normalized metadata', async () => {
+    let open: () => void = () => undefined
+    const client = new FakeClient()
+    client.gate = new Promise<void>((resolve) => {
+      open = resolve
+    })
+    const { adapter } = harness({ createClient: () => client })
+    const { file, probe } = fileProbe('TIFF.data', [1, 2, 3, 4], { type: 'image/tiff' })
+    const session = adapter.createSession()
+    const pending = adapter.import(session, file, context(1))
+    await Promise.resolve()
+    expect(probe.reads).toBe(0)
+    open()
+    const result = await pending
+    expect(probe.reads).toBe(1)
+    expect(result.metadata).toEqual({
+      name: 'TIFF.data',
+      width: 3,
+      height: 2,
+      source: 'file',
+      inputBytes: 4,
+    })
+    expect(client.encoded).toEqual({ name: 'TIFF.data', bytes: new Uint8Array([1, 2, 3, 4]) })
+    expect(client.previews + client.originals).toBe(0)
+  })
+
+  it('validates file name and size before creating a client or reading bytes', async () => {
+    const cases = [
+      fileProbe('empty.png', []),
+      fileProbe('huge.png', [1], { size: 256 * 1024 * 1024 + 1 }),
+      fileProbe('', [1]),
+      fileProbe('n'.repeat(257), [1]),
+    ]
+    for (const { file, probe } of cases) {
+      const { adapter, clients } = harness()
+      const session = adapter.createSession()
+      await expect(adapter.import(session, file, context(1))).rejects.toBeInstanceOf(RangeError)
+      expect(clients).toHaveLength(0)
+      expect(probe.reads).toBe(0)
+    }
+  })
+
+  it('frees the handle and rejects when the session is disposed during a file import', async () => {
+    let open: () => void = () => undefined
+    const client = new FakeClient()
+    client.gate = new Promise<void>((resolve) => {
+      open = resolve
+    })
+    const { adapter } = harness({ createClient: () => client })
+    const { file } = fileProbe('late.png', [1, 2])
+    const session = adapter.createSession()
+    const pending = adapter.import(session, file, context(1))
+    const assertion = expect(pending).rejects.toThrow('disposed')
+    adapter.dispose(session)
+    open()
+    await assertion
+    expect(client.handleDisposals).toBe(1)
+  })
+
+  it('dispatches original previews for file and demo sources without artwork settings', async () => {
+    const { adapter, clients, urls } = harness()
+    const session = adapter.createSession()
+    const demo = await adapter.import(session, { kind: 'demo' }, context(1))
+    const { file } = fileProbe('photo.png', [1, 2, 3])
+    const imported = await adapter.import(session, file, context(2))
+    const invalid = { cellSize: 1, fontSize: 1, threshold: 999 }
+    for (const [index, source] of [demo.source, imported.source].entries()) {
+      const artifact = await adapter.preview(
+        session,
+        source,
+        invalid,
+        context(3 + index),
+        'original',
+      )
+      expect(artifact).toMatchObject({ width: 2, height: 1 })
+      artifact.dispose()
+      artifact.dispose()
+    }
+    expect(clients[0]?.originals).toBe(2)
+    expect(clients[0]?.previews).toBe(0)
+    expect(urls.revoked).toEqual(urls.created)
+    expect(urls.created).toHaveLength(2)
+    await expect(adapter.preview(session, demo.source, invalid, context(9))).rejects.toBeInstanceOf(
+      RangeError,
+    )
+    await expect(
+      adapter.preview(session, demo.source, DEFAULT_SETTINGS, context(10), 'bogus' as PreviewKind),
+    ).rejects.toBeInstanceOf(RangeError)
+  })
+
+  it('guards original previews against foreign, released, and disposed state', async () => {
+    const first = harness()
+    const second = harness()
+    const session = first.adapter.createSession()
+    const foreign = second.adapter.createSession()
+    const result = await first.adapter.import(session, { kind: 'demo' }, context(1))
+    await expect(
+      second.adapter.preview(foreign, result.source, DEFAULT_SETTINGS, context(2), 'original'),
+    ).rejects.toThrow('does not belong')
+    result.dispose()
+    await expect(
+      first.adapter.preview(session, result.source, DEFAULT_SETTINGS, context(3), 'original'),
+    ).rejects.toThrow('does not belong')
+    first.adapter.dispose(session)
+    await expect(
+      first.adapter.preview(session, result.source, DEFAULT_SETTINGS, context(4), 'original'),
+    ).rejects.toThrow('disposed')
+  })
+
+  it('makes the demo-only adapter fail explicitly for original previews', async () => {
+    const adapter = createDemoProcessingAdapter()
+    const session = adapter.createSession()
+    const { source } = await adapter.import(session, { kind: 'demo' }, context(1))
+    await expect(
+      adapter.preview(session, source, DEFAULT_SETTINGS, context(2), 'original'),
+    ).rejects.toBeInstanceOf(UnsupportedPreviewKindError)
+    await expect(
+      adapter.preview(session, source, DEFAULT_SETTINGS, context(3), 'bogus' as PreviewKind),
+    ).rejects.toBeInstanceOf(RangeError)
   })
 
   it('revokes a preview URL exactly once and releases failed renders', async () => {

@@ -99,16 +99,17 @@ cancellation, live UI heartbeats during processing, golden parity with the
 native reference, and real React StrictMode ownership transitions. Firefox,
 Windows and Linux remain unverified. The earlier WebKit layout check predates
 worker integration and is not proof of current worker behavior. No general
-performance guarantee is made. Browser file import (3.3), PNG download (3.4) and
-text export (6.3) are not implemented, so Export is disabled.
+performance guarantee is made. The import UI (3.3.4), PNG download (3.4) and
+text export (6.3) remain pending, so Export is disabled.
 
-Phase 3.3.3.1 adds encoded imports and bounded original-preview requests to
-the worker protocol and client. Both use the existing scheduler and source
-ownership rules; encoded buffers are transferred, and decode yields before
-publishing its source so queued cancellation can be observed. The frontend's
-165 tests cover this transport with a mock engine. File adapter/controller
-wiring (3.3.3.2), real-browser acceptance (3.3.3.3), and the import UI (3.3.4)
-remain pending.
+Phases 3.3.3.1 and 3.3.3.2 connect encoded imports and bounded original-preview
+requests through the worker, adapter and controller. File reads are lazy,
+encoded buffers are transferred, and decode yields before publishing its
+source so queued cancellation can be observed. The controller owns original
+and artwork previews independently: settings invalidate artwork only, and
+failed replacements retain the accepted source and both previews. The 184
+frontend tests cover these contracts. Complete browser acceptance (3.3.3.3)
+and the import UI (3.3.4) remain pending.
 
 ## WASM bindings
 
@@ -142,9 +143,8 @@ Contract and constraints:
   the caller's array is never retained or mutated. GIF and TIFF use the first
   frame or page. Decoding is synchronous, and codec allocations are best
   effort. Node/WASM tests cover all six codecs, orientation, first page, stable
-  error codes and buffer ownership. The browser file UI remains 3.3.3/3.3.4 and
-  the bounded original preview is implemented in 3.3.2 (next bullets); worker
-  wiring remains 3.3.3 and the UI remains 3.3.4.
+  error codes and buffer ownership. Worker and adapter wiring is implemented;
+  the browser file UI remains in 3.3.4.
 - `startOriginalPreview(generation)` starts a bounded preview of the original
   image. It uses the same `advance`/`cancel`/`finish` lifecycle as
   `startPreview`, and generations are strictly increasing and shared across
@@ -154,8 +154,8 @@ Contract and constraints:
   `Arc` decoded source and never clones the full source. Output reservation is
   at most 10.24 MB (1600 x 1600 x 4). Calls are synchronous, and a call already
   in progress is not preempted; cancellation and stale checks happen only at
-  call boundaries. Worker wiring (3.3.3) and the import UI (3.3.4) are still
-  pending.
+  call boundaries. Browser acceptance (3.3.3.3) and the import UI (3.3.4)
+  remain pending.
 - Numeric arguments must be JS numbers holding safe integers; null, booleans,
   strings, NaN, fractions, negatives and out-of-range values are rejected,
   never coerced. Generations must strictly increase (zero is valid first).
@@ -174,16 +174,18 @@ Contract and constraints:
   `invalid_argument`, `invalid_dimensions`, `invalid_settings`,
   `invalid_progress`, `resource_limit_exceeded`, `arithmetic_overflow`,
   `cancelled`, `stale_generation`, `disposed`, `no_job`, `job_incomplete`,
-  `frame_consumed`, `internal`.
+  `frame_consumed`, `encoded_too_large`, `unsupported_format`, `decode_failed`,
+  `reservation_failed`, `internal`.
 
-Scope: phases 3.2.2.3 and 3.2.2 are complete. Real normalized-RGBA bindings
-exist, validated by native tests, strict Clippy, formatting, the workspace
-wasm32 check, the target-web build and 18 Node tests covering source/grid
-validation, preview parity with native Rust references, cancellation,
-generations, copy semantics and typed declarations. The browser worker
-transport consumes these bindings, and phases 3.2.3 and 3.2 are complete. File
-import (next, 3.3), exports (3.4) and the native shell are pending. No Firefox,
-Windows or Linux test coverage, deployment or performance claim is made.
+Scope: phase 3.2 and the encoded-source and original-preview bindings in
+3.3.1–3.3.2 are complete. Validation includes native tests, strict Clippy,
+formatting, the workspace wasm32 check, the target-web build and 59 real Node
+binding tests covering codec/orientation fixtures, source/grid validation,
+preview parity, cancellation, generations, copy semantics and declarations.
+The worker and file adapter/controller consume these bindings. Browser
+acceptance (3.3.3.3), import UI (3.3.4), exports (3.4) and the native shell
+remain pending. No Firefox, Windows or Linux test coverage, deployment or
+performance claim is made.
 
 ## Python reference behavior
 

@@ -5,6 +5,7 @@ import type {
   ImportInput,
   JobContext,
   PreviewArtifact,
+  PreviewKind,
   ProcessingAdapter,
   ProcessingSession,
   StudioSettings,
@@ -51,6 +52,13 @@ export class UnsupportedExportError extends Error {
   constructor() {
     super('PNG export is not available until the PNG export phase.')
     this.name = 'UnsupportedExportError'
+  }
+}
+
+export class UnsupportedPreviewKindError extends Error {
+  constructor() {
+    super('Original preview is not available in the demo-only adapter.')
+    this.name = 'UnsupportedPreviewKindError'
   }
 }
 
@@ -102,10 +110,22 @@ export function createDemoProcessingAdapter(options: DemoAdapterOptions = {}): P
         finishOperation(demoSession, guard)
       }
     },
-    async preview(session, source, settings, context): Promise<PreviewArtifact> {
+    async preview(
+      session,
+      source,
+      settings,
+      context,
+      kind: PreviewKind = 'artwork',
+    ): Promise<PreviewArtifact> {
       const demoSession = assertSession(session)
       assertActive(demoSession)
       assertSource(demoSession, source)
+      if (kind === 'original') {
+        throw new UnsupportedPreviewKindError()
+      }
+      if (kind !== 'artwork') {
+        throw new RangeError('Unknown preview kind.')
+      }
       validateSettings(settings)
       const guard = beginOperation(demoSession, context)
       try {
