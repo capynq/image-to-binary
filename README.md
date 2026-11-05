@@ -135,7 +135,19 @@ Contract and constraints:
   frame or page. Decoding is synchronous, and codec allocations are best
   effort. Node/WASM tests cover all six codecs, orientation, first page, stable
   error codes and buffer ownership. The browser file UI remains 3.3.3/3.3.4 and
-  the bounded original preview remains 3.3.2.
+  the bounded original preview is implemented in 3.3.2 (next bullets); worker
+  wiring remains 3.3.3 and the UI remains 3.3.4.
+- `startOriginalPreview(generation)` starts a bounded preview of the original
+  image. It uses the same `advance`/`cancel`/`finish` lifecycle as
+  `startPreview`, and generations are strictly increasing and shared across
+  both modes. The output longest edge is at most 1600 pixels and a source is
+  never upscaled. Resampling uses nearest-center mapping and preserves alpha
+  and the post-orientation aspect ratio. It reads the session's same private
+  `Arc` decoded source and never clones the full source. Output reservation is
+  at most 10.24 MB (1600 x 1600 x 4). Calls are synchronous, and a call already
+  in progress is not preempted; cancellation and stale checks happen only at
+  call boundaries. Worker wiring (3.3.3) and the import UI (3.3.4) are still
+  pending.
 - Numeric arguments must be JS numbers holding safe integers; null, booleans,
   strings, NaN, fractions, negatives and out-of-range values are rejected,
   never coerced. Generations must strictly increase (zero is valid first).

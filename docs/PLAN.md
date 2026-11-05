@@ -762,9 +762,9 @@ Proposed commit title: `feat: add bounded original preview frame`
 
 Completion checklist:
 
-- [ ] Dimension, aspect, and orientation tests pass in core and WASM.
-- [ ] No full-source transfer; output memory is bounded.
-- [ ] Cancellation and stale checks are tested at boundaries.
+- [x] Dimension, aspect, and orientation tests pass in core and WASM.
+- [x] No full-source transfer; output memory is bounded.
+- [x] Cancellation and stale checks are tested at boundaries.
 
 #### 3.3.3 Add encoded worker import and adapter ownership
 

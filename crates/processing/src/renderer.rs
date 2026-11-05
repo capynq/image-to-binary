@@ -119,6 +119,24 @@ pub struct PreviewTask {
 }
 
 impl RenderedFrame {
+    pub(crate) fn from_rgba(
+        width: u32,
+        height: u32,
+        pixels: Vec<u8>,
+    ) -> Result<Self, ContractError> {
+        let expected = u64::from(width)
+            .checked_mul(u64::from(height))
+            .and_then(|count| count.checked_mul(4))
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        if width == 0 || height == 0 || u64::try_from(pixels.len()).ok() != Some(expected) {
+            return Err(ContractError::InvalidDimensions);
+        }
+        Ok(Self {
+            width,
+            height,
+            pixels,
+        })
+    }
     /// Returns output width in pixels.
     #[must_use]
     pub const fn width(&self) -> u32 {

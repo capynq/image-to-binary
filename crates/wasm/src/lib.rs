@@ -255,6 +255,27 @@ impl ImageSession {
         .map(JobStage::from)
     }
 
+    /// Starts a bounded original-image preview superseding any current job.
+    ///
+    /// The job reports `Preview` then `Ready` and shares `advance`, `cancel`, `finish`,
+    /// `stage` and the progress getters with artwork jobs. `generation` must exceed
+    /// every earlier accepted generation of either kind. The frame is the normalized
+    /// source downscaled by nearest-center sampling to a longest edge of at most 1600
+    /// pixels, never upscaled; source pixels are never exposed. Output allocation is
+    /// synchronous.
+    ///
+    /// # Errors
+    ///
+    /// Throws `invalid_argument`, `stale_generation`, `disposed` or a resource error;
+    /// invalid or stale starts keep the current job.
+    #[wasm_bindgen(js_name = startOriginalPreview)]
+    pub fn start_original_preview(
+        &mut self,
+        #[wasm_bindgen(unchecked_param_type = "number")] generation: &JsValue,
+    ) -> Result<JobStage, JsValue> {
+        lift(self.inner.start_original_preview(number(generation))).map(JobStage::from)
+    }
+
     /// Returns the current job stage, `Idle` when there is none.
     ///
     /// # Errors

@@ -326,13 +326,15 @@ fn encoded_entry(fixture: &Fixture) -> Result<String, Box<dyn Error>> {
         metadata.dimensions().height(),
     );
     let channels = metadata.channels();
+    let normalized = base64(source.pixels());
     let preview = preview_of(source)?;
     Ok(format!(
-        r#"{{"name":"{}","width":{width},"height":{height},"channels":{channels},"previewWidth":{},"previewHeight":{},"bytes":"{}","preview":"{}"}}"#,
+        r#"{{"name":"{}","width":{width},"height":{height},"channels":{channels},"previewWidth":{},"previewHeight":{},"bytes":"{}","source":"{}","preview":"{}"}}"#,
         fixture.name,
         preview.width(),
         preview.height(),
         base64(&fixture.bytes),
+        normalized,
         base64(preview.pixels())
     ))
 }

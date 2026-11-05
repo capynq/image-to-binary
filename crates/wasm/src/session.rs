@@ -11,8 +11,8 @@ use image_to_binary_core::{
     ContractError, Dimensions, Generation, ResourceLimits, Sampling, SourceMetadata,
 };
 use image_to_binary_processing::{
-    decode, DecodeLimits, DecodedSource, PreviewAdvance, PreviewTask, RenderOptions, RenderedFrame,
-    Renderer, Sampler, SamplingAdvance, SamplingPlan, SamplingTask,
+    decode, DecodeLimits, DecodedSource, OriginalPreviewTask, PreviewAdvance, PreviewTask,
+    RenderOptions, RenderedFrame, Renderer, Sampler, SamplingAdvance, SamplingPlan, SamplingTask,
 };
 
 use crate::error::{BindingError, ErrorCode};
@@ -241,26 +241,31 @@ impl PreviewSettings {
 
 #[derive(Debug)]
 enum Phase {
-    Sampling(Box<SamplingTask>),
+    Sampling(Box<SamplingTask>, RenderOptions),
     Preview(Box<PreviewTask>),
     Ready(Box<PreviewTask>),
+    Original(Box<OriginalPreviewTask>),
+    OriginalReady(Box<OriginalPreviewTask>),
     Failed(BindingError),
 }
 
 impl Phase {
     fn stage(&self) -> Stage {
         match self {
-            Self::Sampling(_) => Stage::Sampling,
-            Self::Preview(_) => Stage::Preview,
-            Self::Ready(_) => Stage::Ready,
+            Self::Sampling(..) => Stage::Sampling,
+            Self::Preview(_) | Self::Original(_) => Stage::Preview,
+            Self::Ready(_) | Self::OriginalReady(_) => Stage::Ready,
             Self::Failed(_) => Stage::Failed,
         }
     }
 
     fn progress(&self) -> (u64, u64) {
         match self {
-            Self::Sampling(task) => (task.progress().completed(), task.progress().total()),
+            Self::Sampling(task, _) => (task.progress().completed(), task.progress().total()),
             Self::Preview(task) | Self::Ready(task) => {
+                (task.progress().completed(), task.progress().total())
+            }
+            Self::Original(task) | Self::OriginalReady(task) => {
                 (task.progress().completed(), task.progress().total())
             }
             Self::Failed(_) => (0, 0),
@@ -271,7 +276,6 @@ impl Phase {
 #[derive(Debug)]
 struct Job {
     generation: Generation,
-    options: RenderOptions,
     phase: Phase,
 }
 
@@ -284,7 +288,7 @@ fn step_sampling(
     budget: u64,
 ) -> Phase {
     match task.advance(budget, generation) {
-        Ok(SamplingAdvance::InProgress(_)) => Phase::Sampling(task),
+        Ok(SamplingAdvance::InProgress(_)) => Phase::Sampling(task, options),
         Ok(SamplingAdvance::Completed(_)) => {
             let outcome = sampler
                 .complete(*task, generation)
@@ -311,6 +315,14 @@ fn step_preview(mut task: Box<PreviewTask>, generation: Generation, budget: u64)
     }
 }
 
+fn step_original(mut task: Box<OriginalPreviewTask>, generation: Generation, budget: u64) -> Phase {
+    match task.advance(budget, generation) {
+        Ok(PreviewAdvance::InProgress(_)) => Phase::Original(task),
+        Ok(PreviewAdvance::Completed(_)) => Phase::OriginalReady(task),
+        Err(error) => Phase::Failed(error.into()),
+    }
+}
+
 impl Job {
     fn advance(
         &mut self,
@@ -319,7 +331,6 @@ impl Job {
         budget: u64,
     ) -> Result<Stage, BindingError> {
         let generation = self.generation;
-        let options = self.options;
         let phase = mem::replace(
             &mut self.phase,
             Phase::Failed(BindingError::new(
@@ -328,11 +339,12 @@ impl Job {
             )),
         );
         self.phase = match phase {
-            Phase::Sampling(task) => {
+            Phase::Sampling(task, options) => {
                 step_sampling(task, sampler, renderer, options, generation, budget)
             }
             Phase::Preview(task) => step_preview(task, generation, budget),
-            done @ (Phase::Ready(_) | Phase::Failed(_)) => done,
+            Phase::Original(task) => step_original(task, generation, budget),
+            done @ (Phase::Ready(_) | Phase::OriginalReady(_) | Phase::Failed(_)) => done,
         };
         match &self.phase {
             Phase::Failed(error) => Err(error.clone()),
@@ -344,6 +356,7 @@ impl Job {
 #[derive(Debug)]
 struct Live {
     metadata: SourceMetadata,
+    source: Arc<DecodedSource>,
     sampler: Sampler,
     renderer: Renderer,
     job: Option<Job>,
@@ -360,14 +373,34 @@ impl Live {
     }
 
     fn start(&mut self, generation: u64, settings: PreviewSettings) -> Result<Stage, BindingError> {
+        self.ensure_newer(generation)?;
+        let job = self.begin(Generation::new(generation), settings)?;
+        Ok(self.commit(generation, job))
+    }
+
+    fn start_original(&mut self, generation: u64) -> Result<Stage, BindingError> {
+        self.ensure_newer(generation)?;
+        let id = Generation::new(generation);
+        let task = OriginalPreviewTask::new(Arc::clone(&self.source), id)?;
+        let job = Job {
+            generation: id,
+            phase: Phase::Original(Box::new(task)),
+        };
+        Ok(self.commit(generation, job))
+    }
+
+    fn ensure_newer(&self, generation: u64) -> Result<(), BindingError> {
         if self.newest.is_some_and(|newest| generation <= newest) {
             return Err(stale("generation is not newer than the current job"));
         }
-        let job = self.begin(Generation::new(generation), settings)?;
+        Ok(())
+    }
+
+    fn commit(&mut self, generation: u64, job: Job) -> Stage {
         let stage = job.phase.stage();
         self.newest = Some(generation);
         self.job = Some(job);
-        Ok(stage)
+        stage
     }
 
     fn begin(
@@ -400,13 +433,9 @@ impl Live {
             SamplingPlan::Cached(grid) => Phase::Preview(Box::new(
                 self.renderer.preview_task(grid, options, generation)?,
             )),
-            SamplingPlan::Task(task) => Phase::Sampling(task),
+            SamplingPlan::Task(task) => Phase::Sampling(task, options),
         };
-        Ok(Job {
-            generation,
-            options,
-            phase,
-        })
+        Ok(Job { generation, phase })
     }
 
     fn advance(&mut self, generation: u64, budget: u64) -> Result<Stage, BindingError> {
@@ -435,27 +464,28 @@ impl Live {
     fn finish(&mut self, generation: u64) -> Result<Frame, BindingError> {
         self.check_generation(generation)?;
         match &self.job.as_ref().ok_or_else(no_job)?.phase {
-            Phase::Ready(_) => {}
+            Phase::Ready(_) | Phase::OriginalReady(_) => {}
             Phase::Failed(error) => return Err(error.clone()),
-            Phase::Sampling(_) | Phase::Preview(_) => {
+            Phase::Sampling(..) | Phase::Preview(_) | Phase::Original(_) => {
                 return Err(BindingError::new(
                     ErrorCode::JobIncomplete,
                     "the job has not finished rendering",
                 ))
             }
         }
+        let changed = || BindingError::new(ErrorCode::Internal, "job state changed during finish");
         let Some(Job {
             generation: job_generation,
-            phase: Phase::Ready(task),
-            ..
+            phase,
         }) = self.job.take()
         else {
-            return Err(BindingError::new(
-                ErrorCode::Internal,
-                "job state changed during finish",
-            ));
+            return Err(changed());
         };
-        Ok(Frame::new((*task).finish(job_generation)?))
+        match phase {
+            Phase::Ready(task) => Ok(Frame::new((*task).finish(job_generation)?)),
+            Phase::OriginalReady(task) => Ok(Frame::new((*task).finish(job_generation)?)),
+            _ => Err(changed()),
+        }
     }
 }
 
@@ -469,10 +499,12 @@ impl Session {
     /// Takes ownership of `source`; its pixels are moved, never cloned.
     pub(crate) fn new(source: DecodedSource) -> Result<Self, BindingError> {
         let metadata = source.metadata();
+        let source = Arc::new(source);
         Ok(Self {
             live: Some(Live {
                 metadata,
-                sampler: Sampler::new(Arc::new(source)),
+                sampler: Sampler::new(Arc::clone(&source)),
+                source,
                 renderer: Renderer::new()?,
                 job: None,
                 newest: None,
@@ -504,6 +536,15 @@ impl Session {
         let generation = safe_integer(generation, "generation")?;
         let settings = PreviewSettings::parse(cell_size, font_size, threshold, sampling)?;
         live.start(generation, settings)
+    }
+
+    pub(crate) fn start_original_preview(
+        &mut self,
+        generation: f64,
+    ) -> Result<Stage, BindingError> {
+        let live = self.live_mut()?;
+        let generation = safe_integer(generation, "generation")?;
+        live.start_original(generation)
     }
 
     pub(crate) fn advance(
@@ -914,5 +955,104 @@ mod tests {
             code(EncodedPlan::decode_session(truncated)),
             ErrorCode::DecodeFailed
         );
+    }
+
+    #[test]
+    fn original_sessions_return_exact_source_pixels_for_every_budget() {
+        for budget in [1.0, 17.0, 4096.0, MAX_SAFE] {
+            let mut session = new_session(41, 29);
+            assert_eq!(session.start_original_preview(0.0).unwrap(), Stage::Preview);
+            assert_eq!(session.progress().unwrap(), (0, 41 * 29));
+            let mut frame = drive(&mut session, 0.0, budget);
+            assert_eq!((frame.width(), frame.height()), (41, 29));
+            assert_eq!(frame.take_pixels().unwrap(), gradient(41, 29));
+            assert_eq!(code(session.finish(0.0)), ErrorCode::NoJob);
+        }
+        let mut wide = new_session(1700, 3);
+        wide.start_original_preview(0.0).unwrap();
+        let frame = drive(&mut wide, 0.0, MAX_SAFE);
+        assert_eq!((frame.width(), frame.height()), (1600, 2));
+    }
+
+    #[test]
+    fn generations_are_monotonic_across_artwork_and_original_jobs() {
+        let mut session = new_session(30, 30);
+        session.start_original_preview(5.0).unwrap();
+        session.advance(5.0, 3.0).unwrap();
+        for generation in [4.0, 5.0] {
+            assert_eq!(
+                code(session.start_original_preview(generation)),
+                ErrorCode::StaleGeneration
+            );
+            assert_eq!(
+                code(start(&mut session, generation, 128.0)),
+                ErrorCode::StaleGeneration
+            );
+        }
+        assert_eq!(session.stage().unwrap(), Stage::Preview);
+        assert_eq!(session.progress().unwrap().0, 3);
+        assert_eq!(start(&mut session, 6.0, 128.0).unwrap(), Stage::Sampling);
+        assert_eq!(code(session.advance(5.0, 1.0)), ErrorCode::StaleGeneration);
+        assert_eq!(session.start_original_preview(7.0).unwrap(), Stage::Preview);
+        assert_eq!(
+            code(start(&mut session, 7.0, 128.0)),
+            ErrorCode::StaleGeneration
+        );
+        assert_eq!(code(session.advance(6.0, 1.0)), ErrorCode::StaleGeneration);
+        let mut frame = drive(&mut session, 7.0, MAX_SAFE);
+        assert_eq!(frame.take_pixels().unwrap(), gradient(30, 30));
+    }
+
+    #[test]
+    fn invalid_starts_keep_an_accepted_original_job() {
+        let mut session = new_session(41, 29);
+        session.start_original_preview(5.0).unwrap();
+        session.advance(5.0, 3.0).unwrap();
+        for bad in [f64::NAN, f64::INFINITY, -1.0, 1.5] {
+            assert_eq!(
+                code(session.start_original_preview(bad)),
+                ErrorCode::InvalidArgument
+            );
+        }
+        let invalid = PreviewSettings {
+            cell_size: 4,
+            font_size: 10,
+            threshold: 128,
+            sampling: Sampling::Classic,
+        };
+        let failed = session.live_mut().unwrap().start(6, invalid);
+        assert_eq!(code(failed), ErrorCode::InvalidSettings);
+        assert_eq!(session.live.as_ref().unwrap().newest, Some(5));
+        assert_eq!(session.stage().unwrap(), Stage::Preview);
+        assert_eq!(session.progress().unwrap().0, 3);
+        assert_eq!(session.advance(5.0, 2.0).unwrap(), Stage::Preview);
+        assert_eq!(session.progress().unwrap().0, 5);
+        let mut frame = drive(&mut session, 5.0, MAX_SAFE);
+        assert_eq!(frame.take_pixels().unwrap(), gradient(41, 29));
+    }
+
+    #[test]
+    fn original_jobs_share_the_source_and_release_it_on_cancel_and_dispose() {
+        let mut session = new_session(41, 29);
+        session.start_original_preview(0.0).unwrap();
+        assert_eq!(Arc::strong_count(&session.live.as_ref().unwrap().source), 3);
+        assert_eq!(code(session.finish(0.0)), ErrorCode::JobIncomplete);
+        session.advance(0.0, 2.0).unwrap();
+        session.cancel(0.0).unwrap();
+        assert_eq!(Arc::strong_count(&session.live.as_ref().unwrap().source), 2);
+        assert_eq!(session.stage().unwrap(), Stage::Failed);
+        assert_eq!(code(session.advance(0.0, 1.0)), ErrorCode::Cancelled);
+        assert_eq!(code(session.finish(0.0)), ErrorCode::Cancelled);
+        assert_eq!(
+            code(session.start_original_preview(0.0)),
+            ErrorCode::StaleGeneration
+        );
+        assert_eq!(session.start_original_preview(1.0).unwrap(), Stage::Preview);
+        session.dispose();
+        assert_eq!(
+            code(session.start_original_preview(2.0)),
+            ErrorCode::Disposed
+        );
+        assert!(session.live.is_none());
     }
 }
