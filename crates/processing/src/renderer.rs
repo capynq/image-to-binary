@@ -7,17 +7,20 @@ use std::sync::Arc;
 
 use fontdue::{Font, FontSettings};
 use image_to_binary_core::{
-    Cancellation, ContractError, Generation, Progress, RenderMode, Sampling,
+    Cancellation, ContractError, Generation, Progress, RenderMode, Sampling, MAX_CELL_SIZE,
+    MAX_CONTRAST, MAX_FONT_SIZE, MAX_SOURCE_CELL_HEIGHT, MIN_CELL_SIZE, MIN_CONTRAST,
+    MIN_FONT_SIZE,
 };
 
-use crate::SampleCell;
+use crate::style::{matte, mix, toned_luma};
+use crate::{ColorMode, RenderStyle, Rgb, SampleCell};
 
 const FONT_BYTES: &[u8] = include_bytes!("../../../assets/fonts/IBMPlexMono-Regular.ttf");
 const DEFAULT_CACHE_BYTES: u64 = 8 * 1024 * 1024;
 const DEFAULT_OUTPUT_BYTES: u64 = 256 * 1024 * 1024;
+const ALPHA_SCALE: u32 = 255;
+const BLOCK_SCALE: u32 = 100;
 const GLYPH_SLOTS: usize = 128;
-const FOREGROUND: [u32; 3] = [0, 255, 0];
-const BACKGROUND: [u32; 3] = [0, 0, 0];
 const BLOCK_LEVELS: [(char, u8); 5] = [
     (' ', 0),
     ('\u{2591}', 25),
@@ -92,13 +95,16 @@ impl From<ContractError> for RenderError {
 ///
 /// `mode` other than [`RenderMode::Binary`] requires [`Sampling::Average`];
 /// the classic compatibility preset is `Binary` with [`Sampling::Classic`].
+/// `style` is applied at render time and never changes a sampled grid. Every
+/// public field is validated by the render entry points, which reject values
+/// outside the shared bounds in `image_to_binary_core`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RenderOptions {
     /// Source cell size and output tile size in pixels.
     pub cell_size: u8,
     /// Font size in pixels before preview fitting.
     pub font_size: u8,
-    /// Luminance below this value selects `1` in binary mode.
+    /// Toned luminance below this value selects `1` in binary mode.
     pub threshold: u8,
     /// Sampling geometry used to produce the supplied grid.
     pub sampling: Sampling,
@@ -106,6 +112,8 @@ pub struct RenderOptions {
     pub mode: RenderMode,
     /// Maximum owned output bytes.
     pub max_output_bytes: u64,
+    /// Colour, contrast, and invert controls applied after sampling.
+    pub style: RenderStyle,
 }
 
 impl Default for RenderOptions {
@@ -117,17 +125,21 @@ impl Default for RenderOptions {
             sampling: Sampling::Classic,
             mode: RenderMode::Binary,
             max_output_bytes: DEFAULT_OUTPUT_BYTES,
+            style: RenderStyle::default(),
         }
     }
 }
 
 impl RenderOptions {
     fn validate(self) -> Result<(), RenderError> {
-        if !(5..=30).contains(&self.cell_size) {
+        if !(MIN_CELL_SIZE..=MAX_CELL_SIZE).contains(&self.cell_size) {
             return Err(ContractError::InvalidSettings("cell_size").into());
         }
-        if !(8..=30).contains(&self.font_size) {
+        if !(MIN_FONT_SIZE..=MAX_FONT_SIZE).contains(&self.font_size) {
             return Err(ContractError::InvalidSettings("font_size").into());
+        }
+        if !(MIN_CONTRAST..=MAX_CONTRAST).contains(&self.style.contrast) {
+            return Err(ContractError::InvalidSettings("contrast").into());
         }
         if self.max_output_bytes == 0 {
             return Err(ContractError::InvalidSettings("output limit").into());
@@ -141,24 +153,25 @@ impl RenderOptions {
 
 /// Maps one sampled cell to the character selected by `options.mode`.
 ///
-/// PNG composition calls this for every cell, and any future text export must
-/// call it rather than recompute glyphs. Binary delegates its threshold decision
-/// to [`SampleCell::binary`], the only luma-versus-threshold comparison.
-/// Ascii and Block pick a level with `(luma * (levels - 1) + 127) / 255`, which
-/// rounds to the nearest level and is non-decreasing in luma. Later ramp entries
-/// carry more ink, so brighter cells select later entries on the dark default
-/// background. Block levels run from space to full block.
+/// Every mode reads the luminance from [`toned_luma`], so contrast and invert
+/// apply uniformly. PNG composition calls this for every cell, and any future
+/// text export must call it rather than recompute glyphs. Binary delegates its
+/// decision to the single threshold comparison in `SampleCell::binary`. Ascii
+/// and Block pick a level with `(toned * (levels - 1) + 127) / 255`, which
+/// rounds to the nearest level and is non-decreasing in the toned value. Later
+/// ramp entries carry more ink, so brighter cells select later entries on the
+/// dark default background. Block levels run from space to full block.
 #[must_use]
 pub fn cell_glyph(cell: SampleCell, options: &RenderOptions) -> char {
-    let luma = usize::from(cell.luma());
+    let toned = toned_luma(cell, options);
     match options.mode {
-        RenderMode::Binary => char::from(cell.binary(options.threshold)),
+        RenderMode::Binary => char::from(SampleCell::binary(toned, options.threshold)),
         RenderMode::Ascii(ramp) => {
-            let index = level_index(luma, ramp.len());
+            let index = level_index(usize::from(toned), ramp.len());
             ramp.as_bytes().get(index).copied().map_or(' ', char::from)
         }
         RenderMode::Block => {
-            let index = level_index(luma, BLOCK_LEVELS.len());
+            let index = level_index(usize::from(toned), BLOCK_LEVELS.len());
             BLOCK_LEVELS.get(index).map_or(' ', |(glyph, _)| *glyph)
         }
     }
@@ -260,11 +273,15 @@ impl RenderedFrame {
 }
 
 /// Bounded glyph-cache accounting for diagnostics and acceptance checks.
+///
+/// `rasterized` counts every font rasterization, including uncached ones, so
+/// callers can prove that a settings change reused existing glyph masks.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RendererCacheStats {
     entries: usize,
     bytes: u64,
     capacity: u64,
+    rasterized: u64,
 }
 
 /// Geometry for the non-classic font-aspect-corrected sampling preset.
@@ -293,6 +310,11 @@ impl RendererCacheStats {
     pub const fn capacity(self) -> u64 {
         self.capacity
     }
+    /// Returns the number of font rasterizations performed by this renderer.
+    #[must_use]
+    pub const fn rasterized(self) -> u64 {
+        self.rasterized
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -317,6 +339,7 @@ struct GlyphAtlas {
     order: VecDeque<GlyphKey>,
     bytes: u64,
     capacity: u64,
+    rasterized: u64,
 }
 
 impl GlyphAtlas {
@@ -326,6 +349,7 @@ impl GlyphAtlas {
             order: VecDeque::new(),
             bytes: 0,
             capacity,
+            rasterized: 0,
         }
     }
 
@@ -348,6 +372,10 @@ impl GlyphAtlas {
                 .cloned()
                 .ok_or(ContractError::ArithmeticOverflow.into());
         }
+        self.rasterized = self
+            .rasterized
+            .checked_add(1)
+            .ok_or(ContractError::ArithmeticOverflow)?;
         let (metrics, bitmap) = font.rasterize(character, size);
         let bytes =
             u64::try_from(bitmap.capacity()).map_err(|_| ContractError::ArithmeticOverflow)?;
@@ -480,6 +508,7 @@ impl Renderer {
             entries: self.atlas.entries.len(),
             bytes: self.atlas.bytes,
             capacity: self.atlas.capacity,
+            rasterized: self.atlas.rasterized,
         }
     }
 
@@ -502,10 +531,10 @@ impl Renderer {
         cell_width: u8,
         font_size: u8,
     ) -> Result<AspectGeometry, RenderError> {
-        if !(5..=30).contains(&cell_width) {
+        if !(MIN_CELL_SIZE..=MAX_CELL_SIZE).contains(&cell_width) {
             return Err(ContractError::InvalidSettings("cell_size").into());
         }
-        if !(8..=30).contains(&font_size) {
+        if !(MIN_FONT_SIZE..=MAX_FONT_SIZE).contains(&font_size) {
             return Err(ContractError::InvalidSettings("font_size").into());
         }
         let size = f32::from(font_size);
@@ -517,7 +546,7 @@ impl Renderer {
         let advance = metrics.advance_width.max(1.0);
         let source_height = (f32::from(cell_width) * line_height / advance)
             .round()
-            .clamp(1.0, 1024.0) as u16;
+            .clamp(1.0, f32::from(MAX_SOURCE_CELL_HEIGHT)) as u16;
         let output_height = line_height.round().clamp(1.0, f32::from(u16::MAX)) as u16;
         Ok(AspectGeometry {
             source_cell_width: cell_width,
@@ -948,11 +977,23 @@ struct Composition<'a> {
 impl<'a> Composition<'a> {
     fn paint(self, cell: SampleCell) -> Result<CellPaint<'a>, ContractError> {
         let glyph = cell_glyph(cell, &self.options);
+        let foreground = self.foreground(cell)?;
         match self.options.mode {
-            RenderMode::Block => Ok(CellPaint::Block(block_coverage(glyph))),
-            RenderMode::Binary | RenderMode::Ascii(_) => {
-                self.palette.get(glyph).map(CellPaint::Glyph)
-            }
+            RenderMode::Block => Ok(CellPaint::Block {
+                coverage: block_coverage(glyph),
+                foreground,
+            }),
+            RenderMode::Binary | RenderMode::Ascii(_) => Ok(CellPaint::Glyph {
+                mask: self.palette.get(glyph)?,
+                foreground,
+            }),
+        }
+    }
+
+    fn foreground(self, cell: SampleCell) -> Result<Rgb, ContractError> {
+        match self.options.style.color {
+            ColorMode::Monochrome => Ok(self.options.style.foreground),
+            ColorMode::Source => matte(cell.color(), self.options.style.background),
         }
     }
 
@@ -963,8 +1004,12 @@ impl<'a> Composition<'a> {
             .grid
             .cell(column, row)
             .ok_or(ContractError::InvalidDimensions)?;
-        self.paint(cell)?
-            .pixel(self.tile, x % self.tile.width, y % self.tile.height)
+        self.paint(cell)?.pixel(
+            self.options.style.background,
+            self.tile,
+            x % self.tile.width,
+            y % self.tile.height,
+        )
     }
 
     fn paint_row(
@@ -983,6 +1028,7 @@ impl<'a> Composition<'a> {
                 .cell(column, source_row)
                 .ok_or(ContractError::InvalidDimensions)?;
             let paint = self.paint(cell)?;
+            let background = self.options.style.background;
             let left = column
                 .checked_mul(self.tile.width)
                 .ok_or(ContractError::ArithmeticOverflow)?;
@@ -994,7 +1040,7 @@ impl<'a> Composition<'a> {
                     let x = left
                         .checked_add(local_x)
                         .ok_or(ContractError::ArithmeticOverflow)?;
-                    let pixel = paint.pixel(self.tile, local_x, local_y)?;
+                    let pixel = paint.pixel(background, self.tile, local_x, local_y)?;
                     let index = usize::try_from(y)
                         .ok()
                         .and_then(|row| row.checked_mul(frame_width))
@@ -1015,43 +1061,55 @@ impl<'a> Composition<'a> {
     }
 }
 
-/// Resolved paint for one sampled cell: a font mask or a block coverage percent.
+/// Resolved paint for one sampled cell: a font mask or a block coverage percent,
+/// plus the cell's opaque foreground colour.
 #[derive(Clone, Copy)]
 enum CellPaint<'a> {
-    Glyph(&'a GlyphMask),
-    Block(u8),
+    Glyph {
+        mask: &'a GlyphMask,
+        foreground: Rgb,
+    },
+    Block {
+        coverage: u8,
+        foreground: Rgb,
+    },
 }
 
 impl CellPaint<'_> {
     fn pixel(
         self,
+        background: Rgb,
         tile: TileGeometry,
         local_x: u32,
         local_y: u32,
     ) -> Result<[u8; 4], ContractError> {
         match self {
-            Self::Glyph(mask) => blend(u32::from(glyph_alpha(mask, tile, local_x, local_y)?), 255),
-            Self::Block(coverage) => blend(u32::from(coverage), 100),
+            Self::Glyph { mask, foreground } => blend(
+                foreground,
+                background,
+                u32::from(glyph_alpha(mask, tile, local_x, local_y)?),
+                ALPHA_SCALE,
+            ),
+            Self::Block {
+                coverage,
+                foreground,
+            } => blend(foreground, background, u32::from(coverage), BLOCK_SCALE),
         }
     }
 }
 
-/// Mixes foreground over background as `coverage / scale`, rounding half up.
-fn blend(coverage: u32, scale: u32) -> Result<[u8; 4], ContractError> {
-    let inverse = scale
-        .checked_sub(coverage)
-        .ok_or(ContractError::ArithmeticOverflow)?;
-    let mut pixel = [0, 0, 0, u8::MAX];
-    for (channel, value) in pixel.iter_mut().take(3).enumerate() {
-        let total = FOREGROUND[channel]
-            .checked_mul(coverage)
-            .zip(BACKGROUND[channel].checked_mul(inverse))
-            .and_then(|(foreground, background)| foreground.checked_add(background))
-            .and_then(|sum| sum.checked_add(scale / 2))
-            .ok_or(ContractError::ArithmeticOverflow)?;
-        *value = u8::try_from(total / scale).map_err(|_| ContractError::ArithmeticOverflow)?;
-    }
-    Ok(pixel)
+/// Mixes an opaque foreground over an opaque background at `coverage / scale`.
+///
+/// The result has alpha 255 and rounds half up, so zero coverage yields the exact
+/// background and full coverage yields the exact foreground.
+fn blend(
+    foreground: Rgb,
+    background: Rgb,
+    coverage: u32,
+    scale: u32,
+) -> Result<[u8; 4], ContractError> {
+    let [red, green, blue] = mix(foreground, background, coverage, scale)?;
+    Ok([red, green, blue, u8::MAX])
 }
 
 fn glyph_alpha(mask: &GlyphMask, tile: TileGeometry, x: u32, y: u32) -> Result<u8, ContractError> {
@@ -1081,7 +1139,10 @@ mod tests {
     use super::*;
     use crate::{decode, DecodeLimits, Sampler};
     use image::{DynamicImage, ImageBuffer, ImageFormat, Rgba};
-    use image_to_binary_core::Ramp;
+    use image_to_binary_core::{
+        Ramp, MAX_CELL_SIZE, MAX_CONTRAST, MAX_FONT_SIZE, MAX_RAMP_LENGTH, MAX_THRESHOLD,
+        MIN_CELL_SIZE, MIN_CONTRAST, MIN_FONT_SIZE, MIN_THRESHOLD,
+    };
     use std::io::Cursor;
     use std::sync::Arc;
 
@@ -1619,22 +1680,39 @@ mod tests {
         assert_eq!(block_coverage('x'), 0);
     }
 
+    const GREEN: Rgb = Rgb {
+        red: 0,
+        green: 255,
+        blue: 0,
+    };
+    const BLACK: Rgb = Rgb {
+        red: 0,
+        green: 0,
+        blue: 0,
+    };
+
     #[test]
     fn glyph_alpha_blend_is_exact_identity_on_green_over_black() {
         for alpha in 0..=255_u32 {
             let expected = u8::try_from(alpha).unwrap();
-            assert_eq!(blend(alpha, 255).unwrap(), [0, expected, 0, 255]);
+            assert_eq!(
+                blend(GREEN, BLACK, alpha, 255).unwrap(),
+                [0, expected, 0, 255]
+            );
         }
     }
 
     #[test]
     fn block_blend_mixes_foreground_and_background_by_percent() {
-        assert_eq!(blend(0, 100).unwrap(), [0, 0, 0, 255]);
-        assert_eq!(blend(25, 100).unwrap(), [0, 64, 0, 255]);
-        assert_eq!(blend(50, 100).unwrap(), [0, 128, 0, 255]);
-        assert_eq!(blend(75, 100).unwrap(), [0, 191, 0, 255]);
-        assert_eq!(blend(100, 100).unwrap(), [0, 255, 0, 255]);
-        assert_eq!(blend(101, 100), Err(ContractError::ArithmeticOverflow));
+        assert_eq!(blend(GREEN, BLACK, 0, 100).unwrap(), [0, 0, 0, 255]);
+        assert_eq!(blend(GREEN, BLACK, 25, 100).unwrap(), [0, 64, 0, 255]);
+        assert_eq!(blend(GREEN, BLACK, 50, 100).unwrap(), [0, 128, 0, 255]);
+        assert_eq!(blend(GREEN, BLACK, 75, 100).unwrap(), [0, 191, 0, 255]);
+        assert_eq!(blend(GREEN, BLACK, 100, 100).unwrap(), [0, 255, 0, 255]);
+        assert_eq!(
+            blend(GREEN, BLACK, 101, 100),
+            Err(ContractError::ArithmeticOverflow)
+        );
     }
 
     #[test]
@@ -1658,5 +1736,350 @@ mod tests {
         }
         .validate()
         .is_ok());
+    }
+
+    fn styled(style: RenderStyle, mode: RenderMode, threshold: u8) -> RenderOptions {
+        RenderOptions {
+            style,
+            cell_size: 5,
+            ..mode_options(mode, threshold)
+        }
+    }
+
+    fn classic_cell_grid(color: [u8; 4]) -> Arc<crate::SampleGrid> {
+        let source = source_pixels(5, 5, move |_, _| color);
+        Sampler::new(source).sample(5, Sampling::Classic).unwrap()
+    }
+
+    fn source_pixels(
+        width: u32,
+        height: u32,
+        pixel: impl Fn(u32, u32) -> [u8; 4],
+    ) -> Arc<crate::DecodedSource> {
+        let image = ImageBuffer::from_fn(width, height, |x, y| Rgba(pixel(x, y)));
+        let mut bytes = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(image)
+            .write_to(&mut bytes, ImageFormat::Png)
+            .unwrap();
+        Arc::new(decode(&bytes.into_inner(), DecodeLimits::default()).unwrap())
+    }
+
+    #[test]
+    fn option_bounds_accept_boundaries_and_reject_just_outside() {
+        let base = RenderOptions::default();
+        for cell_size in [MIN_CELL_SIZE, MAX_CELL_SIZE] {
+            assert!(RenderOptions { cell_size, ..base }.validate().is_ok());
+        }
+        for cell_size in [MIN_CELL_SIZE - 1, MAX_CELL_SIZE + 1] {
+            assert_eq!(
+                RenderOptions { cell_size, ..base }
+                    .validate()
+                    .unwrap_err()
+                    .to_string(),
+                "invalid settings: cell_size"
+            );
+        }
+        for font_size in [MIN_FONT_SIZE, MAX_FONT_SIZE] {
+            assert!(RenderOptions { font_size, ..base }.validate().is_ok());
+        }
+        for font_size in [MIN_FONT_SIZE - 1, MAX_FONT_SIZE + 1] {
+            assert_eq!(
+                RenderOptions { font_size, ..base }
+                    .validate()
+                    .unwrap_err()
+                    .to_string(),
+                "invalid settings: font_size"
+            );
+        }
+        for contrast in [MIN_CONTRAST, MAX_CONTRAST] {
+            let style = RenderStyle {
+                contrast,
+                ..RenderStyle::default()
+            };
+            assert!(RenderOptions { style, ..base }.validate().is_ok());
+        }
+        for contrast in [MIN_CONTRAST - 1, MAX_CONTRAST + 1] {
+            let style = RenderStyle {
+                contrast,
+                ..RenderStyle::default()
+            };
+            assert_eq!(
+                RenderOptions { style, ..base }
+                    .validate()
+                    .unwrap_err()
+                    .to_string(),
+                "invalid settings: contrast"
+            );
+        }
+        for threshold in [MIN_THRESHOLD, MAX_THRESHOLD] {
+            assert!(RenderOptions { threshold, ..base }.validate().is_ok());
+        }
+    }
+
+    #[test]
+    fn ramp_bound_accepts_sixty_four_entries_and_rejects_sixty_five() {
+        let full = Ramp::new(&"a".repeat(MAX_RAMP_LENGTH)).unwrap();
+        assert!(RenderOptions {
+            sampling: Sampling::Average,
+            mode: RenderMode::Ascii(full),
+            ..RenderOptions::default()
+        }
+        .validate()
+        .is_ok());
+        assert_eq!(
+            Ramp::new(&"a".repeat(MAX_RAMP_LENGTH + 1)),
+            Err(ContractError::InvalidRamp)
+        );
+    }
+
+    #[test]
+    fn binary_threshold_boundary_flips_at_the_toned_value() {
+        let options = mode_options(RenderMode::Binary, 128);
+        assert_eq!(glyph_at(127, &options), '1');
+        assert_eq!(glyph_at(128, &options), '0');
+        let inverted = styled(
+            RenderStyle {
+                invert: true,
+                ..RenderStyle::default()
+            },
+            RenderMode::Binary,
+            128,
+        );
+        assert_eq!(glyph_at(128, &inverted), '1');
+        assert_eq!(glyph_at(127, &inverted), '0');
+        assert_eq!(glyph_at(255, &inverted), '1');
+        assert_eq!(glyph_at(0, &inverted), '0');
+    }
+
+    #[test]
+    fn contrast_is_applied_before_the_binary_threshold() {
+        let flattened = styled(
+            RenderStyle {
+                contrast: -100,
+                ..RenderStyle::default()
+            },
+            RenderMode::Binary,
+            128,
+        );
+        for luma in [0, 127, 128, 255] {
+            assert_eq!(glyph_at(luma, &flattened), '0', "luma {luma}");
+        }
+        let flattened_high = styled(
+            RenderStyle {
+                contrast: -100,
+                ..RenderStyle::default()
+            },
+            RenderMode::Binary,
+            129,
+        );
+        for luma in [0, 255] {
+            assert_eq!(glyph_at(luma, &flattened_high), '1', "luma {luma}");
+        }
+    }
+
+    #[test]
+    fn invert_reverses_ramp_index_direction() {
+        let ramp = Ramp::new("abc").unwrap();
+        let normal = mode_options(RenderMode::Ascii(ramp), 128);
+        let inverted = styled(
+            RenderStyle {
+                invert: true,
+                ..RenderStyle::default()
+            },
+            RenderMode::Ascii(ramp),
+            128,
+        );
+        assert_eq!(glyph_at(0, &normal), 'a');
+        assert_eq!(glyph_at(255, &normal), 'c');
+        assert_eq!(glyph_at(0, &inverted), 'c');
+        assert_eq!(glyph_at(255, &inverted), 'a');
+    }
+
+    #[test]
+    fn block_levels_follow_the_toned_value_under_invert() {
+        let inverted = styled(
+            RenderStyle {
+                invert: true,
+                ..RenderStyle::default()
+            },
+            RenderMode::Block,
+            128,
+        );
+        assert_eq!(glyph_at(0, &inverted), '\u{2588}');
+        assert_eq!(glyph_at(255, &inverted), ' ');
+    }
+
+    #[test]
+    fn source_color_opaque_cell_renders_its_exact_rgb_at_full_block() {
+        let grid = average_single_cell_grid([255, 230, 255, 255]);
+        let options = styled(
+            RenderStyle {
+                color: ColorMode::Source,
+                ..RenderStyle::default()
+            },
+            RenderMode::Block,
+            128,
+        );
+        let frame = Renderer::new().unwrap().render(&grid, options).unwrap();
+        assert!(frame
+            .pixels()
+            .chunks_exact(4)
+            .all(|pixel| pixel == [255, 230, 255, 255]));
+    }
+
+    #[test]
+    fn source_color_transparent_cell_renders_exact_background() {
+        let grid = average_single_cell_grid([255, 230, 255, 0]);
+        let background = Rgb {
+            red: 10,
+            green: 20,
+            blue: 30,
+        };
+        let options = styled(
+            RenderStyle {
+                color: ColorMode::Source,
+                background,
+                ..RenderStyle::default()
+            },
+            RenderMode::Block,
+            128,
+        );
+        let frame = Renderer::new().unwrap().render(&grid, options).unwrap();
+        assert!(frame
+            .pixels()
+            .chunks_exact(4)
+            .all(|pixel| pixel == [10, 20, 30, 255]));
+    }
+
+    #[test]
+    fn source_color_half_alpha_matches_the_matte_formula_over_background() {
+        let grid = average_single_cell_grid([255, 230, 255, 128]);
+        let background = Rgb {
+            red: 10,
+            green: 20,
+            blue: 30,
+        };
+        let options = styled(
+            RenderStyle {
+                color: ColorMode::Source,
+                background,
+                ..RenderStyle::default()
+            },
+            RenderMode::Block,
+            128,
+        );
+        let frame = Renderer::new().unwrap().render(&grid, options).unwrap();
+        let expected = [133, 125, 143, 255];
+        assert!(frame
+            .pixels()
+            .chunks_exact(4)
+            .all(|pixel| pixel == expected));
+    }
+
+    fn average_single_cell_grid(color: [u8; 4]) -> Arc<crate::SampleGrid> {
+        let cell_height = u32::from(
+            Renderer::new()
+                .unwrap()
+                .aspect_geometry(5, 30)
+                .unwrap()
+                .source_cell_height,
+        );
+        let source = source_pixels(5, cell_height, move |_, _| color);
+        Sampler::new(source)
+            .sample_average_rect(5, cell_height)
+            .unwrap()
+    }
+
+    #[test]
+    fn source_color_is_opaque_and_background_bounded_for_every_mode() {
+        let background = Rgb {
+            red: 10,
+            green: 20,
+            blue: 30,
+        };
+        let style = RenderStyle {
+            color: ColorMode::Source,
+            background,
+            ..RenderStyle::default()
+        };
+        let color = [255, 230, 255, 128];
+        let average = average_single_cell_grid(color);
+        let classic = classic_cell_grid(color);
+        for (mode, grid, sampling) in [
+            (RenderMode::Binary, classic, Sampling::Classic),
+            (
+                RenderMode::Ascii(Ramp::DEFAULT_ASCII),
+                Arc::clone(&average),
+                Sampling::Average,
+            ),
+            (RenderMode::Block, average, Sampling::Average),
+        ] {
+            let options = RenderOptions {
+                sampling,
+                style,
+                cell_size: 5,
+                ..mode_options(mode, 128)
+            };
+            let frame = Renderer::new().unwrap().render(&grid, options).unwrap();
+            for pixel in frame.pixels().chunks_exact(4) {
+                assert_eq!(pixel[3], 255, "{mode:?}");
+                for (value, (low, high)) in pixel[..3].iter().zip([(10, 255), (20, 230), (30, 255)])
+                {
+                    assert!((low..=high).contains(value), "{mode:?} {pixel:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn monochrome_block_extremes_are_exact_foreground_and_background() {
+        let style = RenderStyle {
+            foreground: Rgb {
+                red: 255,
+                green: 128,
+                blue: 0,
+            },
+            background: Rgb {
+                red: 0,
+                green: 0,
+                blue: 64,
+            },
+            ..RenderStyle::default()
+        };
+        let dark = average_single_cell_grid([0, 0, 0, 255]);
+        let light = average_single_cell_grid([255, 255, 255, 255]);
+        let options = styled(style, RenderMode::Block, 128);
+        let mut renderer = Renderer::new().unwrap();
+        let background = renderer.render(&dark, options).unwrap();
+        assert!(background
+            .pixels()
+            .chunks_exact(4)
+            .all(|pixel| pixel == [0, 0, 64, 255]));
+        let foreground = renderer.render(&light, options).unwrap();
+        assert!(foreground
+            .pixels()
+            .chunks_exact(4)
+            .all(|pixel| pixel == [255, 128, 0, 255]));
+    }
+
+    #[test]
+    fn monochrome_ignores_sampled_color_for_every_mode() {
+        let grid = average_single_cell_grid([255, 230, 255, 255]);
+        let style = RenderStyle {
+            foreground: Rgb {
+                red: 1,
+                green: 2,
+                blue: 3,
+            },
+            ..RenderStyle::default()
+        };
+        let mut renderer = Renderer::new().unwrap();
+        let block = renderer
+            .render(&grid, styled(style, RenderMode::Block, 128))
+            .unwrap();
+        assert!(block
+            .pixels()
+            .chunks_exact(4)
+            .all(|pixel| pixel == [1, 2, 3, 255]));
     }
 }

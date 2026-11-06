@@ -1,4 +1,4 @@
-use crate::{ContractError, Ramp};
+use crate::{ContractError, Ramp, MAX_CELL_SIZE, MIN_CELL_SIZE};
 
 /// Sampling behavior; codecs and rendering are implemented in later phases.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -28,7 +28,7 @@ pub struct Settings {
 }
 
 impl Settings {
-    /// Creates validated settings. Cell sizes intentionally share the 5..=30 UI contract.
+    /// Creates validated settings. Cell sizes use the shared cell-size bounds.
     ///
     /// # Errors
     ///
@@ -40,7 +40,7 @@ impl Settings {
         sampling: Sampling,
         ramp: impl Into<String>,
     ) -> Result<Self, ContractError> {
-        if !(5..=30).contains(&cell_size) {
+        if !(MIN_CELL_SIZE..=MAX_CELL_SIZE).contains(&cell_size) {
             return Err(ContractError::InvalidSettings("cell_size"));
         }
         let text: String = ramp.into();
@@ -72,5 +72,47 @@ impl Settings {
     #[must_use]
     pub fn ramp(&self) -> &str {
         self.ramp.as_str()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{MAX_CELL_SIZE, MAX_RAMP_LENGTH, MIN_CELL_SIZE};
+
+    #[test]
+    fn cell_size_accepts_shared_bounds_and_rejects_just_outside() {
+        for cell_size in [MIN_CELL_SIZE, MAX_CELL_SIZE] {
+            assert!(Settings::new(cell_size, 128, Sampling::Classic, "01").is_ok());
+        }
+        for cell_size in [MIN_CELL_SIZE - 1, MAX_CELL_SIZE + 1] {
+            assert_eq!(
+                Settings::new(cell_size, 128, Sampling::Classic, "01"),
+                Err(ContractError::InvalidSettings("cell_size"))
+            );
+        }
+    }
+
+    #[test]
+    fn threshold_accepts_every_u8_value_at_both_shared_bounds() {
+        for threshold in [crate::MIN_THRESHOLD, crate::MAX_THRESHOLD] {
+            let settings = Settings::new(5, threshold, Sampling::Classic, "01").unwrap();
+            assert_eq!(settings.threshold(), threshold);
+        }
+    }
+
+    #[test]
+    fn ramp_accepts_sixty_four_entries_and_rejects_sixty_five() {
+        let full = "a".repeat(MAX_RAMP_LENGTH);
+        assert!(Settings::new(5, 128, Sampling::Classic, full.as_str()).is_ok());
+        let oversized = "a".repeat(MAX_RAMP_LENGTH + 1);
+        assert_eq!(
+            Settings::new(5, 128, Sampling::Classic, oversized),
+            Err(ContractError::InvalidRamp)
+        );
+        assert_eq!(
+            ContractError::InvalidRamp.to_string(),
+            "ramp must be printable ASCII and at most 64 characters"
+        );
     }
 }

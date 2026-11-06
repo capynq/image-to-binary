@@ -71,6 +71,7 @@ fn options() -> RenderOptions {
         sampling: Sampling::Classic,
         mode: RenderMode::Binary,
         max_output_bytes: OUTPUT_LIMIT,
+        ..RenderOptions::default()
     }
 }
 

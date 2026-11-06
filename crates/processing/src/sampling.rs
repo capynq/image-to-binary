@@ -4,12 +4,15 @@ use std::collections::VecDeque;
 use std::mem::size_of;
 use std::sync::Arc;
 
-use image_to_binary_core::{Cancellation, Generation, Progress};
-use image_to_binary_core::{ContractError, Sampling};
+use image_to_binary_core::{
+    Cancellation, ContractError, Generation, Progress, Sampling, MAX_CELL_SIZE,
+    MAX_SOURCE_CELL_HEIGHT, MIN_CELL_SIZE,
+};
 
 use crate::DecodedSource;
 
 const DEFAULT_CACHE_BYTES: u64 = 64 * 1024 * 1024;
+const ALPHA_CHANNEL: usize = 3;
 
 /// The sampled values for one source cell.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -30,16 +33,24 @@ impl SampleCell {
         self.luma
     }
 
-    /// Returns the straight, averaged RGBA channels.
+    /// Returns the straight RGBA channels.
+    ///
+    /// Under average sampling each colour channel is weighted by its pixel's
+    /// alpha, `sum(c * a) / sum(a)` rounded half up, so transparent pixels do not
+    /// bleed hidden colour. Alpha is the unweighted mean `sum(a) / n`, and a cell
+    /// with zero total alpha has colour 0. Luma ignores alpha entirely.
     #[must_use]
     pub const fn color(self) -> [u8; 4] {
         self.color
     }
 
-    /// Maps this luminance to the classic binary byte; this is the only luma-threshold comparison.
+    /// Maps a toned luminance to the classic binary byte.
+    ///
+    /// This is the only luminance-versus-threshold comparison in the codebase.
+    /// Callers pass the output of [`crate::toned_luma`], never raw sampled luma.
     #[must_use]
-    pub const fn binary(self, threshold: u8) -> u8 {
-        if self.luma < threshold {
+    pub(crate) const fn binary(toned_luma: u8, threshold: u8) -> u8 {
+        if toned_luma < threshold {
             b'1'
         } else {
             b'0'
@@ -139,6 +150,38 @@ struct CacheEntry {
     bytes: u64,
 }
 
+/// Read-only accounting for one [`Sampler`]'s retained grids and sampling work.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SamplerCacheStats {
+    entries: usize,
+    bytes: u64,
+    capacity: u64,
+    computed: u64,
+}
+
+impl SamplerCacheStats {
+    /// Returns the number of retained grids.
+    #[must_use]
+    pub const fn entries(self) -> usize {
+        self.entries
+    }
+    /// Returns the retained cell-vector bytes.
+    #[must_use]
+    pub const fn bytes(self) -> u64 {
+        self.bytes
+    }
+    /// Returns the cache byte ceiling.
+    #[must_use]
+    pub const fn capacity(self) -> u64 {
+        self.capacity
+    }
+    /// Returns how many grids were freshly sampled by this sampler.
+    #[must_use]
+    pub const fn computed(self) -> u64 {
+        self.computed
+    }
+}
+
 /// Outcome of [`Sampler::prepare`]: a cache hit or a task that must be run.
 #[derive(Debug)]
 pub enum SamplingPlan {
@@ -156,6 +199,7 @@ pub struct Sampler {
     cache: VecDeque<CacheEntry>,
     cache_bytes: u64,
     cache_capacity: u64,
+    computed: u64,
 }
 
 impl Sampler {
@@ -173,6 +217,18 @@ impl Sampler {
             cache: VecDeque::new(),
             cache_bytes: 0,
             cache_capacity,
+            computed: 0,
+        }
+    }
+
+    /// Returns read-only cache and sampling-work accounting.
+    #[must_use]
+    pub fn cache_stats(&self) -> SamplerCacheStats {
+        SamplerCacheStats {
+            entries: self.cache.len(),
+            bytes: self.cache_bytes,
+            capacity: self.cache_capacity,
+            computed: self.computed,
         }
     }
 
@@ -240,6 +296,10 @@ impl Sampler {
             return Err(ContractError::InvalidSettings("source"));
         }
         let grid = task.finish(current_generation)?;
+        self.computed = self
+            .computed
+            .checked_add(1)
+            .ok_or(ContractError::ArithmeticOverflow)?;
         if let Some(existing) = self.lookup(CacheKey::of(&grid))? {
             return Ok(existing);
         }
@@ -322,7 +382,7 @@ impl Sampler {
         cell_width: u8,
         cell_height: u32,
     ) -> Result<Arc<SampleGrid>, ContractError> {
-        if !(1..=1024).contains(&cell_height) {
+        if !(1..=u32::from(MAX_SOURCE_CELL_HEIGHT)).contains(&cell_height) {
             return Err(ContractError::InvalidSettings("cell_height"));
         }
         self.sample_with_geometry(cell_width, cell_height, Sampling::Average)
@@ -334,7 +394,7 @@ impl Sampler {
         cell_height: u32,
         sampling: Sampling,
     ) -> Result<Arc<SampleGrid>, ContractError> {
-        if !(5..=30).contains(&cell_width) {
+        if !(MIN_CELL_SIZE..=MAX_CELL_SIZE).contains(&cell_width) {
             return Err(ContractError::InvalidSettings("cell_width"));
         }
         let generation = Generation::new(0);
@@ -428,10 +488,10 @@ impl SamplingTask {
         sampling: Sampling,
         generation: Generation,
     ) -> Result<Self, ContractError> {
-        if !(5..=30).contains(&cell_width) {
+        if !(MIN_CELL_SIZE..=MAX_CELL_SIZE).contains(&cell_width) {
             return Err(ContractError::InvalidSettings("cell_width"));
         }
-        if !(1..=1024).contains(&cell_height) {
+        if !(1..=u32::from(MAX_SOURCE_CELL_HEIGHT)).contains(&cell_height) {
             return Err(ContractError::InvalidSettings("cell_height"));
         }
         if sampling == Sampling::Classic && u32::from(cell_width) != cell_height {
@@ -570,9 +630,15 @@ impl SamplingTask {
                     self.y_coordinate += self.y_scale;
                 }
             } else {
-                for (sum, channel) in self.sums.iter_mut().zip(color) {
+                let alpha = u64::from(color[ALPHA_CHANNEL]);
+                for (index, sum) in self.sums.iter_mut().enumerate() {
+                    let contribution = if index == ALPHA_CHANNEL {
+                        alpha
+                    } else {
+                        u64::from(color[index]) * alpha
+                    };
                     *sum = sum
-                        .checked_add(u64::from(channel))
+                        .checked_add(contribution)
                         .ok_or(ContractError::ArithmeticOverflow)?;
                 }
                 self.luma_sum = self
@@ -589,14 +655,12 @@ impl SamplingTask {
                     self.pixel_y += 1;
                 }
                 if self.pixel_y == self.bounds.3 {
+                    let alpha_sum = self.sums[ALPHA_CHANNEL];
                     let color = [
-                        u8::try_from(self.sums[0] / self.count)
-                            .map_err(|_| ContractError::ArithmeticOverflow)?,
-                        u8::try_from(self.sums[1] / self.count)
-                            .map_err(|_| ContractError::ArithmeticOverflow)?,
-                        u8::try_from(self.sums[2] / self.count)
-                            .map_err(|_| ContractError::ArithmeticOverflow)?,
-                        u8::try_from(self.sums[3] / self.count)
+                        straight_channel(self.sums[0], alpha_sum)?,
+                        straight_channel(self.sums[1], alpha_sum)?,
+                        straight_channel(self.sums[2], alpha_sum)?,
+                        u8::try_from(alpha_sum / self.count)
                             .map_err(|_| ContractError::ArithmeticOverflow)?,
                     ];
                     self.cells.push(SampleCell {
@@ -669,6 +733,25 @@ impl SamplingTask {
             cells: self.cells,
         })
     }
+}
+
+/// Recovers a straight colour channel from alpha-weighted sums, rounding half up.
+///
+/// Computes `floor((2 * weighted + alpha_sum) / (2 * alpha_sum))`, which is
+/// `round(weighted / alpha_sum)` without floating point. A zero total alpha
+/// yields 0, so fully transparent pixels contribute no hidden colour.
+fn straight_channel(weighted: u64, alpha_sum: u64) -> Result<u8, ContractError> {
+    if alpha_sum == 0 {
+        return Ok(0);
+    }
+    let numerator = weighted
+        .checked_mul(2)
+        .and_then(|doubled| doubled.checked_add(alpha_sum))
+        .ok_or(ContractError::ArithmeticOverflow)?;
+    let denominator = alpha_sum
+        .checked_mul(2)
+        .ok_or(ContractError::ArithmeticOverflow)?;
+    u8::try_from(numerator / denominator).map_err(|_| ContractError::ArithmeticOverflow)
 }
 
 fn source_pixel(source: &DecodedSource, x: u32, y: u32) -> Result<[u8; 4], ContractError> {
@@ -746,16 +829,20 @@ mod tests {
         let mut sampler = Sampler::new(source(28, 28, &pixels));
         let grid = sampler.sample(5, Sampling::Classic).unwrap();
         assert_eq!((grid.width(), grid.height()), (5, 5));
-        assert_eq!(grid.cell(2, 2).unwrap().binary(128), b'1');
-        assert_eq!(grid.cell(3, 2).unwrap().binary(128), b'0');
-        assert_eq!(grid.cell(2, 3).unwrap().binary(128), b'0');
+        let binary = |x, y| SampleCell::binary(grid.cell(x, y).unwrap().luma(), 128);
+        assert_eq!(binary(2, 2), b'1');
+        assert_eq!(binary(3, 2), b'0');
+        assert_eq!(binary(2, 3), b'0');
     }
 
     #[test]
     fn luma_threshold_and_coefficients_are_exact() {
         let mut sampler = Sampler::new(source(1, 1, &[[127, 127, 127, 0]]));
         let grid = sampler.sample(5, Sampling::Average).unwrap();
-        assert_eq!(grid.cell(0, 0).unwrap().binary(128), b'1');
+        assert_eq!(
+            SampleCell::binary(grid.cell(0, 0).unwrap().luma(), 128),
+            b'1'
+        );
         assert_eq!(grid.cell(0, 0).unwrap().luma(), 127);
         let mut red_sampler = Sampler::new(source(1, 1, &[[255, 0, 0, 255]]));
         let red = red_sampler.sample(5, Sampling::Average).unwrap();
@@ -778,8 +865,67 @@ mod tests {
         ));
         let grid = sampler.sample(5, Sampling::Average).unwrap();
         assert_eq!((grid.width(), grid.height()), (2, 1));
-        assert_eq!(grid.cell(0, 0).unwrap().color(), [30, 40, 50, 20]);
+        assert_eq!(grid.cell(0, 0).unwrap().color(), [40, 50, 60, 20]);
         assert_eq!(grid.cell(1, 0).unwrap().color(), [200, 210, 220, 50]);
+    }
+
+    #[test]
+    fn average_colour_ignores_transparent_hidden_colour() {
+        let mut pixels = vec![[255, 255, 255, 0]; 25];
+        for pixel in pixels.iter_mut().take(12) {
+            *pixel = [255, 0, 0, 255];
+        }
+        let mut sampler = Sampler::new(source(5, 5, &pixels));
+        let grid = sampler.sample_average_rect(5, 5).unwrap();
+        assert_eq!(grid.cell(0, 0).unwrap().color(), [255, 0, 0, 122]);
+    }
+
+    #[test]
+    fn average_fully_transparent_cell_has_zero_colour_and_alpha() {
+        let pixels = vec![[200, 100, 50, 0]; 25];
+        let mut sampler = Sampler::new(source(5, 5, &pixels));
+        let grid = sampler.sample_average_rect(5, 5).unwrap();
+        assert_eq!(grid.cell(0, 0).unwrap().color(), [0, 0, 0, 0]);
+        assert_eq!(grid.cell(0, 0).unwrap().luma(), 124);
+    }
+
+    #[test]
+    fn average_opaque_cell_matches_rounded_plain_mean() {
+        let pixels: Vec<[u8; 4]> = [1, 2, 3, 4, 4]
+            .iter()
+            .map(|value| [*value, *value * 2, 0, 255])
+            .collect();
+        let mut sampler = Sampler::new(source(5, 1, &pixels));
+        let grid = sampler.sample_average_rect(5, 1).unwrap();
+        assert_eq!(grid.cell(0, 0).unwrap().color(), [3, 6, 0, 255]);
+    }
+
+    #[test]
+    fn chunked_average_with_mixed_alpha_matches_synchronous_mid_cell() {
+        let pixels: Vec<[u8; 4]> = (0_u32..10 * 7)
+            .map(|index| {
+                [
+                    u8::try_from((index * 37) % 256).unwrap(),
+                    u8::try_from((index * 91 + 5) % 256).unwrap(),
+                    u8::try_from((index * 13 + 9) % 256).unwrap(),
+                    u8::try_from((index * 53 + 1) % 256).unwrap(),
+                ]
+            })
+            .collect();
+        let mixed = source(10, 7, &pixels);
+        let mut sampler = Sampler::new(Arc::clone(&mixed));
+        let expected = sampler.sample_average_rect(5, 3).unwrap();
+        for budget in [2, 3, 7, 11] {
+            let mut task = sampler
+                .task(5, 3, Sampling::Average, Generation::new(4))
+                .unwrap();
+            while !matches!(
+                task.advance(budget, Generation::new(4)).unwrap(),
+                SamplingAdvance::Completed(_)
+            ) {}
+            let grid = task.finish(Generation::new(4)).unwrap();
+            assert_eq!(grid, *expected, "budget {budget}");
+        }
     }
 
     #[test]
@@ -981,8 +1127,13 @@ mod tests {
         let mut channel_sums = [0_u64; 4];
         let mut luma_sum = 0_u64;
         for pixel in &pixels {
-            for (sum, channel) in channel_sums.iter_mut().zip(pixel) {
-                *sum += u64::from(*channel);
+            let alpha = u64::from(pixel[3]);
+            for (index, sum) in channel_sums.iter_mut().enumerate() {
+                *sum += if index == 3 {
+                    alpha
+                } else {
+                    u64::from(pixel[index]) * alpha
+                };
             }
             let weighted = u32::from(pixel[0]) * 19_595
                 + u32::from(pixel[1]) * 38_470
@@ -1012,12 +1163,15 @@ mod tests {
         assert_eq!((grid.width(), grid.height()), (1, 1));
         let cell = grid.cell(0, 0).unwrap();
         let count = u64::try_from(pixels.len()).unwrap();
+        let alpha_sum = channel_sums[3];
+        let straight =
+            |weighted: u64| u8::try_from((2 * weighted + alpha_sum) / (2 * alpha_sum)).unwrap();
         assert_eq!(
             cell.color(),
             [
-                u8::try_from(channel_sums[0] / count).unwrap(),
-                u8::try_from(channel_sums[1] / count).unwrap(),
-                u8::try_from(channel_sums[2] / count).unwrap(),
+                straight(channel_sums[0]),
+                straight(channel_sums[1]),
+                straight(channel_sums[2]),
                 u8::try_from(channel_sums[3] / count).unwrap(),
             ]
         );

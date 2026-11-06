@@ -1456,6 +1456,74 @@ Completion checklist:
 - [ ] Bounds are shared across UI and core.
 - [ ] Invalidation review complete.
 
+Parent 6.2 keeps the scope and checklist above and stays incomplete until
+6.2.1 and 6.2.2 are both committed. The split adds no scope.
+
+#### 6.2.1 Add core tone, color, and shared bounds
+
+Objective: add the render style, tone rules, and shared bounds in Rust, with no
+change to the WASM JavaScript API or the UI.
+
+Ordered steps:
+
+1. Define cell, font, threshold, contrast, and ramp bounds once in `core`.
+2. Add a `Copy` render style with colors, color mode, contrast, and invert,
+   defaulting to the existing output.
+3. Apply tone at render time in the fixed order contrast, invert, then threshold
+   or ramp, through one public function.
+4. Composite source color over the background by cell alpha at render time, and
+   average color by alpha so hidden pixels cannot bleed into a cell.
+
+Acceptance checks: color, contrast, threshold, and invert fixtures pass, invalid
+values are rejected, default output is unchanged, and caches are reused or
+invalidated exactly as the settings require.
+
+Proposed commit title: `feat: add core tone and color rendering`
+
+Completion checklist:
+
+- [x] Color and tone fixtures pass with default output unchanged.
+- [x] Bounds are defined once in `core` and enforced at every render entry.
+- [x] Independent invalidation review passes.
+
+Validation: workspace tests pass (core 9, adapters 13, export 25, processing 89
+unit and 30 acceptance, wasm 32), plus 95 unit and 30 acceptance processing tests
+with the `heif` feature, with formatting, strict Clippy, and the WASM target
+check. Building the previous commit and this tree separately gave 360 identical
+hashed outputs at default style across sizes, cell sizes, modes, previews, chunked
+tasks, full renders, and row batches; a deliberate change altered 180 of them. An
+independent check of all 51,456 luma and contrast pairs found no violations.
+The sampled grid depends only on source, cell geometry, and sampling, and glyph
+masks only on character and font size, so tone, color, ramp, and threshold reuse
+both, shown by cache counters. This settles the matte policy deferred in 2.3:
+output stays opaque, and because matting happens at render time no cached grid is
+invalidated. Average color is now alpha-weighted and remains straight, while
+luminance stays alpha-ignored. Four 4000x3000 cell-5 Average full renders exceed
+the full-frame output ceiling and were not hashed; export is row-based and is not
+subject to that ceiling.
+
+#### 6.2.2 Expose tone and color through WASM and the UI
+
+Objective: let users control tone and color, with the UI reading the shared bounds.
+
+Ordered steps:
+
+1. Pass the render style through the WASM session, worker protocol, and adapter
+   settings, keeping preview and export on one settings snapshot.
+2. Expose the `core` bounds to the frontend so controls never restate them.
+3. Add accessible color, contrast, threshold, and invert controls.
+
+Acceptance checks: each control previews and exports with native parity, the UI
+and core agree on every bound, and changing tone or color reuses sampled grids.
+
+Proposed commit title: `feat: expose tone and color controls`
+
+Completion checklist:
+
+- [ ] WASM and worker style parity pass.
+- [ ] UI and core bounds agree from one source.
+- [ ] Controls pass keyboard and error review.
+
 ### 6.3 Add plaintext grid export and parity checks
 
 Objective: export the rendered grid as UTF-8 text and verify readable parity.

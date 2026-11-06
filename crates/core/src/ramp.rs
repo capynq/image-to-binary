@@ -1,14 +1,12 @@
-use crate::ContractError;
-
-const CAPACITY: usize = 64;
+use crate::{ContractError, MAX_RAMP_LENGTH};
 
 /// Validated printable ASCII ramp with fixed inline storage.
 ///
-/// Invariants: the length is `1..=64` and every stored byte is in `0x20..=0x7E`,
+/// Invariants: the length is `1..=MAX_RAMP_LENGTH` and every stored byte is in `0x20..=0x7E`,
 /// so the text is always valid UTF-8. Entries are ordered from least ink to most ink.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Ramp {
-    bytes: [u8; CAPACITY],
+    bytes: [u8; MAX_RAMP_LENGTH],
     len: usize,
 }
 
@@ -24,13 +22,13 @@ impl Ramp {
     /// # Errors
     ///
     /// Returns [`ContractError::InvalidRamp`] when the text is empty, longer than
-    /// 64 bytes, or contains a byte outside `0x20..=0x7E`.
+    /// `MAX_RAMP_LENGTH` bytes, or contains a byte outside `0x20..=0x7E`.
     pub const fn new(text: &str) -> Result<Self, ContractError> {
         let source = text.as_bytes();
-        if source.is_empty() || source.len() > CAPACITY {
+        if source.is_empty() || source.len() > MAX_RAMP_LENGTH {
             return Err(ContractError::InvalidRamp);
         }
-        let mut bytes = [0; CAPACITY];
+        let mut bytes = [0; MAX_RAMP_LENGTH];
         let mut index = 0;
         while index < source.len() {
             let byte = source[index];
@@ -58,7 +56,7 @@ impl Ramp {
         self.bytes.get(..self.len).unwrap_or_default()
     }
 
-    /// Returns the number of entries, always between 1 and 64.
+    /// Returns the number of entries, always between 1 and `MAX_RAMP_LENGTH`.
     #[must_use]
     pub const fn len(&self) -> usize {
         self.len

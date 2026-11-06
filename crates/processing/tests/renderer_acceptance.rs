@@ -1,7 +1,8 @@
 use image::{DynamicImage, ImageBuffer, ImageFormat, Rgba};
 use image_to_binary_core::{ContractError, Generation, Ramp, RenderMode, Sampling};
 use image_to_binary_processing::{
-    decode, DecodeLimits, RenderError, RenderOptions, Renderer, Sampler, MAX_RENDER_ROW_BYTES,
+    decode, ColorMode, DecodeLimits, RenderError, RenderOptions, RenderStyle, Renderer, Rgb,
+    Sampler, MAX_RENDER_ROW_BYTES,
 };
 use std::io::Cursor;
 use std::sync::Arc;
@@ -686,4 +687,441 @@ fn mode_changes_reuse_the_same_sampled_grid() {
             .unwrap(),
         binary
     );
+}
+
+fn colored_grid(
+    columns: u32,
+    rows: u32,
+    partial: bool,
+) -> Arc<image_to_binary_processing::SampleGrid> {
+    let cell_height = u32::from(
+        Renderer::new()
+            .unwrap()
+            .aspect_geometry(5, 30)
+            .unwrap()
+            .source_cell_height,
+    );
+    let (extra_width, extra_height) = if partial { (2, 3) } else { (0, 0) };
+    let source = source(
+        columns * 5 + extra_width,
+        cell_height * rows + extra_height,
+        |x, y| {
+            let column = x / 5;
+            let row = y / cell_height;
+            let value = gray_cell_value(column, row);
+            let alpha = match (column + row) % 3 {
+                0 => 255,
+                1 => 0,
+                _ => 128,
+            };
+            [value, 255 - value, value / 2, alpha]
+        },
+    );
+    Sampler::new(source)
+        .sample_average_rect(5, cell_height)
+        .unwrap()
+}
+
+fn rgb(red: u8, green: u8, blue: u8) -> Rgb {
+    Rgb { red, green, blue }
+}
+
+fn monochrome_style() -> RenderStyle {
+    RenderStyle {
+        foreground: rgb(255, 128, 0),
+        background: rgb(0, 0, 64),
+        ..RenderStyle::default()
+    }
+}
+
+fn source_style() -> RenderStyle {
+    RenderStyle {
+        color: ColorMode::Source,
+        background: rgb(0, 0, 64),
+        ..RenderStyle::default()
+    }
+}
+
+const GOLDEN_MONOCHROME_CUSTOM: u64 = 6_427_888_498_122_285_736;
+const GOLDEN_SOURCE_COLOR: u64 = 776_226_303_450_767_921;
+const GOLDEN_CONTRAST: u64 = 4_527_450_082_118_090_894;
+const GOLDEN_INVERT: u64 = 4_378_243_466_056_001_029;
+const GOLDEN_THRESHOLD: u64 = 1_406_490_999_506_980_389;
+
+fn golden_frame(grid: &image_to_binary_processing::SampleGrid, options: RenderOptions) -> u64 {
+    let mut renderer = Renderer::new().unwrap();
+    let first = renderer.render(grid, options).unwrap();
+    let second = renderer.render(grid, options).unwrap();
+    assert_eq!(first, second);
+    assert!(first.pixels().chunks_exact(4).all(|pixel| pixel[3] == 255));
+    fnv64(first.pixels())
+}
+
+#[test]
+fn style_goldens_are_pinned_and_deterministic() {
+    let gray = gradient_grid(3, 3, false);
+    let colored = colored_grid(3, 3, false);
+    let monochrome = RenderOptions {
+        style: monochrome_style(),
+        ..mode_options(RenderMode::Binary)
+    };
+    let source = RenderOptions {
+        style: source_style(),
+        ..mode_options(RenderMode::Ascii(Ramp::DEFAULT_ASCII))
+    };
+    let contrast = RenderOptions {
+        style: RenderStyle {
+            contrast: -40,
+            ..RenderStyle::default()
+        },
+        ..mode_options(RenderMode::Ascii(Ramp::DEFAULT_ASCII))
+    };
+    let invert = RenderOptions {
+        style: RenderStyle {
+            invert: true,
+            ..RenderStyle::default()
+        },
+        ..mode_options(RenderMode::Ascii(Ramp::new("-=+#").unwrap()))
+    };
+    let threshold = RenderOptions {
+        threshold: 96,
+        ..mode_options(RenderMode::Binary)
+    };
+    assert_eq!(
+        golden_frame(&gray, monochrome),
+        GOLDEN_MONOCHROME_CUSTOM,
+        "monochrome"
+    );
+    assert_eq!(
+        golden_frame(&colored, source),
+        GOLDEN_SOURCE_COLOR,
+        "source"
+    );
+    assert_eq!(golden_frame(&gray, contrast), GOLDEN_CONTRAST, "contrast");
+    assert_eq!(golden_frame(&gray, invert), GOLDEN_INVERT, "invert");
+    assert_eq!(
+        golden_frame(&gray, threshold),
+        GOLDEN_THRESHOLD,
+        "threshold"
+    );
+}
+
+#[test]
+fn every_style_matches_row_batches_and_preview_with_partial_cells() {
+    let grid = colored_grid(4, 6, true);
+    assert_eq!(grid.height(), 7);
+    let styles = [
+        RenderStyle::default(),
+        monochrome_style(),
+        source_style(),
+        RenderStyle {
+            contrast: 60,
+            invert: true,
+            color: ColorMode::Source,
+            background: rgb(5, 5, 5),
+            ..RenderStyle::default()
+        },
+    ];
+    let modes = [
+        RenderMode::Binary,
+        RenderMode::Ascii(Ramp::DEFAULT_ASCII),
+        RenderMode::Block,
+    ];
+    let mut renderer = Renderer::new().unwrap();
+    for style in styles {
+        for mode in modes {
+            let options = RenderOptions {
+                style,
+                ..mode_options(mode)
+            };
+            let full = renderer.render(&grid, options).unwrap();
+            assert!(full.pixels().chunks_exact(4).all(|pixel| pixel[3] == 255));
+            for batch in [1, 3, 4, 5] {
+                let rows = render_batches(&mut renderer, &grid, options, batch);
+                assert_eq!(rows, full.pixels(), "{style:?} {mode:?} batch {batch}");
+            }
+            assert_eq!(
+                renderer.frame_dimensions(&grid, options).unwrap(),
+                (full.width(), full.height())
+            );
+            assert_eq!(renderer.render_preview(&grid, options).unwrap(), full);
+            let mut task = renderer
+                .preview_task(Arc::clone(&grid), options, Generation::new(21))
+                .unwrap();
+            while task.progress().completed() < task.progress().total() {
+                task.advance(9, Generation::new(21)).unwrap();
+            }
+            assert_eq!(task.finish(Generation::new(21)).unwrap(), full);
+        }
+    }
+}
+
+#[test]
+fn source_color_opaque_cell_shows_exact_rgb_in_glyph_modes() {
+    let grid = {
+        let cell_height = u32::from(
+            Renderer::new()
+                .unwrap()
+                .aspect_geometry(5, 30)
+                .unwrap()
+                .source_cell_height,
+        );
+        Sampler::new(source(5, cell_height, |_, _| [255, 230, 255, 255]))
+            .sample_average_rect(5, cell_height)
+            .unwrap()
+    };
+    let mut renderer = Renderer::new().unwrap();
+    let style = RenderStyle {
+        color: ColorMode::Source,
+        background: rgb(0, 0, 0),
+        ..RenderStyle::default()
+    };
+    for mode in [
+        RenderMode::Binary,
+        RenderMode::Ascii(Ramp::new("@").unwrap()),
+    ] {
+        let options = RenderOptions {
+            style,
+            ..mode_options(mode)
+        };
+        let frame = renderer.render(&grid, options).unwrap();
+        let mut exact = 0;
+        for pixel in frame.pixels().chunks_exact(4) {
+            assert_eq!(pixel[3], 255, "{mode:?}");
+            if pixel == [255, 230, 255, 255] {
+                exact += 1;
+            } else {
+                assert_eq!(pixel[0], pixel[2], "{mode:?} {pixel:?}");
+                assert!(pixel[1] <= 230, "{mode:?} {pixel:?}");
+            }
+        }
+        assert!(
+            exact > 0,
+            "{mode:?} has no fully covered exact-colour pixel"
+        );
+    }
+}
+
+fn average_cell_grid_with(
+    pixel: impl Fn(u32, u32) -> [u8; 4],
+) -> Arc<image_to_binary_processing::SampleGrid> {
+    let cell_height = u32::from(
+        Renderer::new()
+            .unwrap()
+            .aspect_geometry(5, 30)
+            .unwrap()
+            .source_cell_height,
+    );
+    Sampler::new(source(5, cell_height, pixel))
+        .sample_average_rect(5, cell_height)
+        .unwrap()
+}
+
+#[test]
+fn source_color_weights_hidden_transparent_colour_out_of_the_render() {
+    let cell_height = u32::from(
+        Renderer::new()
+            .unwrap()
+            .aspect_geometry(5, 30)
+            .unwrap()
+            .source_cell_height,
+    );
+    let cell_pixels = 5 * cell_height;
+    let grid = average_cell_grid_with(|x, y| {
+        let index = y * 5 + x;
+        if index * 25 < cell_pixels * 12 {
+            [255, 0, 0, 255]
+        } else {
+            [255, 255, 255, 0]
+        }
+    });
+    let style = RenderStyle {
+        color: ColorMode::Source,
+        background: rgb(0, 0, 0),
+        ..RenderStyle::default()
+    };
+    let mut renderer = Renderer::new().unwrap();
+    for mode in [
+        RenderMode::Binary,
+        RenderMode::Ascii(Ramp::DEFAULT_ASCII),
+        RenderMode::Block,
+    ] {
+        let frame = renderer
+            .render(
+                &grid,
+                RenderOptions {
+                    style,
+                    ..mode_options(mode)
+                },
+            )
+            .unwrap();
+        assert!(frame
+            .pixels()
+            .chunks_exact(4)
+            .all(|pixel| pixel[1] == 0 && pixel[2] == 0 && pixel[3] == 255));
+    }
+}
+
+#[test]
+fn all_transparent_source_cell_renders_exact_background_in_source_mode() {
+    let grid = average_cell_grid_with(|_, _| [255, 255, 255, 0]);
+    let background = rgb(10, 20, 30);
+    let frame = Renderer::new()
+        .unwrap()
+        .render(
+            &grid,
+            RenderOptions {
+                style: RenderStyle {
+                    color: ColorMode::Source,
+                    background,
+                    ..RenderStyle::default()
+                },
+                ..mode_options(RenderMode::Block)
+            },
+        )
+        .unwrap();
+    assert!(frame
+        .pixels()
+        .chunks_exact(4)
+        .all(|pixel| pixel == [10, 20, 30, 255]));
+}
+
+#[test]
+fn invalidation_policy_reuses_grids_and_masks_exactly() {
+    let checker = |x: u32, y: u32| {
+        if ((x / 5) + (y / 5)) % 2 == 0 {
+            [0, 0, 0, 255]
+        } else {
+            [255, 255, 255, 255]
+        }
+    };
+    let image = source(15, 15, checker);
+    let mut sampler = Sampler::new(Arc::clone(&image));
+    let grid = sampler.sample(5, Sampling::Classic).unwrap();
+    assert_eq!(sampler.cache_stats().computed(), 1);
+    assert_eq!(sampler.cache_stats().entries(), 1);
+
+    let mut renderer = Renderer::new().unwrap();
+    renderer.render(&grid, options()).unwrap();
+    let base = renderer.cache_stats();
+    assert_eq!(base.rasterized(), 2);
+    assert_eq!(base.entries(), 2);
+
+    let tone_and_colour = [
+        RenderOptions {
+            style: RenderStyle {
+                contrast: 30,
+                ..RenderStyle::default()
+            },
+            ..options()
+        },
+        RenderOptions {
+            style: RenderStyle {
+                contrast: -100,
+                ..RenderStyle::default()
+            },
+            ..options()
+        },
+        RenderOptions {
+            style: RenderStyle {
+                invert: true,
+                ..RenderStyle::default()
+            },
+            ..options()
+        },
+        RenderOptions {
+            threshold: 0,
+            ..options()
+        },
+        RenderOptions {
+            style: monochrome_style(),
+            ..options()
+        },
+        RenderOptions {
+            style: source_style(),
+            ..options()
+        },
+    ];
+    for changed in tone_and_colour {
+        let again = sampler.sample(5, Sampling::Classic).unwrap();
+        assert!(Arc::ptr_eq(&again, &grid));
+        renderer.render(&again, changed).unwrap();
+    }
+    assert_eq!(sampler.cache_stats().computed(), 1);
+    assert_eq!(renderer.cache_stats().rasterized(), base.rasterized());
+    assert_eq!(renderer.cache_stats().entries(), base.entries());
+
+    let other_size = RenderOptions {
+        font_size: 20,
+        ..options()
+    };
+    renderer.render(&grid, other_size).unwrap();
+    assert_eq!(sampler.cache_stats().computed(), 1);
+    assert_eq!(renderer.cache_stats().rasterized(), 4);
+    assert_eq!(renderer.cache_stats().entries(), 4);
+
+    let wider = sampler.sample(6, Sampling::Classic).unwrap();
+    assert!(!Arc::ptr_eq(&wider, &grid));
+    assert_eq!(sampler.cache_stats().computed(), 2);
+    assert_eq!(sampler.cache_stats().entries(), 2);
+    let average_height = u32::from(
+        Renderer::new()
+            .unwrap()
+            .aspect_geometry(5, 30)
+            .unwrap()
+            .source_cell_height,
+    );
+    let average = sampler.sample_average_rect(5, average_height).unwrap();
+    assert!(!Arc::ptr_eq(&average, &grid));
+    assert_eq!(sampler.cache_stats().computed(), 3);
+
+    let other = source(15, 15, |_, _| [255, 255, 255, 255]);
+    let mut other_sampler = Sampler::new(other);
+    let fresh = other_sampler.sample(5, Sampling::Classic).unwrap();
+    assert_eq!(other_sampler.cache_stats().computed(), 1);
+    assert_ne!(fresh.cell(0, 0), grid.cell(0, 0));
+}
+
+#[test]
+fn mode_ramp_and_colour_changes_on_average_grid_reuse_grid_and_masks() {
+    let grid = gradient_grid(3, 3, false);
+    let mut renderer = Renderer::new().unwrap();
+    renderer
+        .render(&grid, mode_options(RenderMode::Binary))
+        .unwrap();
+    let base = renderer.cache_stats();
+    assert_eq!(base.rasterized(), 2);
+    let reversed = Ramp::new("10").unwrap();
+    let changes = [
+        mode_options(RenderMode::Ascii(reversed)),
+        mode_options(RenderMode::Ascii(Ramp::new("01").unwrap())),
+        mode_options(RenderMode::Block),
+        RenderOptions {
+            style: monochrome_style(),
+            ..mode_options(RenderMode::Binary)
+        },
+        RenderOptions {
+            style: RenderStyle {
+                invert: true,
+                contrast: 50,
+                ..RenderStyle::default()
+            },
+            ..mode_options(RenderMode::Binary)
+        },
+    ];
+    for options in changes {
+        renderer.render(&grid, options).unwrap();
+        assert_eq!(renderer.cache_stats().rasterized(), base.rasterized());
+        assert_eq!(renderer.cache_stats().entries(), base.entries());
+    }
+    renderer
+        .render(
+            &grid,
+            RenderOptions {
+                font_size: 20,
+                ..mode_options(RenderMode::Binary)
+            },
+        )
+        .unwrap();
+    assert_eq!(renderer.cache_stats().rasterized(), base.rasterized() * 2);
 }

@@ -1,5 +1,7 @@
 use core::fmt;
 
+use crate::MAX_RAMP_LENGTH;
+
 /// Failure returned when a contract value cannot be represented or validated.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ContractError {
@@ -28,9 +30,10 @@ impl fmt::Display for ContractError {
             Self::ResourceLimitExceeded => formatter.write_str("resource limit exceeded"),
             Self::ArithmeticOverflow => formatter.write_str("arithmetic overflow"),
             Self::InvalidSettings(field) => write!(formatter, "invalid settings: {field}"),
-            Self::InvalidRamp => {
-                formatter.write_str("ramp must be printable ASCII and at most 64 characters")
-            }
+            Self::InvalidRamp => write!(
+                formatter,
+                "ramp must be printable ASCII and at most {MAX_RAMP_LENGTH} characters"
+            ),
             Self::InvalidProgress => formatter.write_str("progress exceeds its total"),
             Self::Cancelled => formatter.write_str("operation cancelled"),
             Self::StaleGeneration => formatter.write_str("operation belongs to a stale generation"),
