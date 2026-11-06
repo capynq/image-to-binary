@@ -1,8 +1,17 @@
 import { useEffect, useId, useState } from 'react'
+import { ExportPanel } from './export/ExportPanel'
+import { exportFilename } from './export/downloadName'
+import type { ExportPhase } from './export/exportFocus'
+import { footerStatusLabel, useFooterAnnouncement } from './export/footerAnnouncement'
+import { useExportDownload } from './export/useExportDownload'
+import { defaultUrlApi } from './processing/demoAdapter'
+import type { ExportStatus } from './processing/types'
 import { IMPORT_ACCEPT, IMPORT_GUIDANCE, formatBytes, useImportFlow } from './useImportFlow'
 import { useStudio } from './useStudio'
 
 type Theme = 'dark' | 'light'
+
+const DOWNLOAD_URL_API = defaultUrlApi()
 
 function getInitialTheme(): Theme {
   try {
@@ -14,25 +23,24 @@ function getInitialTheme(): Theme {
   return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'
 }
 
-function statusLabel(status: string): string {
+function exportPhaseOf(status: ExportStatus, hasDownload: boolean): ExportPhase {
   switch (status) {
+    case 'running':
+      return 'running'
+    case 'failed':
+      return 'failed'
+    case 'ready':
+      return hasDownload ? 'ready' : 'preparing'
     case 'idle':
-      return 'Ready for an image'
-    case 'importing':
-      return 'Importing image'
-    case 'processing':
-      return 'Rendering preview'
-    case 'exporting':
-      return 'Preparing export'
-    case 'cancelled':
-      return 'Operation cancelled'
-    case 'error':
-      return 'Action needs attention'
-    case 'disposed':
-      return 'Studio closed'
-    default:
-      return 'Preview ready'
+      return 'idle'
   }
+}
+
+function exportBlockedBy(status: string, hasSource: boolean): string | null {
+  if (!hasSource) return 'Open or load an image to enable PNG export.'
+  if (status === 'importing') return 'Wait for the image to finish importing.'
+  if (status === 'processing') return 'Wait for the artwork preview to finish rendering.'
+  return null
 }
 
 export default function App() {
@@ -63,16 +71,24 @@ export default function App() {
   const isOriginal = flow.view === 'original'
   const shown = isOriginal ? snapshot.original : snapshot.preview
   const viewName = isOriginal ? 'original image' : 'artwork'
-  const errorMessage = flow.localError ?? (snapshot.status === 'error' ? snapshot.error : null)
-  const busyLabel =
-    snapshot.status === 'importing'
-      ? 'Importing image…'
-      : snapshot.status === 'processing'
-        ? 'Rendering preview…'
-        : 'Preparing export…'
+  const exportFailed = snapshot.export.status === 'failed'
+  const errorMessage =
+    flow.localError ?? (snapshot.status === 'error' && !exportFailed ? snapshot.error : null)
+  const busyLabel = snapshot.status === 'importing' ? 'Importing image…' : 'Rendering preview…'
+  const exportArtifact = snapshot.export.status === 'ready' ? controller.readyExport() : null
+  const downloadName = exportFilename(snapshot.metadata?.name ?? '')
+  const download = useExportDownload(exportArtifact, downloadName, DOWNLOAD_URL_API)
+  const footerAnnouncement = useFooterAnnouncement(snapshot.status, snapshot.export.status)
+  const exportPhase = exportPhaseOf(snapshot.export.status, download !== null)
+  const canExport = hasSource && !isBusy
+  const exportBlock = canExport ? null : exportBlockedBy(snapshot.status, hasSource)
 
   function updateSetting(key: 'cellSize' | 'fontSize' | 'threshold', value: string) {
     controller.updateSettings({ ...settings, [key]: Number(value) })
+  }
+
+  function startPngExport() {
+    controller.startExport().catch(() => undefined)
   }
 
   return (
@@ -154,7 +170,7 @@ export default function App() {
                 </button>
               </div>
             </div>
-            {isBusy && (
+            {isBusy && snapshot.status !== 'exporting' && (
               <div className="busy-row">
                 <progress aria-label={busyLabel} />
                 <span>{busyLabel}</span>
@@ -355,17 +371,28 @@ export default function App() {
                 <p className="section-help">Open an image to inspect its metadata.</p>
               )}
             </section>
-            <section className="control-section export-section" aria-labelledby="export-heading">
+            <ExportPanel
+              phase={exportPhase}
+              canExport={canExport}
+              disabledReason={exportBlock}
+              progress={snapshot.export.progress}
+              byteLength={snapshot.export.byteLength}
+              error={snapshot.export.error}
+              download={download}
+              onExport={startPngExport}
+              onCancel={flow.cancel}
+            />
+            <section className="control-section" aria-labelledby="text-export-heading">
               <div className="section-heading">
-                <h2 id="export-heading">Export</h2>
+                <h2 id="text-export-heading">Text export</h2>
               </div>
-              <p className="section-help" id="export-help">
-                Export is not available yet.
+              <p className="section-help" id="text-export-help">
+                UTF-8 text export arrives in a later phase.
               </p>
               <button
                 className="button button-secondary button-wide"
                 type="button"
-                aria-describedby="export-help"
+                aria-describedby="text-export-help"
                 disabled
               >
                 Export text
@@ -375,10 +402,13 @@ export default function App() {
         </aside>
       </main>
 
-      <footer className="status-bar" role="status" aria-live="polite">
+      <footer className="status-bar">
         <span className={`status-dot ${hasSource ? 'is-active' : ''}`} aria-hidden="true" />
-        <span>{statusLabel(snapshot.status)}</span>
+        <span aria-hidden="true">{footerStatusLabel(snapshot.status)}</span>
         <span className="status-note">Images are processed locally in your browser.</span>
+        <span className="visually-hidden" role="status" aria-live="polite">
+          {footerAnnouncement}
+        </span>
       </footer>
     </div>
   )

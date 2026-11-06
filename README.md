@@ -122,6 +122,43 @@ image and view. Local Chromium and WebKit checks cover keyboard controls,
 long names, narrow/short windows, both themes and production reflow at device
 scale 4. Manual screen-reader testing remains unavailable.
 
+Phase 3.4.5 PNG download acceptance (production bundle, `vite preview` on
+127.0.0.1:4173, real Rust worker; probe in `docs/reports/playwright/`):
+
+- Chromium 154, WebKit 26.6 and Firefox 156 (macOS arm64): all six sections ran
+  without deadline or timeout. Section a byte-compared 9/9 encoded fixtures and
+  5/5 native reference cases against native PNG bytes; repeated exports were
+  byte-identical (`encodedExportAgainByteEqual`: 9/9). Sections b (reset revokes
+  the export URL), c (cancel, replace-source and change-setting during export
+  leave no link or download event, announce "PNG export cancelled.", and a
+  following export matches native), and d (20 import/export/reset cycles: live
+  object URLs are 0 after every reset, live workers go from 0 to 1 at cycle 1
+  and do not grow after it, and all 20 downloads match native) passed in all
+  three engines.
+- Keyboard (section e): Chromium and Firefox reached Export and Cancel by Tab
+  (`exportReachedByTab`, `cancelReachedByTab`), and Tab from Download moved focus
+  to Export again (`focusAfterTabFromDownload`). WebKit did not reach Export by
+  Tab (`exportReachedByTab: false`, `bodyFocusWhileTabbingToExport: 120`), so its
+  section e focused Export programmatically and verified Enter activation, focus
+  after Cancel and Export, and the downloaded bytes; Tab reachability was not
+  verified there. From the Export step onward, the requestAnimationFrame sampler
+  recorded no body-focus frames (`sampledFramesWithBodyFocus: 0`) in each engine.
+  During that interaction the footer live region stayed at "Preview ready"
+  (`footerLiveValues`), and the export panel announced the lifecycle.
+- Responsive (section f): 320, 768, 1200 and 1920 CSS px, each in idle, ready,
+  running and failed states: 16 screenshots per browser, no horizontal overflow,
+  and every Export/Cancel/Download/Retry control at least 44 px and reachable.
+  Running was held at the worker boundary; failed was forced by an unknown source
+  id in one export message. Focus was never on the "Skip to workspace" link in
+  the ready state (`skipLinkFocused: false`).
+- Firefox launched only with `HOME` and `CFFIXED_USER_HOME` pointed at
+  `.local/firefox-home`; the earlier profile-folder error did not recur.
+- Not verified: manual screen-reader testing (unavailable), native Windows and
+  Linux, Safari-specific keyboard modes beyond the WebKit result above, and any
+  performance guarantee. The single 1200 px classic export measured 32 ms
+  (Chromium), 36 ms (WebKit) and 38 ms (Firefox) from click to download link.
+  Text export (6.3) remains pending.
+
 ## WASM bindings
 
 `crates/wasm` (`image-to-binary-wasm`) pins `wasm-bindgen =0.2.128` and

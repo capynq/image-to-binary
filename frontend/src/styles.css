@@ -482,8 +482,52 @@ select {
     monospace;
   text-align: right;
 }
-.export-section .button-quiet {
-  margin-top: 6px;
+a.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  text-decoration: none;
+}
+.export-section h2:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 4px;
+}
+.export-actions,
+.export-error {
+  display: grid;
+  gap: 12px;
+  margin-top: 18px;
+}
+.export-actions .button-wide,
+.export-error .button-wide {
+  margin-top: 0;
+}
+.export-reason,
+.export-status {
+  min-height: 1.5em;
+  margin: 0;
+}
+.export-progress-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+.export-percent {
+  color: var(--text);
+  font:
+    0.85rem 'IBM Plex Mono',
+    monospace;
+}
+.export-progress {
+  width: 100%;
+  height: 12px;
+  accent-color: var(--accent);
+}
+.export-error .error-text {
+  margin: 0;
 }
 .status-bar {
   min-height: 46px;

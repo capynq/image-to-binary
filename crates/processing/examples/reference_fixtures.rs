@@ -214,6 +214,9 @@ fn render_case(case: &Case, pixels: Vec<u8>) -> Result<Vec<Variant>, Box<dyn Err
 const PREVIEW_CELL: u8 = 5;
 const PREVIEW_FONT: u8 = 10;
 const PREVIEW_THRESHOLD: u8 = 128;
+const UI_CELL: u8 = 12;
+const UI_FONT: u8 = 16;
+const UI_THRESHOLD: u8 = 128;
 const ENCODED_WIDTH: u32 = 23;
 const ENCODED_HEIGHT: u32 = 17;
 const PAGE_SIZE: u32 = 10;
@@ -352,7 +355,7 @@ fn rejected_fixtures(fixtures: &[Fixture]) -> Result<Vec<Rejected>, Box<dyn Erro
     ])
 }
 
-fn preview_of(source: DecodedSource) -> Result<RenderedFrame, Box<dyn Error>> {
+fn preview_of(source: DecodedSource) -> Result<(RenderedFrame, Vec<u8>), Box<dyn Error>> {
     let mut sampler = Sampler::new(Arc::new(source));
     let mut renderer = Renderer::new()?;
     let grid = sampler.sample(PREVIEW_CELL, Sampling::Classic)?;
@@ -363,7 +366,17 @@ fn preview_of(source: DecodedSource) -> Result<RenderedFrame, Box<dyn Error>> {
         sampling: Sampling::Classic,
         ..RenderOptions::default()
     };
-    Ok(renderer.render_preview(&grid, options)?)
+    let preview = renderer.render_preview(&grid, options)?;
+    let export_grid = sampler.sample(UI_CELL, Sampling::Classic)?;
+    let export_options = RenderOptions {
+        cell_size: UI_CELL,
+        font_size: UI_FONT,
+        threshold: UI_THRESHOLD,
+        sampling: Sampling::Classic,
+        ..RenderOptions::default()
+    };
+    let png = native_export(&export_grid, export_options)?;
+    Ok((preview, png))
 }
 
 fn encoded_entry(fixture: &Fixture) -> Result<String, Box<dyn Error>> {
@@ -378,15 +391,16 @@ fn encoded_entry(fixture: &Fixture) -> Result<String, Box<dyn Error>> {
     );
     let channels = metadata.channels();
     let normalized = base64(source.pixels());
-    let preview = preview_of(source)?;
+    let (preview, png) = preview_of(source)?;
     Ok(format!(
-        r#"{{"name":"{}","width":{width},"height":{height},"channels":{channels},"previewWidth":{},"previewHeight":{},"bytes":"{}","source":"{}","preview":"{}"}}"#,
+        r#"{{"name":"{}","width":{width},"height":{height},"channels":{channels},"previewWidth":{},"previewHeight":{},"bytes":"{}","source":"{}","preview":"{}","exportSettings":{{"cellSize":{UI_CELL},"fontSize":{UI_FONT},"threshold":{UI_THRESHOLD},"sampling":"classic"}},"export":"{}"}}"#,
         fixture.name,
         preview.width(),
         preview.height(),
         base64(&fixture.bytes),
         normalized,
-        base64(preview.pixels())
+        base64(preview.pixels()),
+        base64(&png)
     ))
 }
 

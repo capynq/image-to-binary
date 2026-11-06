@@ -1002,9 +1002,9 @@ Proposed commit title: `feat: add browser exports and cleanup`
 
 Completion checklist:
 
-- [ ] PNG export passes parity checks.
-- [ ] Reset/replacement lifecycle tests pass.
-- [ ] Resource cleanup reviewed.
+- [x] PNG export passes parity checks.
+- [x] Reset/replacement lifecycle tests pass.
+- [x] Resource cleanup reviewed.
 
 #### 3.4.1 Render artwork in bounded rows
 
@@ -1153,9 +1153,20 @@ Proposed commit title: `feat: add browser PNG download`
 
 Completion checklist:
 
-- [ ] Real-browser download parity and lifecycle acceptance pass.
-- [ ] Responsive and keyboard review passes.
-- [ ] README status and parent 3.4 checklist reflect verified evidence.
+- [x] Real-browser download parity and lifecycle acceptance pass.
+- [x] Responsive and keyboard review passes.
+- [x] README status and parent 3.4 checklist reflect verified evidence.
+
+Validation: 294 frontend tests, formatting, type checking, and the production
+build pass. Chromium 154, WebKit 26.6 and Firefox 156 ran the production bundle
+on macOS arm64: 9/9 encoded fixtures and 5/5 reference cases downloaded
+byte-equal to native; cancel, source replacement and setting changes during a
+held export left no download and announced the cancellation; 20/20 cycles ended
+with 0 live object URLs and one stable worker. Layout passed at 320, 768, 1200
+and 1920 px with no overflow and 44 px minimum targets. The export panel is the
+only announcer of the export lifecycle. Tab reachability is verified in Chromium
+and Firefox but not in WebKit, where Tab reached no control on this host. Manual
+screen-reader testing, native Windows and native Linux were unavailable.
 
 ### 4.1 Add native HEIC/AVIF dependencies and build scripts
 
