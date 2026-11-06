@@ -1,10 +1,86 @@
 //! Deterministic common-codec decoding into an owned RGBA8 source.
 
+#[cfg(feature = "heif")]
+mod heif;
+
 use std::fmt;
 use std::io::Cursor;
 
 use image::{metadata::Orientation, DynamicImage, ImageDecoder, ImageFormat, ImageReader, Limits};
 use image_to_binary_core::{ContractError, Dimensions, ResourceLimits, SourceMetadata};
+
+/// ISO-BMFF image families decoded through the optional native codec path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeFormat {
+    /// HEIF or HEIC still images, decoded from the primary item.
+    Heif,
+    /// AVIF still images, decoded from the primary item.
+    Avif,
+}
+
+impl fmt::Display for NativeFormat {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Heif => "HEIF/HEIC",
+            Self::Avif => "AVIF",
+        })
+    }
+}
+
+const AVIF_BRANDS: [&[u8]; 2] = [b"avif", b"avis"];
+const HEIF_BRANDS: [&[u8]; 10] = [
+    b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"hevm", b"hevs", b"mif1", b"msf1",
+];
+
+/// Returns the `ftyp` payload when `bytes` begins with a well-formed box.
+///
+/// Rejects non-`ftyp` boxes, sizes shorter than their header, and declared
+/// lengths beyond the available bytes, so a truncated file is never classified.
+fn ftyp_payload(bytes: &[u8]) -> Option<&[u8]> {
+    if bytes.get(4..8)? != b"ftyp" {
+        return None;
+    }
+    let declared = u32::from_be_bytes(bytes.get(0..4)?.try_into().ok()?);
+    let (header, length) = match declared {
+        0 => return None,
+        1 => {
+            let large = u64::from_be_bytes(bytes.get(8..16)?.try_into().ok()?);
+            (16, usize::try_from(large).ok()?)
+        }
+        size => (8, usize::try_from(size).ok()?),
+    };
+    if length < header || length > bytes.len() {
+        return None;
+    }
+    bytes.get(header..length)
+}
+
+/// Upper bound on compatible brands examined per `ftyp`; real files list a handful.
+const MAX_FTYP_COMPATIBLE_BRANDS: usize = 64;
+
+/// Classifies an ISO-BMFF file by its `ftyp` major and compatible brands.
+///
+/// AVIF brands are checked before HEIF brands because AVIF files commonly
+/// also list `mif1`. At most `MAX_FTYP_COMPATIBLE_BRANDS` compatible brands
+/// are examined, so a large declared box cannot widen the scan. Returns
+/// `None` for anything that is not a recognized `ftyp` box, including
+/// zero-size, truncated, or malformed headers, so the caller can fall through
+/// to the common decoders.
+fn native_format(bytes: &[u8]) -> Option<NativeFormat> {
+    let payload = ftyp_payload(bytes)?;
+    let major = payload.get(0..4)?;
+    let compatible = payload.get(8..)?;
+    let brands = || {
+        std::iter::once(major).chain(compatible.chunks_exact(4).take(MAX_FTYP_COMPATIBLE_BRANDS))
+    };
+    if brands().any(|brand| AVIF_BRANDS.contains(&brand)) {
+        Some(NativeFormat::Avif)
+    } else if brands().any(|brand| HEIF_BRANDS.contains(&brand)) {
+        Some(NativeFormat::Heif)
+    } else {
+        None
+    }
+}
 
 /// Limits applied before allocating decoded pixels.
 ///
@@ -127,6 +203,10 @@ pub enum DecodeError {
     EncodedInputTooLarge,
     /// The input has no supported magic format.
     UnsupportedFormat,
+    /// The input is a HEIF/AVIF file but this build cannot decode it: the
+    /// `heif` feature is off, or the linked libheif has no matching decoder.
+    /// Callers may route such input to a lazily loaded decoder.
+    CodecUnavailable(NativeFormat),
     /// A core dimension or allocation contract failed.
     Contract(ContractError),
     /// The decoder reported that a configured dimension or allocation limit was exceeded.
@@ -142,6 +222,10 @@ impl fmt::Display for DecodeError {
         match self {
             Self::EncodedInputTooLarge => formatter.write_str("encoded input exceeds limit"),
             Self::UnsupportedFormat => formatter.write_str("unsupported image format"),
+            Self::CodecUnavailable(format) => write!(
+                formatter,
+                "{format} decoding is not available in this build; use a PNG, JPEG, WebP, BMP, TIFF, or GIF source"
+            ),
             Self::Contract(error) => error.fmt(formatter),
             Self::ResourceLimit(diagnostic) => formatter.write_str(diagnostic),
             Self::Image(error) => error.fmt(formatter),
@@ -176,6 +260,9 @@ impl From<image::ImageError> for DecodeError {
 pub fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<DecodedSource, DecodeError> {
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > limits.max_encoded_bytes {
         return Err(DecodeError::EncodedInputTooLarge);
+    }
+    if let Some(format) = native_format(bytes) {
+        return decode_native(bytes, format, limits);
     }
 
     let mut reader = ImageReader::new(Cursor::new(bytes))
@@ -243,6 +330,18 @@ pub fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<DecodedSource, Decod
     })
 }
 
+#[cfg(not(feature = "heif"))]
+fn decode_native(
+    _bytes: &[u8],
+    format: NativeFormat,
+    _limits: DecodeLimits,
+) -> Result<DecodedSource, DecodeError> {
+    Err(DecodeError::CodecUnavailable(format))
+}
+
+#[cfg(feature = "heif")]
+use heif::decode_native;
+
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
@@ -259,6 +358,122 @@ mod tests {
     use tiff::encoder::TiffEncoder as RawTiffEncoder;
 
     use super::*;
+
+    const HEIC: &[u8] = include_bytes!("../tests/fixtures/heif/sample.heic");
+    const AVIF: &[u8] = include_bytes!("../tests/fixtures/heif/sample.avif");
+
+    fn ftyp(size: u32, major: [u8; 4], compatible: &[[u8; 4]]) -> Vec<u8> {
+        let mut bytes = size.to_be_bytes().to_vec();
+        bytes.extend_from_slice(b"ftyp");
+        bytes.extend_from_slice(&major);
+        bytes.extend_from_slice(&0_u32.to_be_bytes());
+        for brand in compatible {
+            bytes.extend_from_slice(brand);
+        }
+        bytes
+    }
+
+    fn sized_ftyp(major: [u8; 4], compatible: &[[u8; 4]]) -> Vec<u8> {
+        let size = u32::try_from(16 + 4 * compatible.len()).unwrap();
+        ftyp(size, major, compatible)
+    }
+
+    #[test]
+    fn recognizes_avif_and_heif_brands() {
+        let cases: [(Vec<u8>, Option<NativeFormat>); 14] = [
+            (sized_ftyp(*b"avif", &[]), Some(NativeFormat::Avif)),
+            (sized_ftyp(*b"avis", &[]), Some(NativeFormat::Avif)),
+            (
+                sized_ftyp(*b"mif1", &[*b"avif", *b"miaf"]),
+                Some(NativeFormat::Avif),
+            ),
+            (sized_ftyp(*b"mif1", &[]), Some(NativeFormat::Heif)),
+            (sized_ftyp(*b"msf1", &[]), Some(NativeFormat::Heif)),
+            (sized_ftyp(*b"heic", &[*b"mif1"]), Some(NativeFormat::Heif)),
+            (sized_ftyp(*b"heix", &[]), Some(NativeFormat::Heif)),
+            (sized_ftyp(*b"hevc", &[]), Some(NativeFormat::Heif)),
+            (sized_ftyp(*b"hevx", &[]), Some(NativeFormat::Heif)),
+            (sized_ftyp(*b"heim", &[]), Some(NativeFormat::Heif)),
+            (sized_ftyp(*b"heis", &[]), Some(NativeFormat::Heif)),
+            (sized_ftyp(*b"hevm", &[]), Some(NativeFormat::Heif)),
+            (sized_ftyp(*b"hevs", &[]), Some(NativeFormat::Heif)),
+            (sized_ftyp(*b"isom", &[*b"mp41"]), None),
+        ];
+        for (bytes, expected) in cases {
+            assert_eq!(native_format(&bytes), expected);
+        }
+        assert_eq!(native_format(HEIC), Some(NativeFormat::Heif));
+        assert_eq!(native_format(AVIF), Some(NativeFormat::Avif));
+    }
+
+    #[test]
+    fn rejects_truncated_short_and_non_ftyp_input() {
+        let full = sized_ftyp(*b"avif", &[]);
+        assert_eq!(native_format(&full[..full.len() - 1]), None);
+        assert_eq!(native_format(&full[..7]), None);
+        assert_eq!(native_format(&ftyp(4, *b"avif", &[])), None);
+        assert_eq!(native_format(&ftyp(7, *b"avif", &[])), None);
+        assert_eq!(native_format(&ftyp(64, *b"avif", &[])), None);
+        let mut moov = sized_ftyp(*b"avif", &[]);
+        moov[4..8].copy_from_slice(b"moov");
+        assert_eq!(native_format(&moov), None);
+        let mut large = vec![0, 0, 0, 1];
+        large.extend_from_slice(b"ftyp");
+        large.extend_from_slice(&8_u64.to_be_bytes()[..4]);
+        assert_eq!(native_format(&large), None);
+        assert_eq!(native_format(b"\x89PNG\r\n\x1a\n"), None);
+        assert_eq!(native_format(&[]), None);
+    }
+
+    #[test]
+    fn zero_size_ftyp_is_not_recognized() {
+        let bytes = ftyp(0, *b"avif", &[]);
+        assert_eq!(native_format(&bytes), None);
+        let mut smuggled = ftyp(0, *b"isom", &[*b"isom"]);
+        smuggled.extend_from_slice(b"heic");
+        assert_eq!(native_format(&smuggled), None);
+        let mut exact = vec![0, 0, 0, 0];
+        exact.extend_from_slice(b"ftyp");
+        exact.extend_from_slice(b"isom");
+        exact.extend_from_slice(&[0, 0, 0, 0]);
+        exact.extend_from_slice(b"heic");
+        assert_eq!(native_format(&exact), None);
+    }
+
+    #[test]
+    fn large_declared_ftyp_scans_only_the_brand_cap() {
+        let filler = [*b"isom"; MAX_FTYP_COMPATIBLE_BRANDS];
+        let mut past_cap = Vec::from(filler);
+        past_cap.push(*b"heic");
+        let past = sized_ftyp(*b"isom", &past_cap);
+        assert_eq!(native_format(&past), None);
+
+        let mut within_cap = Vec::from(filler);
+        within_cap[MAX_FTYP_COMPATIBLE_BRANDS - 1] = *b"heic";
+        let within = sized_ftyp(*b"isom", &within_cap);
+        assert_eq!(native_format(&within), Some(NativeFormat::Heif));
+    }
+
+    #[test]
+    fn fixtures_classify_after_brand_bounds() {
+        assert_eq!(native_format(HEIC), Some(NativeFormat::Heif));
+        assert_eq!(native_format(AVIF), Some(NativeFormat::Avif));
+    }
+
+    #[cfg(not(feature = "heif"))]
+    #[test]
+    fn default_build_reports_codec_unavailable_for_fixtures() {
+        assert!(matches!(
+            decode(HEIC, DecodeLimits::default()),
+            Err(DecodeError::CodecUnavailable(NativeFormat::Heif))
+        ));
+        assert!(matches!(
+            decode(AVIF, DecodeLimits::default()),
+            Err(DecodeError::CodecUnavailable(NativeFormat::Avif))
+        ));
+        let message = DecodeError::CodecUnavailable(NativeFormat::Avif).to_string();
+        assert!(message.starts_with("AVIF decoding is not available"));
+    }
 
     fn encoded(format: ImageFormat) -> Vec<u8> {
         let image = DynamicImage::ImageRgba8(ImageBuffer::from_fn(2, 1, |x, _| {

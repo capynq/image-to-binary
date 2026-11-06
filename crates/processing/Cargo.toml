@@ -6,10 +6,15 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+heif = ["dep:libheif-rs"]
+
 [dependencies]
 image = { version = "=0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png", "tiff", "webp"] }
 image-to-binary-core = { path = "../core" }
 fontdue = "=0.9.4"
+libheif-rs = { version = "=3.0.0", optional = true }
 
 [dev-dependencies]
 tiff = "=0.11.3"

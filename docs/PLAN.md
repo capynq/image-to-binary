@@ -1167,9 +1167,23 @@ Proposed commit title: `build: add pinned native HEIF AVIF codecs`
 
 Completion checklist:
 
-- [ ] Dependencies and licenses reviewed.
-- [ ] Native fixtures pass on available targets.
-- [ ] Missing-codec path tested.
+- [x] Dependencies and licenses reviewed.
+- [x] Native fixtures pass on available targets.
+- [x] Missing-codec path tested.
+
+Validation on macOS arm64 only: 60 unit and 13 acceptance processing tests pass
+with the `heif` feature, and the default workspace passes with no libheif in its
+dependency tree, including the WASM target. libheif 1.23.7, libde265 1.1.3, and
+libaom 3.15.3 are pinned by SHA-256 and built decode-only; `otool -L` shows no
+dynamic dependency on them. A recognized file with no available decoder returns
+the typed `CodecUnavailable` error (`codec_unavailable` in WASM), so the browser
+can route to a lazy decoder without a JavaScript format sniff. The `ftyp` brand
+scan is capped and a size-0 box is rejected, so file payloads cannot select a
+format. Linux, Windows, and x86_64 builds are written but unverified. libheif's
+internal decoder memory is not charged to the working budget, which remains best
+effort. Fixtures have no irot/imir transforms; that coverage belongs to 4.3.
+HEVC patent licensing and LGPL-3.0 distribution terms are recorded in
+`THIRD_PARTY_NOTICES.md` as unresolved and need review before any distribution.
 
 ### 4.2 Add lazy browser HEIC/AVIF decoder workers
 

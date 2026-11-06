@@ -23,6 +23,7 @@ pub(crate) enum ErrorCode {
     FrameConsumed,
     EncodedTooLarge,
     UnsupportedFormat,
+    CodecUnavailable,
     DecodeFailed,
     ReservationFailed,
     EncodeFailed,
@@ -46,6 +47,7 @@ impl ErrorCode {
             Self::FrameConsumed => "frame_consumed",
             Self::EncodedTooLarge => "encoded_too_large",
             Self::UnsupportedFormat => "unsupported_format",
+            Self::CodecUnavailable => "codec_unavailable",
             Self::DecodeFailed => "decode_failed",
             Self::ReservationFailed => "reservation_failed",
             Self::EncodeFailed => "encode_failed",
@@ -123,6 +125,10 @@ impl From<DecodeError> for BindingError {
                 ErrorCode::UnsupportedFormat,
                 "the image format is not supported",
             ),
+            DecodeError::CodecUnavailable(format) => Self::new(
+                ErrorCode::CodecUnavailable,
+                format!("{format} decoding is not available in this build"),
+            ),
             DecodeError::Contract(inner) => Self::from(inner),
             DecodeError::ResourceLimit(diagnostic) => Self::new(
                 ErrorCode::ResourceLimitExceeded,
@@ -179,7 +185,7 @@ impl From<ExportError> for BindingError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image_to_binary_processing::{decode, DecodeLimits};
+    use image_to_binary_processing::{decode, DecodeLimits, NativeFormat};
 
     #[test]
     fn contract_errors_map_to_stable_codes() {
@@ -249,6 +255,10 @@ mod tests {
         let cases = [
             (DecodeError::EncodedInputTooLarge, "encoded_too_large"),
             (DecodeError::UnsupportedFormat, "unsupported_format"),
+            (
+                DecodeError::CodecUnavailable(NativeFormat::Heif),
+                "codec_unavailable",
+            ),
             (
                 DecodeError::Contract(ContractError::ResourceLimitExceeded),
                 "resource_limit_exceeded",

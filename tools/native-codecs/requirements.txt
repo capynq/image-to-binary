@@ -1,0 +1,5 @@
+# Build-time tools, installed into the project-local venv at .local/tools:
+#   python3 -m venv .local/tools && .local/tools/bin/python -m pip install -r tools/native-codecs/requirements.txt
+cmake==4.4.4
+ninja==1.13.2
+pkgconf==3.0.7.post0

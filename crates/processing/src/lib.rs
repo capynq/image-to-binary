@@ -5,7 +5,7 @@ mod original;
 mod renderer;
 mod sampling;
 
-pub use decode::{decode, DecodeError, DecodeLimits, DecodedSource};
+pub use decode::{decode, DecodeError, DecodeLimits, DecodedSource, NativeFormat};
 pub use original::{OriginalPreviewTask, ORIGINAL_PREVIEW_MAX_EDGE};
 pub use renderer::{
     AspectGeometry, PreviewAdvance, PreviewTask, RenderError, RenderOptions, RenderedFrame,

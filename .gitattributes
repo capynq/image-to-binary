@@ -1,1 +1,3 @@
 assets/fonts/OFL.txt -whitespace
+crates/processing/tests/fixtures/heif/*.heic binary
+crates/processing/tests/fixtures/heif/*.avif binary
