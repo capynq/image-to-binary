@@ -11,6 +11,28 @@ const FONT_BYTES: &[u8] = include_bytes!("../../../assets/fonts/IBMPlexMono-Regu
 const DEFAULT_CACHE_BYTES: u64 = 8 * 1024 * 1024;
 const DEFAULT_OUTPUT_BYTES: u64 = 256 * 1024 * 1024;
 
+/// Maximum RGBA8 bytes one [`Renderer::render_rows`] call may allocate.
+///
+/// This ceiling applies independently of [`RenderOptions::max_output_bytes`];
+/// the stricter of the two limits is enforced.
+pub const MAX_RENDER_ROW_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Returns the checked RGBA8 byte size of a pixel region within both limits.
+fn checked_row_budget(
+    width: u32,
+    height: u32,
+    max_output_bytes: u64,
+) -> Result<u64, ContractError> {
+    let bytes = u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|value| value.checked_mul(4))
+        .ok_or(ContractError::ArithmeticOverflow)?;
+    if bytes > max_output_bytes || bytes > MAX_RENDER_ROW_BYTES {
+        return Err(ContractError::ResourceLimitExceeded);
+    }
+    Ok(bytes)
+}
+
 /// Errors returned by the renderer before a frame is exposed to callers.
 #[derive(Debug)]
 pub enum RenderError {
@@ -537,10 +559,15 @@ impl Renderer {
     /// contains `count * output_cell_height` pixel rows laid out as RGBA8
     /// pixels with the full frame width.
     ///
+    /// The buffer may not exceed [`MAX_RENDER_ROW_BYTES`] or
+    /// `options.max_output_bytes`; both are checked before allocation.
+    ///
     /// # Errors
     ///
-    /// Returns a contract error when the row range, settings, or output buffer
-    /// exceeds its configured limits.
+    /// Returns [`ContractError::InvalidDimensions`] for a zero `count` or a
+    /// range outside the grid, [`ContractError::ResourceLimitExceeded`] when the
+    /// buffer exceeds either limit, or another contract error for invalid
+    /// settings, grid geometry, or arithmetic overflow.
     pub fn render_rows(
         &mut self,
         grid: &crate::SampleGrid,
@@ -550,6 +577,9 @@ impl Renderer {
     ) -> Result<Vec<u8>, RenderError> {
         options.validate()?;
         self.validate_grid(grid, options)?;
+        if count == 0 {
+            return Err(ContractError::InvalidDimensions.into());
+        }
         let end = start
             .checked_add(count)
             .ok_or(ContractError::ArithmeticOverflow)?;
@@ -564,13 +594,7 @@ impl Renderer {
         let height = count
             .checked_mul(tile_height)
             .ok_or(ContractError::ArithmeticOverflow)?;
-        let bytes = u64::from(width)
-            .checked_mul(u64::from(height))
-            .and_then(|value| value.checked_mul(4))
-            .ok_or(ContractError::ArithmeticOverflow)?;
-        if bytes > options.max_output_bytes {
-            return Err(ContractError::ResourceLimitExceeded.into());
-        }
+        let bytes = checked_row_budget(width, height, options.max_output_bytes)?;
         let mut pixels = Vec::new();
         let byte_count =
             usize::try_from(bytes).map_err(|_| ContractError::ResourceLimitExceeded)?;
@@ -1067,6 +1091,33 @@ mod tests {
 
     fn grid(width: u32, height: u32, dark: bool, sampling: Sampling) -> Arc<crate::SampleGrid> {
         grid_with_height(width, height, dark, sampling, 5)
+    }
+
+    #[test]
+    fn row_budget_enforces_fixed_ceiling_independent_of_configured_limit() {
+        let pixels = u32::try_from(MAX_RENDER_ROW_BYTES / 4).unwrap();
+        assert_eq!(
+            checked_row_budget(pixels, 1, u64::MAX),
+            Ok(MAX_RENDER_ROW_BYTES)
+        );
+        assert_eq!(
+            checked_row_budget(pixels + 1, 1, u64::MAX),
+            Err(ContractError::ResourceLimitExceeded)
+        );
+    }
+
+    #[test]
+    fn row_budget_enforces_configured_limit_and_overflow() {
+        assert_eq!(checked_row_budget(2, 3, 24), Ok(24));
+        assert_eq!(
+            checked_row_budget(2, 3, 23),
+            Err(ContractError::ResourceLimitExceeded)
+        );
+        assert_eq!(checked_row_budget(0, 3, 1), Ok(0));
+        assert_eq!(
+            checked_row_budget(u32::MAX, u32::MAX, u64::MAX),
+            Err(ContractError::ArithmeticOverflow)
+        );
     }
 
     fn patterned_grid(

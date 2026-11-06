@@ -1013,21 +1013,28 @@ export without allocating a full output RGBA frame.
 
 Ordered steps:
 
-1. Extract shared pixel composition behind the existing renderer contract.
-2. Add an owned row renderer with checked dimensions and bounded row storage.
+1. Reuse the existing shared pixel composition and `render_rows` contract.
+2. Enforce a separate row-batch byte ceiling and reject zero-row requests.
 3. Compare concatenated rows byte-for-byte with existing rendering fixtures;
-   cover partial cells, alpha, invalid dimensions and cancellation boundaries.
+   cover partial cells, alpha, invalid dimensions and budget boundaries.
 
 Acceptance checks: existing preview pixels are unchanged; row output matches
-the full renderer; allocations are bounded by row width rather than height.
+the full renderer; allocations are bounded by row width and requested positive
+batch size. The later export task owns cancellation between row calls.
 
 Proposed commit title: `feat: add bounded artwork row rendering`
 
 Completion checklist:
 
-- [ ] Row parity and failure-contract tests pass.
-- [ ] Formatting, strict Clippy and focused processing tests pass.
-- [ ] Independent review confirms shared composition and bounded storage.
+- [x] Row parity and failure-contract tests pass.
+- [x] Formatting, strict Clippy and focused processing tests pass.
+- [x] Independent review confirms shared composition and bounded storage.
+
+Validation: 61 processing tests pass, including 13 renderer acceptance tests that
+compare single-row and multi-row batches with the full frame for classic and
+Average sampling, and that cover partial cells, transparent sources, ranges past
+the grid, `u32` overflow, and exact budget boundaries. The workspace formatting,
+strict Clippy, and WASM target checks pass.
 
 #### 3.4.2 Encode PNG incrementally
 

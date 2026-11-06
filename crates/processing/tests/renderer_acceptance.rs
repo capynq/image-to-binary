@@ -1,6 +1,8 @@
 use image::{DynamicImage, ImageBuffer, ImageFormat, Rgba};
-use image_to_binary_core::Sampling;
-use image_to_binary_processing::{decode, DecodeLimits, RenderOptions, Renderer, Sampler};
+use image_to_binary_core::{ContractError, Sampling};
+use image_to_binary_processing::{
+    decode, DecodeLimits, RenderError, RenderOptions, Renderer, Sampler, MAX_RENDER_ROW_BYTES,
+};
 use std::io::Cursor;
 use std::sync::Arc;
 
@@ -89,6 +91,88 @@ fn rows_cover_the_complete_frame_at_large_font() {
     }
     assert_eq!(rows.len(), full.pixels().len());
     assert_eq!(rows, full.pixels());
+}
+
+#[test]
+fn render_rows_rejects_zero_count_after_settings_and_geometry_checks() {
+    let grid = mixed_grid(3, 3);
+    let mut renderer = Renderer::new().unwrap();
+    for start in [0, 3] {
+        assert!(matches!(
+            renderer.render_rows(&grid, options(), start, 0),
+            Err(RenderError::Contract(ContractError::InvalidDimensions))
+        ));
+    }
+    let wrong_width = RenderOptions {
+        cell_size: 6,
+        ..options()
+    };
+    assert!(matches!(
+        renderer.render_rows(&grid, wrong_width, 0, 0),
+        Err(RenderError::Contract(ContractError::InvalidSettings(_)))
+    ));
+}
+
+#[test]
+fn render_rows_enforces_configured_limit_at_exact_boundary() {
+    let grid = mixed_grid(3, 3);
+    let mut renderer = Renderer::new().unwrap();
+    let row_bytes = 15 * 5 * 4;
+    let exact = RenderOptions {
+        max_output_bytes: row_bytes,
+        ..options()
+    };
+    assert_eq!(
+        renderer.render_rows(&grid, exact, 0, 1).unwrap().len(),
+        usize::try_from(row_bytes).unwrap()
+    );
+    let below = RenderOptions {
+        max_output_bytes: row_bytes - 1,
+        ..options()
+    };
+    assert!(matches!(
+        renderer.render_rows(&grid, below, 0, 1),
+        Err(RenderError::Contract(ContractError::ResourceLimitExceeded))
+    ));
+    assert!(matches!(
+        renderer.render_rows(&grid, exact, 0, 2),
+        Err(RenderError::Contract(ContractError::ResourceLimitExceeded))
+    ));
+}
+
+#[test]
+fn render_rows_fixed_ceiling_rejects_oversized_batch_under_unbounded_option() {
+    let mut renderer = Renderer::new().unwrap();
+    let geometry = renderer.aspect_geometry(5, 30).unwrap();
+    let grid_width = 1000_u32;
+    let grid_height = 30_u32;
+    let source = source(
+        grid_width * u32::from(geometry.source_cell_width),
+        grid_height * u32::from(geometry.source_cell_height),
+        |_, _| [0, 0, 0, 255],
+    );
+    let grid = Sampler::new(source)
+        .sample_average_rect(5, u32::from(geometry.source_cell_height))
+        .unwrap();
+    assert_eq!(grid.width(), grid_width);
+    assert_eq!(grid.height(), grid_height);
+    let unbounded = RenderOptions {
+        cell_size: 5,
+        font_size: 30,
+        sampling: Sampling::Average,
+        max_output_bytes: u64::MAX,
+        ..RenderOptions::default()
+    };
+    let requested = u64::from(grid_width)
+        * u64::from(geometry.output_cell_width)
+        * u64::from(grid_height)
+        * u64::from(geometry.output_cell_height)
+        * 4;
+    assert!(requested > MAX_RENDER_ROW_BYTES);
+    assert!(matches!(
+        renderer.render_rows(&grid, unbounded, 0, grid_height),
+        Err(RenderError::Contract(ContractError::ResourceLimitExceeded))
+    ));
 }
 
 #[test]
@@ -221,4 +305,96 @@ fn into_pixels_moves_the_frame_buffer_without_copying() {
     let pixels = frame.into_pixels();
     assert_eq!(pixels, copy);
     assert_eq!(pixels.as_ptr(), pointer);
+}
+
+fn average_grid(width: u32, rows: u32) -> Arc<image_to_binary_processing::SampleGrid> {
+    let renderer = Renderer::new().unwrap();
+    let cell_height = u32::from(renderer.aspect_geometry(5, 30).unwrap().source_cell_height);
+    let source = source(width * 5, cell_height * rows, |x, y| {
+        if ((x / 5) + (y / cell_height)) % 2 == 0 {
+            [0, 0, 0, 255]
+        } else {
+            [255, 255, 255, 255]
+        }
+    });
+    Sampler::new(source)
+        .sample_average_rect(5, cell_height)
+        .unwrap()
+}
+
+fn render_in_batches(
+    renderer: &mut Renderer,
+    grid: &image_to_binary_processing::SampleGrid,
+    options: RenderOptions,
+    batch: u32,
+) -> Vec<u8> {
+    let mut rows = Vec::new();
+    let mut start = 0;
+    while start < grid.height() {
+        let count = batch.min(grid.height() - start);
+        rows.extend(renderer.render_rows(grid, options, start, count).unwrap());
+        start += count;
+    }
+    rows
+}
+
+#[test]
+fn multi_row_batches_with_short_tail_match_full_frame_for_both_samplings() {
+    let classic = mixed_grid(3, 6);
+    let average = average_grid(3, 6);
+    let average_options = RenderOptions {
+        sampling: Sampling::Average,
+        ..options()
+    };
+    let mut renderer = Renderer::new().unwrap();
+    for (grid, render_options) in [(&classic, options()), (&average, average_options)] {
+        assert_eq!(grid.height(), 6);
+        let full = renderer.render(grid, render_options).unwrap();
+        for batch in [4, 5] {
+            let rows = render_in_batches(&mut renderer, grid, render_options, batch);
+            assert_eq!(rows.len(), full.pixels().len());
+            assert_eq!(rows, full.pixels());
+        }
+    }
+}
+
+#[test]
+fn render_rows_rejects_ranges_past_grid_end_and_u32_overflow() {
+    let grid = mixed_grid(3, 3);
+    let mut renderer = Renderer::new().unwrap();
+    for (start, count) in [(0, 4), (1, 3), (2, 2), (3, 1), (7, 1)] {
+        assert!(
+            matches!(
+                renderer.render_rows(&grid, options(), start, count),
+                Err(RenderError::Contract(ContractError::InvalidDimensions))
+            ),
+            "start {start} count {count} should exceed the grid"
+        );
+    }
+    for (start, count) in [(u32::MAX, 1), (u32::MAX - 1, 2), (1, u32::MAX)] {
+        assert!(
+            matches!(
+                renderer.render_rows(&grid, options(), start, count),
+                Err(RenderError::Contract(ContractError::ArithmeticOverflow))
+            ),
+            "start {start} count {count} should overflow u32"
+        );
+    }
+}
+
+#[test]
+fn row_batches_from_transparent_source_are_fully_opaque_and_match_full_frame() {
+    let grid = Sampler::new(source(15, 15, |x, y| match ((x / 5) + (y / 5)) % 3 {
+        0 => [0, 0, 0, 0],
+        1 => [255, 255, 255, 128],
+        _ => [0, 0, 0, 255],
+    }))
+    .sample(5, Sampling::Classic)
+    .unwrap();
+    let mut renderer = Renderer::new().unwrap();
+    let full = renderer.render(&grid, options()).unwrap();
+    assert!(full.pixels().chunks_exact(4).all(|pixel| pixel[3] == 255));
+    let rows = render_in_batches(&mut renderer, &grid, options(), 2);
+    assert_eq!(rows, full.pixels());
+    assert!(rows.chunks_exact(4).all(|pixel| pixel[3] == 255));
 }

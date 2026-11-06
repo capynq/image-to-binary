@@ -9,7 +9,7 @@ pub use decode::{decode, DecodeError, DecodeLimits, DecodedSource};
 pub use original::{OriginalPreviewTask, ORIGINAL_PREVIEW_MAX_EDGE};
 pub use renderer::{
     AspectGeometry, PreviewAdvance, PreviewTask, RenderError, RenderOptions, RenderedFrame,
-    Renderer, RendererCacheStats,
+    Renderer, RendererCacheStats, MAX_RENDER_ROW_BYTES,
 };
 pub use sampling::{SampleCell, SampleGrid, Sampler, SamplingAdvance, SamplingPlan, SamplingTask};
 
