@@ -233,6 +233,7 @@ version = "0.1.0"
 dependencies = [
  "fontdue",
  "image",
+ "image-to-binary-adapters",
  "image-to-binary-core",
  "image-to-binary-export",
  "tiff",
@@ -242,7 +243,9 @@ dependencies = [
 name = "image-to-binary-wasm"
 version = "0.1.0"
 dependencies = [
+ "image-to-binary-adapters",
  "image-to-binary-core",
+ "image-to-binary-export",
  "image-to-binary-processing",
  "js-sys",
  "wasm-bindgen",

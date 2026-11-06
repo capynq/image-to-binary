@@ -5,7 +5,7 @@ use image_to_binary_processing::Job;
 
 mod artwork_png;
 
-pub use artwork_png::{ArtworkPngTask, PngTaskError};
+pub use artwork_png::{ArtworkPngTask, PngTaskError, PngTaskLimits};
 
 /// Adapter-owned session state; resources are released when the session drops.
 #[derive(Debug)]

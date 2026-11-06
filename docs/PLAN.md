@@ -1087,9 +1087,20 @@ Proposed commit title: `feat: expose incremental PNG export to wasm`
 
 Completion checklist:
 
-- [ ] Native and actual WASM parity/lifecycle tests pass.
-- [ ] Target build, declarations and static checks pass.
-- [ ] Independent boundary review passes.
+- [x] Native and actual WASM parity/lifecycle tests pass.
+- [x] Target build, declarations and static checks pass.
+- [x] Independent boundary review passes.
+
+Validation: 133 Rust tests and 75 Node tests against the built WASM package pass,
+with formatting, strict Clippy, the WASM target check, and the frontend
+typecheck. Export output is byte-identical to the native `ArtworkPngTask` for
+classic and Average sampling across budgets. Export shares the session's single
+job slot, generation rule, and sampler cache key with previews. `advance` keeps
+one pixel budget in every stage; encoding converts it to whole grid rows with a
+one-row minimum, so an advance can exceed a tiny budget by at most one grid row.
+Browser limits are 256 MiB encoded output with pending storage equal to that
+ceiling, because the Blob retains those bytes anyway. Chunks are copied into
+JS-owned arrays. No worker or browser runtime is claimed by this subphase.
 
 #### 3.4.4 Transfer export chunks through the worker
 

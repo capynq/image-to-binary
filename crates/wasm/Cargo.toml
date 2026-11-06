@@ -10,7 +10,9 @@ rust-version.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+image-to-binary-adapters = { path = "../adapters" }
 image-to-binary-core = { path = "../core" }
+image-to-binary-export = { path = "../export" }
 image-to-binary-processing = { path = "../processing" }
 js-sys = "=0.3.105"
 wasm-bindgen = "=0.2.128"

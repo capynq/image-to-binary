@@ -1,4 +1,4 @@
-//! WASM bindings exposing one incremental, cancellable preview session.
+//! WASM bindings exposing one incremental, cancellable preview or PNG export session.
 //!
 //! Source pixels, sample grids, glyph masks and raster buffers stay private to
 //! the session. Sources enter as RGBA8 or as encoded BMP, GIF, JPEG, PNG, TIFF
@@ -74,7 +74,8 @@ fn copy_encoded(bytes: &Uint8Array) -> Result<Session, BindingError> {
     EncodedPlan::decode_session(buffer)
 }
 
-/// Position of the current job in the sampling then preview pipeline.
+/// Position of the current job in the sampling, then preview or encoding,
+/// pipeline. Export jobs pass through `Encoding` before `Ready`.
 #[wasm_bindgen]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum JobStage {
@@ -83,6 +84,7 @@ pub enum JobStage {
     Preview = 2,
     Ready = 3,
     Failed = 4,
+    Encoding = 5,
 }
 
 impl From<Stage> for JobStage {
@@ -91,10 +93,20 @@ impl From<Stage> for JobStage {
             Stage::Idle => Self::Idle,
             Stage::Sampling => Self::Sampling,
             Stage::Preview => Self::Preview,
+            Stage::Encoding => Self::Encoding,
             Stage::Ready => Self::Ready,
             Stage::Failed => Self::Failed,
         }
     }
+}
+
+/// Copies each chunk into a fresh JS-owned `Uint8Array`; no view into WASM
+/// memory escapes, so the arrays survive later calls, growth and disposal.
+fn export_chunks(chunks: &[Vec<u8>]) -> Vec<JsValue> {
+    chunks
+        .iter()
+        .map(|chunk| JsValue::from(Uint8Array::from(chunk.as_slice())))
+        .collect()
 }
 
 /// A finished preview. Pixels can be taken exactly once as an owned copy.
@@ -285,7 +297,10 @@ impl ImageSession {
         lift(self.inner.stage()).map(JobStage::from)
     }
 
-    /// Work units completed in the current stage.
+    /// Work completed in the current stage, in that stage's unit: sampled grid
+    /// cells for classic sampling or source pixels for average sampling, output
+    /// pixels while rendering a preview or original, and grid rows while an export
+    /// encodes. Zero when there is no job.
     ///
     /// # Errors
     ///
@@ -295,7 +310,7 @@ impl ImageSession {
         lift(self.inner.progress()).map(|(done, _)| js_count(done))
     }
 
-    /// Work units in the current stage.
+    /// Total work in the current stage, in the same unit as `progressCompleted`.
     ///
     /// # Errors
     ///
@@ -305,13 +320,19 @@ impl ImageSession {
         lift(self.inner.progress()).map(|(_, total)| js_count(total))
     }
 
-    /// Performs at most `pixel_budget` units in the current stage only; the call
+    /// Spends `pixel_budget` pixels of work in the current stage only; the call
     /// completing a stage does its non-interruptible setup but no next-stage work.
+    /// The budget is always pixels: an export converts it to whole grid rows of
+    /// `frame width * tile height` pixels, never fewer than one row. An advance
+    /// can therefore exceed a tiny budget by at most one grid row, and a huge
+    /// budget finishes a stage in one call, so cancellation can take effect
+    /// between any two advances.
     ///
     /// # Errors
     ///
     /// Throws `invalid_argument`, `no_job`, `stale_generation`, `cancelled`,
-    /// `disposed` or a terminal job error that cannot be revived.
+    /// `disposed`, `resource_limit_exceeded`, `encode_failed` or a terminal job
+    /// error that cannot be revived.
     pub fn advance(
         &mut self,
         #[wasm_bindgen(unchecked_param_type = "number")] generation: &JsValue,
@@ -332,7 +353,8 @@ impl ImageSession {
         lift(self.inner.cancel(number(generation)))
     }
 
-    /// Returns the finished frame once, and only when the job is `Ready`.
+    /// Returns the finished frame once, and only when the job is a preview `Ready`.
+    /// An export job is left untouched and reports `no_job`.
     ///
     /// # Errors
     ///
@@ -342,6 +364,71 @@ impl ImageSession {
         #[wasm_bindgen(unchecked_param_type = "number")] generation: &JsValue,
     ) -> Result<PreviewFrame, JsValue> {
         lift(self.inner.finish(number(generation))).map(|inner| PreviewFrame { inner })
+    }
+
+    /// Starts a PNG export superseding any current job. It takes the same
+    /// generation rule, settings and sampling as `startPreview`, so both kinds
+    /// sample the same deterministic grid and share one cache. The job reports
+    /// `Sampling`, `Encoding` then `Ready`; advance it with `advance`, collect
+    /// bytes with `drainExport` and `finishExport`, and stop it with `cancel`.
+    ///
+    /// # Errors
+    ///
+    /// Throws `invalid_argument`, `invalid_settings`, `stale_generation`,
+    /// `disposed` or a resource error; invalid or stale starts keep the current job.
+    #[wasm_bindgen(js_name = startExport)]
+    pub fn start_export(
+        &mut self,
+        #[wasm_bindgen(unchecked_param_type = "number")] generation: &JsValue,
+        #[wasm_bindgen(unchecked_param_type = "number")] cell_size: &JsValue,
+        #[wasm_bindgen(unchecked_param_type = "number")] font_size: &JsValue,
+        #[wasm_bindgen(unchecked_param_type = "number")] threshold: &JsValue,
+        #[wasm_bindgen(unchecked_param_type = "\"classic\" | \"average\"")] sampling: &JsValue,
+    ) -> Result<JobStage, JsValue> {
+        let sampling = sampling.as_string();
+        lift(self.inner.start_export(
+            number(generation),
+            number(cell_size),
+            number(font_size),
+            number(threshold),
+            sampling.as_deref(),
+        ))
+        .map(JobStage::from)
+    }
+
+    /// Returns the chunks completed since the last drain, in order, each exactly
+    /// once. An export still sampling has none and returns an empty array.
+    ///
+    /// # Errors
+    ///
+    /// Throws `no_job` (also for a preview job), `stale_generation`, `cancelled`,
+    /// `disposed`, `resource_limit_exceeded` or `encode_failed`; a terminal error
+    /// is stored as the job's failure.
+    #[wasm_bindgen(js_name = drainExport, unchecked_return_type = "Uint8Array[]")]
+    pub fn drain_export(
+        &mut self,
+        #[wasm_bindgen(unchecked_param_type = "number")] generation: &JsValue,
+    ) -> Result<Vec<JsValue>, JsValue> {
+        lift(self.inner.drain_export(number(generation))).map(|chunks| export_chunks(&chunks))
+    }
+
+    /// Finalizes the PNG and returns every chunk not yet drained, in order. The
+    /// concatenation of all drained and final chunks is the complete PNG file.
+    /// The job is released on success, so a second finish reports `no_job`. A
+    /// job already `Failed` by `cancel` or `advance` is not released: the call
+    /// reports that failure and the job stays until a newer start replaces it.
+    ///
+    /// # Errors
+    ///
+    /// Throws `job_incomplete` before the last row is encoded, `no_job` (also for
+    /// a preview job or a second finish), `stale_generation`, `cancelled`,
+    /// `disposed`, `resource_limit_exceeded` or `encode_failed`.
+    #[wasm_bindgen(js_name = finishExport, unchecked_return_type = "Uint8Array[]")]
+    pub fn finish_export(
+        &mut self,
+        #[wasm_bindgen(unchecked_param_type = "number")] generation: &JsValue,
+    ) -> Result<Vec<JsValue>, JsValue> {
+        lift(self.inner.finish_export(number(generation))).map(|chunks| export_chunks(&chunks))
     }
 
     /// Releases the source, caches, renderer and job. Idempotent.

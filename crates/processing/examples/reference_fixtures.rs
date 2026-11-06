@@ -10,10 +10,11 @@ use std::sync::Arc;
 
 use image::codecs::gif::GifEncoder;
 use image::{Delay, DynamicImage, Frame, ImageBuffer, ImageFormat, Luma, Rgba};
-use image_to_binary_core::{ContractError, Dimensions, Sampling};
+use image_to_binary_adapters::{ArtworkPngTask, PngTaskLimits};
+use image_to_binary_core::{ContractError, Dimensions, Generation, Sampling};
 use image_to_binary_processing::{
     decode, DecodeError, DecodeLimits, DecodedSource, RenderOptions, RenderedFrame, Renderer,
-    Sampler,
+    SampleGrid, Sampler,
 };
 use tiff::encoder::colortype::RGB8;
 use tiff::encoder::TiffEncoder;
@@ -86,6 +87,25 @@ fn rgba(width: u32, height: u32) -> Vec<u8> {
     pixels
 }
 
+/// Deterministic large source whose glyph output exceeds one browser chunk. The
+/// JS suite regenerates the same pixels from `largePixel`.
+const LARGE_SIDE: u32 = 1200;
+
+fn large_rgba() -> Vec<u8> {
+    let mut pixels = Vec::new();
+    for y in 0..LARGE_SIDE {
+        for x in 0..LARGE_SIDE {
+            let red = (x * 131 + y * 137) ^ (x * y * 7);
+            let green = (x * x + y * 3) ^ (y * y * 5);
+            let blue = (x ^ y) * 29 + (x * 11 + y * 13) % 61;
+            for channel in [red % 256, green % 256, blue % 256, 255] {
+                pixels.push(u8::try_from(channel).expect("channel fits in u8"));
+            }
+        }
+    }
+    pixels
+}
+
 fn base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
@@ -128,7 +148,37 @@ fn verify_nearest_center(
     Ok(())
 }
 
-fn render_case(case: &Case, pixels: Vec<u8>) -> Result<Vec<(u8, RenderedFrame)>, Box<dyn Error>> {
+const EXPORT_GENERATION: Generation = Generation::new(0);
+const EXPORT_LIMITS: PngTaskLimits =
+    PngTaskLimits::new(256 * 1024 * 1024, 1024 * 1024, 256 * 1024 * 1024);
+
+/// Encodes the grid through the native `ArtworkPngTask` path in one advance.
+fn native_export(
+    grid: &Arc<SampleGrid>,
+    options: RenderOptions,
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    let mut task = ArtworkPngTask::new(
+        Arc::clone(grid),
+        Renderer::new()?,
+        options,
+        EXPORT_GENERATION,
+        EXPORT_LIMITS,
+    )?;
+    task.advance(EXPORT_GENERATION, u64::MAX)?;
+    let mut bytes = Vec::new();
+    for chunk in task.drain_chunks()? {
+        bytes.extend(chunk);
+    }
+    for chunk in task.finish(EXPORT_GENERATION)? {
+        bytes.extend(chunk);
+    }
+    Ok(bytes)
+}
+
+/// A threshold, its native preview frame, and its native PNG export.
+type Variant = (u8, RenderedFrame, Vec<u8>);
+
+fn render_case(case: &Case, pixels: Vec<u8>) -> Result<Vec<Variant>, Box<dyn Error>> {
     let dimensions = Dimensions::new(case.width, case.height)?;
     let source = DecodedSource::from_rgba(dimensions, pixels, DecodeLimits::default())?;
     let mut sampler = Sampler::new(Arc::new(source));
@@ -152,7 +202,8 @@ fn render_case(case: &Case, pixels: Vec<u8>) -> Result<Vec<(u8, RenderedFrame)>,
         let preview = renderer.render_preview(&grid, options)?;
         let export = renderer.render(&grid, options)?;
         verify_nearest_center(&export, &preview)?;
-        frames.push((threshold, preview));
+        let png = native_export(&grid, options)?;
+        frames.push((threshold, preview, png));
     }
     if frames.len() > 1 && frames[0].1.pixels() == frames[1].1.pixels() {
         return Err(format!("{}: threshold variants must differ", case.name).into());
@@ -339,6 +390,40 @@ fn encoded_entry(fixture: &Fixture) -> Result<String, Box<dyn Error>> {
     ))
 }
 
+fn large_export(sampling: Sampling) -> Result<Vec<u8>, Box<dyn Error>> {
+    let case = Case {
+        name: "large",
+        width: LARGE_SIDE,
+        height: LARGE_SIDE,
+        cell_size: 5,
+        font_size: 10,
+        sampling,
+        thresholds: &[128],
+    };
+    let source = DecodedSource::from_rgba(
+        Dimensions::new(case.width, case.height)?,
+        large_rgba(),
+        DecodeLimits::default(),
+    )?;
+    let mut sampler = Sampler::new(Arc::new(source));
+    let renderer = Renderer::new()?;
+    let grid = match sampling {
+        Sampling::Classic => sampler.sample(case.cell_size, Sampling::Classic)?,
+        Sampling::Average => {
+            let geometry = renderer.aspect_geometry(case.cell_size, case.font_size)?;
+            sampler.sample_average_rect(case.cell_size, u32::from(geometry.source_cell_height))?
+        }
+    };
+    let options = RenderOptions {
+        cell_size: case.cell_size,
+        font_size: case.font_size,
+        threshold: 128,
+        sampling,
+        ..RenderOptions::default()
+    };
+    native_export(&grid, options)
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let path = std::env::args_os()
         .nth(1)
@@ -361,16 +446,17 @@ fn main() -> Result<(), Box<dyn Error>> {
             "{{\"name\":\"{}\",\"width\":{},\"height\":{},\"cellSize\":{},\"fontSize\":{},\"sampling\":\"{sampling}\",\"source\":\"{source}\",\"variants\":[",
             case.name, case.width, case.height, case.cell_size, case.font_size
         )?;
-        for (position, (threshold, frame)) in frames.iter().enumerate() {
+        for (position, (threshold, frame, png)) in frames.iter().enumerate() {
             if position > 0 {
                 json.push(',');
             }
             write!(
                 json,
-                "{{\"threshold\":{threshold},\"previewWidth\":{},\"previewHeight\":{},\"preview\":\"{}\"}}",
+                "{{\"threshold\":{threshold},\"previewWidth\":{},\"previewHeight\":{},\"preview\":\"{}\",\"export\":\"{}\"}}",
                 frame.width(),
                 frame.height(),
-                base64(frame.pixels())
+                base64(frame.pixels()),
+                base64(png)
             )?;
         }
         json.push_str("]}");
@@ -382,6 +468,25 @@ fn main() -> Result<(), Box<dyn Error>> {
             json.push(',');
         }
         json.push_str(&encoded_entry(fixture)?);
+    }
+    json.push_str("],\"large\":[");
+    for (index, (name, sampling)) in [
+        ("classic", Sampling::Classic),
+        ("average", Sampling::Average),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if index > 0 {
+            json.push(',');
+        }
+        let png = large_export(sampling)?;
+        eprintln!("{name}: large export {} bytes", png.len());
+        write!(
+            json,
+            "{{\"name\":\"{name}\",\"width\":{LARGE_SIDE},\"height\":{LARGE_SIDE},\"cellSize\":5,\"fontSize\":10,\"sampling\":\"{name}\",\"threshold\":128,\"export\":\"{}\"}}",
+            base64(&png)
+        )?;
     }
     json.push_str("],\"rejected\":[");
     for (index, rejected) in rejected_fixtures(&fixtures)?.iter().enumerate() {

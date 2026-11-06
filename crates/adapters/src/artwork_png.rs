@@ -138,6 +138,7 @@ impl PngTaskLimits {
 /// takes effect at the next advance or finish boundary.
 pub struct ArtworkPngTask {
     progress: Progress,
+    grid_row_pixels: u64,
     cancellation: Cancellation,
     state: TaskState,
 }
@@ -178,6 +179,10 @@ impl ArtworkPngTask {
             .frame_dimensions(&grid, options)
             .map_err(PngTaskError::Render)?;
         let batch_rows = batch_rows(&grid, frame_width, frame_height, options)?;
+        let grid_row_pixels = u64::from(frame_width)
+            .checked_mul(u64::from(tile_height(&grid, frame_height)?))
+            .filter(|pixels| *pixels > 0)
+            .ok_or(PngTaskError::Contract(ContractError::ResourceLimitExceeded))?;
         let plan = PngExportPlan::new(frame_width, frame_height, max_encoded_bytes)
             .map_err(export_error)?;
         let (writer, drain) =
@@ -186,6 +191,7 @@ impl ArtworkPngTask {
         let progress = Progress::new(u64::from(grid.height())).map_err(PngTaskError::Contract)?;
         Ok(Self {
             progress,
+            grid_row_pixels,
             cancellation: Cancellation::new(generation),
             state: TaskState::Active(Box::new(ActiveJob {
                 grid,
@@ -203,6 +209,14 @@ impl ArtworkPngTask {
     #[must_use]
     pub const fn progress(&self) -> Progress {
         self.progress
+    }
+
+    /// Returns the output pixels one grid row contributes to the frame
+    /// (frame width times tile height). Always at least one, so a caller can
+    /// convert a pixel budget into whole rows without dividing by zero.
+    #[must_use]
+    pub const fn pixels_per_grid_row(&self) -> u64 {
+        self.grid_row_pixels
     }
 
     /// Requests cancellation; the next boundary call releases the task.
@@ -331,6 +345,12 @@ fn export_error(error: ExportError) -> PngTaskError {
     }
 }
 
+fn tile_height(grid: &SampleGrid, frame_height: u32) -> Result<u32, PngTaskError> {
+    frame_height
+        .checked_div(grid.height())
+        .ok_or(PngTaskError::Contract(ContractError::InvalidDimensions))
+}
+
 fn batch_rows(
     grid: &SampleGrid,
     frame_width: u32,
@@ -338,9 +358,7 @@ fn batch_rows(
     options: RenderOptions,
 ) -> Result<u32, PngTaskError> {
     let overflow = || PngTaskError::Contract(ContractError::ArithmeticOverflow);
-    let tile_height = frame_height
-        .checked_div(grid.height())
-        .ok_or(PngTaskError::Contract(ContractError::InvalidDimensions))?;
+    let tile_height = tile_height(grid, frame_height)?;
     let row_group_bytes = u64::from(frame_width)
         .checked_mul(4)
         .and_then(|bytes| bytes.checked_mul(u64::from(tile_height)))

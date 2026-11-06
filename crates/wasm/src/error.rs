@@ -2,7 +2,9 @@
 
 use std::fmt;
 
+use image_to_binary_adapters::PngTaskError;
 use image_to_binary_core::ContractError;
+use image_to_binary_export::ExportError;
 use image_to_binary_processing::{DecodeError, RenderError};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -23,6 +25,7 @@ pub(crate) enum ErrorCode {
     UnsupportedFormat,
     DecodeFailed,
     ReservationFailed,
+    EncodeFailed,
     Internal,
 }
 
@@ -45,6 +48,7 @@ impl ErrorCode {
             Self::UnsupportedFormat => "unsupported_format",
             Self::DecodeFailed => "decode_failed",
             Self::ReservationFailed => "reservation_failed",
+            Self::EncodeFailed => "encode_failed",
             Self::Internal => "internal",
         }
     }
@@ -136,6 +140,42 @@ impl From<DecodeError> for BindingError {
     }
 }
 
+/// Maps a PNG export failure to a stable code. Resource ceilings (output bytes,
+/// pending storage, a row that cannot fit the batch ceiling) map to
+/// `resource_limit_exceeded`; cancellation and generation breaches keep their
+/// contract codes. A PNG encoder failure is `encode_failed`. A poisoned chunk
+/// store or an already-terminated task is `internal`, because the session never
+/// reaches them through its public calls unless a bug or panic occurred earlier.
+impl From<PngTaskError> for BindingError {
+    fn from(error: PngTaskError) -> Self {
+        match error {
+            PngTaskError::Contract(inner) => Self::from(inner),
+            PngTaskError::Render(inner) => Self::from(inner),
+            PngTaskError::Export(inner) => Self::from(inner),
+            PngTaskError::Terminated => {
+                Self::new(ErrorCode::Internal, "the PNG export was already terminated")
+            }
+        }
+    }
+}
+
+impl From<ExportError> for BindingError {
+    fn from(error: ExportError) -> Self {
+        match error {
+            ExportError::Contract(inner) => Self::from(inner),
+            ExportError::Row(inner) => Self::from(*inner),
+            ExportError::Png(inner) => Self::new(
+                ErrorCode::EncodeFailed,
+                format!("the PNG encoder failed: {inner}"),
+            ),
+            ExportError::Sink(reason) => Self::new(
+                ErrorCode::Internal,
+                format!("PNG chunk storage failed: {reason}"),
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,6 +195,46 @@ mod tests {
             (ContractError::InvalidProgress, "invalid_progress"),
             (ContractError::Cancelled, "cancelled"),
             (ContractError::StaleGeneration, "stale_generation"),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(BindingError::from(error).code().as_str(), expected);
+        }
+    }
+
+    #[test]
+    fn export_failures_map_to_stable_codes() {
+        let cases = [
+            (
+                PngTaskError::Contract(ContractError::ResourceLimitExceeded),
+                "resource_limit_exceeded",
+            ),
+            (
+                PngTaskError::Contract(ContractError::Cancelled),
+                "cancelled",
+            ),
+            (
+                PngTaskError::Contract(ContractError::StaleGeneration),
+                "stale_generation",
+            ),
+            (
+                PngTaskError::Contract(ContractError::InvalidProgress),
+                "invalid_progress",
+            ),
+            (
+                PngTaskError::Export(ExportError::Contract(ContractError::ResourceLimitExceeded)),
+                "resource_limit_exceeded",
+            ),
+            (
+                PngTaskError::Export(ExportError::Row(Box::new(ExportError::Contract(
+                    ContractError::Cancelled,
+                )))),
+                "cancelled",
+            ),
+            (
+                PngTaskError::Export(ExportError::Sink("poisoned")),
+                "internal",
+            ),
+            (PngTaskError::Terminated, "internal"),
         ];
         for (error, expected) in cases {
             assert_eq!(BindingError::from(error).code().as_str(), expected);
