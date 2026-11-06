@@ -1350,7 +1350,9 @@ Prerequisites: 2.3–2.4; UI adapter paths available.
 
 Ordered steps:
 
-1. Add ASCII and block modes with printable characters.
+1. Add ASCII and block modes. ASCII uses printable characters; block uses the
+   Unicode block elements in text and coverage-painted tiles in PNG, because a
+   font block glyph does not exactly fill a tile and would leave seams.
 2. Add custom printable ASCII ramps capped at 64 characters with validation.
 3. Keep classic binary mode as an explicit compatibility preset.
 
@@ -1364,6 +1366,69 @@ Completion checklist:
 - [ ] Mode fixtures pass.
 - [ ] Ramp bounds and printable validation pass.
 - [ ] Classic parity remains green.
+
+Parent 6.1 keeps the scope and checklist above and stays incomplete until
+6.1.1 and 6.1.2 are both committed. The split adds no scope.
+
+#### 6.1.1 Add core render modes and ramps
+
+Objective: add the ramp and mode contracts and render them through the shared
+composition, with no change to the WASM JavaScript API or the UI.
+
+Ordered steps:
+
+1. Add a fixed-capacity `Copy` `Ramp` and a `RenderMode` of `Binary`,
+   `Ascii(Ramp)`, and `Block`, keeping `RenderOptions` `Copy`.
+2. Add `cell_glyph` as the single cell-to-character mapping for PNG now and for
+   text export in 6.3; `Ascii` and `Block` require Average sampling.
+3. Render every mode through one composition so preview, full render, and row
+   rendering agree byte for byte.
+
+Acceptance checks: mode and ramp fixtures are deterministic, invalid ramps return
+typed errors, classic output is unchanged, and sampled grids survive a mode or
+ramp change.
+
+Proposed commit title: `feat: add core ASCII and block render modes`
+
+Completion checklist:
+
+- [x] Mode fixtures and ramp bounds pass.
+- [x] Classic golden value is unchanged.
+- [x] Independent differential review passes.
+
+Validation: 162 workspace tests pass, plus 69 unit and 23 acceptance processing
+tests with the `heif` feature; formatting, strict Clippy, and the WASM target
+check pass. The classic golden value is unchanged. Removing the dead scaled
+render path was proven safe by building the previous commit and this tree
+separately and comparing 168 hashed outputs, which were identical across
+downscaled previews, chunked tasks at three budgets, full renders, and row
+batches; a deliberate change to the 1600 limit altered 52 of them, showing the
+probe was sensitive. Mode goldens are regression pins captured from this
+implementation; their semantics are covered by unit tests.
+
+#### 6.1.2 Expose render modes through WASM and the UI
+
+Objective: let browser and native users choose a mode and a custom ramp.
+
+Ordered steps:
+
+1. Pass mode and ramp through the WASM session, worker protocol, and adapter
+   settings, keeping preview and export on one settings snapshot.
+2. Add accessible mode and ramp controls with typed, readable ramp errors.
+3. Verify in a real browser that previews and downloaded PNGs match native
+   output for each mode.
+
+Acceptance checks: each mode previews and exports with native parity, invalid
+ramps show readable errors without losing the accepted source, and classic
+remains the default.
+
+Proposed commit title: `feat: expose render modes in the studio`
+
+Completion checklist:
+
+- [ ] WASM and worker mode parity pass.
+- [ ] Mode and ramp controls pass keyboard and error review.
+- [ ] Real-browser mode parity passes.
 
 ### 6.2 Add tone/color controls, invalidation, and bounds
 

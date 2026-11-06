@@ -5,7 +5,7 @@ use std::mem::size_of;
 use std::time::Instant;
 
 use image::{DynamicImage, ImageBuffer, ImageFormat, Rgba};
-use image_to_binary_core::{Cancellation, Generation, Sampling};
+use image_to_binary_core::{Cancellation, Generation, RenderMode, Sampling};
 use image_to_binary_export::{BrowserChunkSink, ExportError, PngExportPlan};
 use image_to_binary_processing::{decode, DecodeLimits, RenderOptions, Renderer, Sampler};
 
@@ -69,6 +69,7 @@ fn options() -> RenderOptions {
         font_size: FONT_SIZE,
         threshold: 128,
         sampling: Sampling::Classic,
+        mode: RenderMode::Binary,
         max_output_bytes: OUTPUT_LIMIT,
     }
 }

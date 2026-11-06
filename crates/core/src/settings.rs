@@ -1,4 +1,4 @@
-use crate::ContractError;
+use crate::{ContractError, Ramp};
 
 /// Sampling behavior; codecs and rendering are implemented in later phases.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -7,13 +7,24 @@ pub enum Sampling {
     Average,
 }
 
+/// Output glyph selection for one rendering pass.
+///
+/// `Ascii` entries are ordered from least ink to most ink. `Block` uses the
+/// five block-density levels from space to full block.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RenderMode {
+    Binary,
+    Ascii(Ramp),
+    Block,
+}
+
 /// Deterministic settings shared by preview and export.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Settings {
     cell_size: u8,
     threshold: u8,
     sampling: Sampling,
-    ramp: String,
+    ramp: Ramp,
 }
 
 impl Settings {
@@ -32,13 +43,8 @@ impl Settings {
         if !(5..=30).contains(&cell_size) {
             return Err(ContractError::InvalidSettings("cell_size"));
         }
-        let ramp = ramp.into();
-        if ramp.is_empty()
-            || ramp.len() > 64
-            || !ramp.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
-        {
-            return Err(ContractError::InvalidRamp);
-        }
+        let text: String = ramp.into();
+        let ramp = Ramp::new(&text)?;
         Ok(Self {
             cell_size,
             threshold,
@@ -65,6 +71,6 @@ impl Settings {
     /// Returns the immutable ramp text.
     #[must_use]
     pub fn ramp(&self) -> &str {
-        &self.ramp
+        self.ramp.as_str()
     }
 }

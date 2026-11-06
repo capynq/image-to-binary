@@ -1,15 +1,30 @@
-//! Deterministic binary glyph rasterization over an immutable sampled grid.
+//! Deterministic glyph and block rasterization over an immutable sampled grid.
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
+use std::ops::Range;
 use std::sync::Arc;
 
 use fontdue::{Font, FontSettings};
-use image_to_binary_core::{Cancellation, ContractError, Generation, Progress, Sampling};
+use image_to_binary_core::{
+    Cancellation, ContractError, Generation, Progress, RenderMode, Sampling,
+};
+
+use crate::SampleCell;
 
 const FONT_BYTES: &[u8] = include_bytes!("../../../assets/fonts/IBMPlexMono-Regular.ttf");
 const DEFAULT_CACHE_BYTES: u64 = 8 * 1024 * 1024;
 const DEFAULT_OUTPUT_BYTES: u64 = 256 * 1024 * 1024;
+const GLYPH_SLOTS: usize = 128;
+const FOREGROUND: [u32; 3] = [0, 255, 0];
+const BACKGROUND: [u32; 3] = [0, 0, 0];
+const BLOCK_LEVELS: [(char, u8); 5] = [
+    (' ', 0),
+    ('\u{2591}', 25),
+    ('\u{2592}', 50),
+    ('\u{2593}', 75),
+    ('\u{2588}', 100),
+];
 
 /// Maximum RGBA8 bytes one [`Renderer::render_rows`] call may allocate.
 ///
@@ -23,14 +38,28 @@ fn checked_row_budget(
     height: u32,
     max_output_bytes: u64,
 ) -> Result<u64, ContractError> {
-    let bytes = u64::from(width)
-        .checked_mul(u64::from(height))
-        .and_then(|value| value.checked_mul(4))
-        .ok_or(ContractError::ArithmeticOverflow)?;
+    let bytes = rgba_bytes(width, height)?;
     if bytes > max_output_bytes || bytes > MAX_RENDER_ROW_BYTES {
         return Err(ContractError::ResourceLimitExceeded);
     }
     Ok(bytes)
+}
+
+fn rgba_bytes(width: u32, height: u32) -> Result<u64, ContractError> {
+    u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|value| value.checked_mul(4))
+        .ok_or(ContractError::ArithmeticOverflow)
+}
+
+fn zeroed_pixels(bytes: u64) -> Result<Vec<u8>, ContractError> {
+    let count = usize::try_from(bytes).map_err(|_| ContractError::ResourceLimitExceeded)?;
+    let mut pixels = Vec::new();
+    pixels
+        .try_reserve_exact(count)
+        .map_err(|_| ContractError::ResourceLimitExceeded)?;
+    pixels.resize(count, 0);
+    Ok(pixels)
 }
 
 /// Errors returned by the renderer before a frame is exposed to callers.
@@ -59,17 +88,22 @@ impl From<ContractError> for RenderError {
     }
 }
 
-/// Immutable settings for classic binary rendering.
+/// Immutable settings for one rendering pass.
+///
+/// `mode` other than [`RenderMode::Binary`] requires [`Sampling::Average`];
+/// the classic compatibility preset is `Binary` with [`Sampling::Classic`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RenderOptions {
     /// Source cell size and output tile size in pixels.
     pub cell_size: u8,
     /// Font size in pixels before preview fitting.
     pub font_size: u8,
-    /// Luminance below this value selects `1`.
+    /// Luminance below this value selects `1` in binary mode.
     pub threshold: u8,
     /// Sampling geometry used to produce the supplied grid.
     pub sampling: Sampling,
+    /// Glyph selection applied to every sampled cell.
+    pub mode: RenderMode,
     /// Maximum owned output bytes.
     pub max_output_bytes: u64,
 }
@@ -81,6 +115,7 @@ impl Default for RenderOptions {
             font_size: 20,
             threshold: 128,
             sampling: Sampling::Classic,
+            mode: RenderMode::Binary,
             max_output_bytes: DEFAULT_OUTPUT_BYTES,
         }
     }
@@ -97,8 +132,49 @@ impl RenderOptions {
         if self.max_output_bytes == 0 {
             return Err(ContractError::InvalidSettings("output limit").into());
         }
+        if self.mode != RenderMode::Binary && self.sampling != Sampling::Average {
+            return Err(ContractError::InvalidSettings("render mode sampling").into());
+        }
         Ok(())
     }
+}
+
+/// Maps one sampled cell to the character selected by `options.mode`.
+///
+/// PNG composition calls this for every cell, and any future text export must
+/// call it rather than recompute glyphs. Binary delegates its threshold decision
+/// to [`SampleCell::binary`], the only luma-versus-threshold comparison.
+/// Ascii and Block pick a level with `(luma * (levels - 1) + 127) / 255`, which
+/// rounds to the nearest level and is non-decreasing in luma. Later ramp entries
+/// carry more ink, so brighter cells select later entries on the dark default
+/// background. Block levels run from space to full block.
+#[must_use]
+pub fn cell_glyph(cell: SampleCell, options: &RenderOptions) -> char {
+    let luma = usize::from(cell.luma());
+    match options.mode {
+        RenderMode::Binary => char::from(cell.binary(options.threshold)),
+        RenderMode::Ascii(ramp) => {
+            let index = level_index(luma, ramp.len());
+            ramp.as_bytes().get(index).copied().map_or(' ', char::from)
+        }
+        RenderMode::Block => {
+            let index = level_index(luma, BLOCK_LEVELS.len());
+            BLOCK_LEVELS.get(index).map_or(' ', |(glyph, _)| *glyph)
+        }
+    }
+}
+
+fn level_index(luma: usize, levels: usize) -> usize {
+    luma.saturating_mul(levels.saturating_sub(1))
+        .saturating_add(127)
+        / 255
+}
+
+fn block_coverage(glyph: char) -> u8 {
+    BLOCK_LEVELS
+        .iter()
+        .find(|(level, _)| *level == glyph)
+        .map_or(0, |(_, coverage)| *coverage)
 }
 
 /// Owned RGBA8 output with dimensions checked before allocation.
@@ -122,11 +198,9 @@ struct PreviewRaster {
     height: u32,
     export_width: u32,
     export_height: u32,
-    tile_width: u32,
-    tile_height: u32,
+    tile: TileGeometry,
     options: RenderOptions,
-    mask_zero: Arc<GlyphMask>,
-    mask_one: Arc<GlyphMask>,
+    palette: GlyphPalette,
     progress: Progress,
     pixels: Vec<u8>,
 }
@@ -140,16 +214,20 @@ pub struct PreviewTask {
     failed: Option<ContractError>,
 }
 
+/// Output cell size in pixels for one rendering pass.
+#[derive(Clone, Copy, Debug)]
+struct TileGeometry {
+    width: u32,
+    height: u32,
+}
+
 impl RenderedFrame {
     pub(crate) fn from_rgba(
         width: u32,
         height: u32,
         pixels: Vec<u8>,
     ) -> Result<Self, ContractError> {
-        let expected = u64::from(width)
-            .checked_mul(u64::from(height))
-            .and_then(|count| count.checked_mul(4))
-            .ok_or(ContractError::ArithmeticOverflow)?;
+        let expected = rgba_bytes(width, height)?;
         if width == 0 || height == 0 || u64::try_from(pixels.len()).ok() != Some(expected) {
             return Err(ContractError::InvalidDimensions);
         }
@@ -219,7 +297,7 @@ impl RendererCacheStats {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct GlyphKey {
-    character: u8,
+    character: char,
     size_bits: u32,
 }
 
@@ -254,7 +332,7 @@ impl GlyphAtlas {
     fn get(
         &mut self,
         font: &Font,
-        character: u8,
+        character: char,
         size: f32,
     ) -> Result<Arc<GlyphMask>, RenderError> {
         let key = GlyphKey {
@@ -270,7 +348,7 @@ impl GlyphAtlas {
                 .cloned()
                 .ok_or(ContractError::ArithmeticOverflow.into());
         }
-        let (metrics, bitmap) = font.rasterize(char::from(character), size);
+        let (metrics, bitmap) = font.rasterize(character, size);
         let bytes =
             u64::try_from(bitmap.capacity()).map_err(|_| ContractError::ArithmeticOverflow)?;
         if self.capacity != 0 && bytes <= self.capacity {
@@ -311,6 +389,32 @@ impl GlyphAtlas {
             bytes,
         }))
     }
+}
+
+/// Glyph masks needed by one rendering pass, indexed by ASCII code.
+///
+/// Holding `Arc` handles keeps a pass's masks alive independently of cache
+/// eviction; the bounded atlas still governs what is retained between passes.
+#[derive(Debug)]
+struct GlyphPalette {
+    masks: Vec<Option<Arc<GlyphMask>>>,
+}
+
+impl GlyphPalette {
+    fn get(&self, glyph: char) -> Result<&GlyphMask, ContractError> {
+        self.masks
+            .get(palette_slot(glyph)?)
+            .and_then(Option::as_ref)
+            .map(Arc::as_ref)
+            .ok_or(ContractError::InvalidSettings("glyph palette"))
+    }
+}
+
+fn palette_slot(glyph: char) -> Result<usize, ContractError> {
+    usize::try_from(u32::from(glyph))
+        .ok()
+        .filter(|slot| *slot < GLYPH_SLOTS)
+        .ok_or(ContractError::InvalidSettings("glyph palette"))
 }
 
 /// Owns the parsed bundled font and private bounded glyph masks.
@@ -436,7 +540,36 @@ impl Renderer {
     ) -> Result<RenderedFrame, RenderError> {
         options.validate()?;
         self.validate_grid(grid, options)?;
-        self.render_scaled(grid, options, 1.0)
+        let tile = self.tile_geometry(options)?;
+        let width = grid
+            .width()
+            .checked_mul(tile.width)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        let height = grid
+            .height()
+            .checked_mul(tile.height)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        let bytes = rgba_bytes(width, height)?;
+        if bytes > options.max_output_bytes {
+            return Err(ContractError::ResourceLimitExceeded.into());
+        }
+        let mut pixels = zeroed_pixels(bytes)?;
+        let palette = self.glyph_palette(grid, 0..grid.height(), options)?;
+        let composition = Composition {
+            grid,
+            options,
+            palette: &palette,
+            tile,
+        };
+        let frame_width = usize::try_from(width).map_err(|_| ContractError::ArithmeticOverflow)?;
+        for row in 0..grid.height() {
+            composition.paint_row(row, row, frame_width, &mut pixels)?;
+        }
+        Ok(RenderedFrame {
+            width,
+            height,
+            pixels,
+        })
     }
 
     /// Renders a bounded preview while preserving the source grid geometry.
@@ -490,12 +623,12 @@ impl Renderer {
         grid: &crate::SampleGrid,
         options: RenderOptions,
     ) -> Result<PreviewRaster, RenderError> {
-        let (export_tile_width, export_tile_height) = self.tile_dimensions(options)?;
+        let tile = self.tile_geometry(options)?;
         let export_width = u64::from(grid.width())
-            .checked_mul(u64::from(export_tile_width))
+            .checked_mul(u64::from(tile.width))
             .ok_or(ContractError::ArithmeticOverflow)?;
         let export_height = u64::from(grid.height())
-            .checked_mul(u64::from(export_tile_height))
+            .checked_mul(u64::from(tile.height))
             .ok_or(ContractError::ArithmeticOverflow)?;
         let longest = export_width.max(export_height);
         let target_width = if longest > 1600 {
@@ -516,10 +649,7 @@ impl Renderer {
             u32::try_from(export_width).map_err(|_| ContractError::ResourceLimitExceeded)?;
         let export_height =
             u32::try_from(export_height).map_err(|_| ContractError::ResourceLimitExceeded)?;
-        let bytes = u64::from(width)
-            .checked_mul(u64::from(height))
-            .and_then(|value| value.checked_mul(4))
-            .ok_or(ContractError::ArithmeticOverflow)?;
+        let bytes = rgba_bytes(width, height)?;
         if bytes > options.max_output_bytes {
             return Err(ContractError::ResourceLimitExceeded.into());
         }
@@ -529,12 +659,7 @@ impl Renderer {
                 usize::try_from(bytes).map_err(|_| ContractError::ResourceLimitExceeded)?,
             )
             .map_err(|_| ContractError::ResourceLimitExceeded)?;
-        let mask_zero = self
-            .atlas
-            .get(&self.font, b'0', f32::from(options.font_size))?;
-        let mask_one = self
-            .atlas
-            .get(&self.font, b'1', f32::from(options.font_size))?;
+        let palette = self.glyph_palette(grid, 0..grid.height(), options)?;
         let total = u64::from(width)
             .checked_mul(u64::from(height))
             .ok_or(ContractError::ArithmeticOverflow)?;
@@ -543,11 +668,9 @@ impl Renderer {
             height,
             export_width,
             export_height,
-            tile_width: export_tile_width,
-            tile_height: export_tile_height,
+            tile,
             options,
-            mask_zero,
-            mask_one,
+            palette,
             progress: Progress::new(total)?,
             pixels,
         })
@@ -557,7 +680,8 @@ impl Renderer {
     ///
     /// `start` and `count` address source-grid rows. The returned buffer
     /// contains `count * output_cell_height` pixel rows laid out as RGBA8
-    /// pixels with the full frame width.
+    /// pixels with the full frame width. Concatenating batches that cover every
+    /// row yields exactly the bytes of [`Renderer::render`].
     ///
     /// The buffer may not exceed [`MAX_RENDER_ROW_BYTES`] or
     /// `options.max_output_bytes`; both are checked before allocation.
@@ -586,39 +710,26 @@ impl Renderer {
         if end > grid.height() {
             return Err(ContractError::InvalidDimensions.into());
         }
-        let (tile_width, tile_height) = self.tile_dimensions(options)?;
+        let tile = self.tile_geometry(options)?;
         let width = grid
             .width()
-            .checked_mul(tile_width)
+            .checked_mul(tile.width)
             .ok_or(ContractError::ArithmeticOverflow)?;
         let height = count
-            .checked_mul(tile_height)
+            .checked_mul(tile.height)
             .ok_or(ContractError::ArithmeticOverflow)?;
         let bytes = checked_row_budget(width, height, options.max_output_bytes)?;
-        let mut pixels = Vec::new();
-        let byte_count =
-            usize::try_from(bytes).map_err(|_| ContractError::ResourceLimitExceeded)?;
-        pixels
-            .try_reserve_exact(byte_count)
-            .map_err(|_| ContractError::ResourceLimitExceeded)?;
-        pixels.resize(byte_count, 0);
-        for pixel in pixels.chunks_exact_mut(4) {
-            pixel[3] = u8::MAX;
-        }
+        let mut pixels = zeroed_pixels(bytes)?;
+        let palette = self.glyph_palette(grid, start..end, options)?;
+        let composition = Composition {
+            grid,
+            options,
+            palette: &palette,
+            tile,
+        };
+        let frame_width = usize::try_from(width).map_err(|_| ContractError::ArithmeticOverflow)?;
         for source_row in start..end {
-            let output_row = source_row - start;
-            self.render_row(
-                grid,
-                options,
-                f32::from(options.font_size),
-                tile_width,
-                tile_height,
-                width,
-                height,
-                source_row,
-                output_row,
-                &mut pixels,
-            )?;
+            composition.paint_row(source_row, source_row - start, frame_width, &mut pixels)?;
         }
         Ok(pixels)
     }
@@ -636,27 +747,61 @@ impl Renderer {
     ) -> Result<(u32, u32), RenderError> {
         options.validate()?;
         self.validate_grid(grid, options)?;
-        let (tile_width, tile_height) = self.tile_dimensions(options)?;
+        let tile = self.tile_geometry(options)?;
         Ok((
             grid.width()
-                .checked_mul(tile_width)
+                .checked_mul(tile.width)
                 .ok_or(ContractError::ArithmeticOverflow)?,
             grid.height()
-                .checked_mul(tile_height)
+                .checked_mul(tile.height)
                 .ok_or(ContractError::ArithmeticOverflow)?,
         ))
     }
 
-    fn tile_dimensions(&self, options: RenderOptions) -> Result<(u32, u32), RenderError> {
+    fn tile_geometry(&self, options: RenderOptions) -> Result<TileGeometry, RenderError> {
         if options.sampling == Sampling::Average {
             let geometry = self.aspect_geometry(options.cell_size, options.font_size)?;
-            Ok((
-                u32::from(geometry.output_cell_width),
-                u32::from(geometry.output_cell_height),
-            ))
+            Ok(TileGeometry {
+                width: u32::from(geometry.output_cell_width),
+                height: u32::from(geometry.output_cell_height),
+            })
         } else {
-            Ok((u32::from(options.cell_size), u32::from(options.cell_size)))
+            let cell = u32::from(options.cell_size);
+            Ok(TileGeometry {
+                width: cell,
+                height: cell,
+            })
         }
+    }
+
+    /// Fetches only the glyph masks that `rows` select, so cache traffic matches
+    /// the characters a pass actually draws. Block mode draws no font glyphs.
+    fn glyph_palette(
+        &mut self,
+        grid: &crate::SampleGrid,
+        rows: Range<u32>,
+        options: RenderOptions,
+    ) -> Result<GlyphPalette, RenderError> {
+        let mut required = [false; GLYPH_SLOTS];
+        if options.mode != RenderMode::Block {
+            for row in rows {
+                for column in 0..grid.width() {
+                    let cell = grid
+                        .cell(column, row)
+                        .ok_or(ContractError::InvalidDimensions)?;
+                    required[palette_slot(cell_glyph(cell, &options))?] = true;
+                }
+            }
+        }
+        let size = f32::from(options.font_size);
+        let mut masks = vec![None; GLYPH_SLOTS];
+        for (slot, needed) in required.iter().enumerate() {
+            if *needed {
+                let glyph = char::from(u8::try_from(slot).map_err(|_| ContractError::InvalidRamp)?);
+                masks[slot] = Some(self.atlas.get(&self.font, glyph, size)?);
+            }
+        }
+        Ok(GlyphPalette { masks })
     }
 }
 
@@ -669,6 +814,12 @@ impl PreviewRaster {
         let remaining = self.progress.total() - self.progress.completed();
         let count = pixel_budget.min(remaining);
         let width = u64::from(self.width);
+        let composition = Composition {
+            grid,
+            options: self.options,
+            palette: &self.palette,
+            tile: self.tile,
+        };
         for offset in 0..count {
             let position = self.progress.completed() + offset;
             let x =
@@ -686,17 +837,8 @@ impl PreviewRaster {
             )
             .map_err(|_| ContractError::ArithmeticOverflow)?
             .min(self.export_height - 1);
-            let green = Renderer::export_pixel(
-                grid,
-                self.options,
-                self.tile_width,
-                self.tile_height,
-                &self.mask_zero,
-                &self.mask_one,
-                source_x,
-                source_y,
-            )?;
-            self.pixels.extend_from_slice(&[0, green, 0, u8::MAX]);
+            let pixel = composition.export_pixel(source_x, source_y)?;
+            self.pixels.extend_from_slice(&pixel);
         }
         self.progress.advance(count)?;
         Ok(())
@@ -794,257 +936,78 @@ impl PreviewTask {
     }
 }
 
-impl Renderer {
-    #[allow(clippy::too_many_arguments)]
-    fn export_pixel(
-        grid: &crate::SampleGrid,
-        options: RenderOptions,
-        tile_width: u32,
-        tile_height: u32,
-        mask_zero: &Arc<GlyphMask>,
-        mask_one: &Arc<GlyphMask>,
-        x: u32,
-        y: u32,
-    ) -> Result<u8, ContractError> {
-        let column = x / tile_width;
-        let row = y / tile_height;
-        let cell = grid
+/// Borrowed inputs shared by every output path; each pixel is computed here alone.
+#[derive(Clone, Copy)]
+struct Composition<'a> {
+    grid: &'a crate::SampleGrid,
+    options: RenderOptions,
+    palette: &'a GlyphPalette,
+    tile: TileGeometry,
+}
+
+impl<'a> Composition<'a> {
+    fn paint(self, cell: SampleCell) -> Result<CellPaint<'a>, ContractError> {
+        let glyph = cell_glyph(cell, &self.options);
+        match self.options.mode {
+            RenderMode::Block => Ok(CellPaint::Block(block_coverage(glyph))),
+            RenderMode::Binary | RenderMode::Ascii(_) => {
+                self.palette.get(glyph).map(CellPaint::Glyph)
+            }
+        }
+    }
+
+    fn export_pixel(self, x: u32, y: u32) -> Result<[u8; 4], ContractError> {
+        let column = x / self.tile.width;
+        let row = y / self.tile.height;
+        let cell = self
+            .grid
             .cell(column, row)
             .ok_or(ContractError::InvalidDimensions)?;
-        let mask = if cell.binary(options.threshold) == b'1' {
-            mask_one
-        } else {
-            mask_zero
-        };
-        let local_x = x - column * tile_width;
-        let local_y = y - row * tile_height;
-        let glyph_left = (i64::from(tile_width)
-            - i64::try_from(mask.width).map_err(|_| ContractError::ArithmeticOverflow)?)
-            / 2
-            + i64::from(mask.xmin);
-        let baseline = i64::midpoint(
-            i64::from(tile_height),
-            i64::try_from(mask.height).map_err(|_| ContractError::ArithmeticOverflow)?,
-        ) + i64::from(mask.ymin);
-        let glyph_x = i64::from(local_x) - glyph_left;
-        let glyph_y = i64::from(local_y)
-            - (baseline
-                - i64::from(mask.ymin)
-                - i64::try_from(mask.height).map_err(|_| ContractError::ArithmeticOverflow)?);
-        if glyph_x < 0
-            || glyph_y < 0
-            || glyph_x
-                >= i64::try_from(mask.width).map_err(|_| ContractError::ArithmeticOverflow)?
-            || glyph_y
-                >= i64::try_from(mask.height).map_err(|_| ContractError::ArithmeticOverflow)?
-        {
-            return Ok(0);
-        }
-        let index = usize::try_from(glyph_y)
-            .map_err(|_| ContractError::ArithmeticOverflow)?
-            .checked_mul(mask.width)
-            .and_then(|value| value.checked_add(usize::try_from(glyph_x).ok()?))
-            .ok_or(ContractError::ArithmeticOverflow)?;
-        Ok(mask.bitmap[index])
+        self.paint(cell)?
+            .pixel(self.tile, x % self.tile.width, y % self.tile.height)
     }
 
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        clippy::cast_precision_loss
-    )]
-    fn render_scaled(
-        &mut self,
-        grid: &crate::SampleGrid,
-        options: RenderOptions,
-        scale: f32,
-    ) -> Result<RenderedFrame, RenderError> {
-        let (base_width, base_height) = self.tile_dimensions(options)?;
-        let width = (base_width as f32 * scale).floor().max(1.0) as u32;
-        let height = (base_height as f32 * scale).floor().max(1.0) as u32;
-        self.render_dimensions(
-            grid,
-            options,
-            grid.width()
-                .checked_mul(width)
-                .ok_or(ContractError::ArithmeticOverflow)?,
-            grid.height()
-                .checked_mul(height)
-                .ok_or(ContractError::ArithmeticOverflow)?,
-        )
-    }
-
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    fn render_dimensions(
-        &mut self,
-        grid: &crate::SampleGrid,
-        options: RenderOptions,
-        width: u32,
-        height: u32,
-    ) -> Result<RenderedFrame, RenderError> {
-        let bytes = u64::from(width)
-            .checked_mul(u64::from(height))
-            .and_then(|value| value.checked_mul(4))
-            .ok_or(ContractError::ArithmeticOverflow)?;
-        if bytes > options.max_output_bytes {
-            return Err(ContractError::ResourceLimitExceeded.into());
-        }
-        let mut pixels = Vec::new();
-        pixels
-            .try_reserve_exact(
-                usize::try_from(bytes).map_err(|_| ContractError::ResourceLimitExceeded)?,
-            )
-            .map_err(|_| ContractError::ResourceLimitExceeded)?;
-        pixels.resize(
-            usize::try_from(bytes).map_err(|_| ContractError::ResourceLimitExceeded)?,
-            0,
-        );
-        for pixel in pixels.chunks_exact_mut(4) {
-            pixel[3] = u8::MAX;
-        }
-        let (base_width, base_height) = self.tile_dimensions(options)?;
-        let base_total_width = grid
-            .width()
-            .checked_mul(base_width)
-            .ok_or(ContractError::ArithmeticOverflow)?;
-        #[allow(clippy::cast_precision_loss)]
-        let size = f32::from(options.font_size) * width as f32 / base_total_width as f32;
-        for row in 0..grid.height() {
-            self.render_row(
-                grid,
-                options,
-                size,
-                base_width,
-                base_height,
-                width,
-                height,
-                row,
-                row,
-                &mut pixels,
-            )?;
-        }
-        Ok(RenderedFrame {
-            width,
-            height,
-            pixels,
-        })
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_lines)]
-    fn render_row(
-        &mut self,
-        grid: &crate::SampleGrid,
-        options: RenderOptions,
-        size: f32,
-        tile: u32,
-        tile_height: u32,
-        frame_width: u32,
-        frame_height: u32,
-        row: u32,
+    fn paint_row(
+        self,
+        source_row: u32,
         output_row: u32,
+        frame_width: usize,
         pixels: &mut [u8],
-    ) -> Result<(), RenderError> {
-        for column in 0..grid.width() {
-            let cell = grid
-                .cell(column, row)
+    ) -> Result<(), ContractError> {
+        let top = output_row
+            .checked_mul(self.tile.height)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        for column in 0..self.grid.width() {
+            let cell = self
+                .grid
+                .cell(column, source_row)
                 .ok_or(ContractError::InvalidDimensions)?;
-            let character = cell.binary(options.threshold);
-            let mask = self.atlas.get(&self.font, character, size)?;
-            let mapped = frame_width
-                != grid
-                    .width()
-                    .checked_mul(tile)
+            let paint = self.paint(cell)?;
+            let left = column
+                .checked_mul(self.tile.width)
+                .ok_or(ContractError::ArithmeticOverflow)?;
+            for local_y in 0..self.tile.height {
+                let y = top
+                    .checked_add(local_y)
                     .ok_or(ContractError::ArithmeticOverflow)?;
-            let left = if mapped {
-                u32::try_from(u64::from(column) * u64::from(frame_width) / u64::from(grid.width()))
-                    .map_err(|_| ContractError::ArithmeticOverflow)?
-            } else {
-                column
-                    .checked_mul(tile)
-                    .ok_or(ContractError::ArithmeticOverflow)?
-            };
-            let right = if mapped {
-                u32::try_from(
-                    u64::from(column + 1) * u64::from(frame_width) / u64::from(grid.width()),
-                )
-                .map_err(|_| ContractError::ArithmeticOverflow)?
-            } else {
-                left.checked_add(tile)
-                    .ok_or(ContractError::ArithmeticOverflow)?
-            };
-            let top = if mapped {
-                u32::try_from(
-                    u64::from(output_row) * u64::from(frame_height) / u64::from(grid.height()),
-                )
-                .map_err(|_| ContractError::ArithmeticOverflow)?
-            } else {
-                output_row
-                    .checked_mul(tile_height)
-                    .ok_or(ContractError::ArithmeticOverflow)?
-            };
-            let bottom = if mapped {
-                u32::try_from(
-                    u64::from(output_row + 1) * u64::from(frame_height) / u64::from(grid.height()),
-                )
-                .map_err(|_| ContractError::ArithmeticOverflow)?
-            } else {
-                top.checked_add(tile_height)
-                    .ok_or(ContractError::ArithmeticOverflow)?
-            };
-            let cell_width = right.saturating_sub(left).max(1);
-            let cell_height = bottom.saturating_sub(top).max(1);
-            let glyph_left = i64::from(left)
-                + (i64::from(cell_width)
-                    - i64::try_from(mask.width).map_err(|_| ContractError::ArithmeticOverflow)?)
-                    / 2
-                + i64::from(mask.xmin);
-            let baseline = i64::from(top)
-                + i64::midpoint(
-                    i64::from(cell_height),
-                    i64::try_from(mask.height).map_err(|_| ContractError::ArithmeticOverflow)?,
-                )
-                + i64::from(mask.ymin);
-            for y in 0..mask.height {
-                let destination_y = baseline
-                    - i64::from(mask.ymin)
-                    - i64::try_from(mask.height - y)
-                        .map_err(|_| ContractError::ArithmeticOverflow)?;
-                if destination_y < i64::from(top) || destination_y >= i64::from(bottom) {
-                    continue;
-                }
-                for x in 0..mask.width {
-                    let destination_x = glyph_left
-                        + i64::try_from(x).map_err(|_| ContractError::ArithmeticOverflow)?;
-                    if destination_x < i64::from(left)
-                        || destination_x >= i64::from(right)
-                        || destination_x < 0
-                        || destination_x >= i64::from(frame_width)
-                    {
-                        continue;
-                    }
-                    let alpha = mask.bitmap[y
-                        .checked_mul(mask.width)
-                        .and_then(|value| value.checked_add(x))
-                        .ok_or(ContractError::ArithmeticOverflow)?];
-                    if alpha == 0 {
-                        continue;
-                    }
-                    let destination_y = usize::try_from(destination_y)
-                        .map_err(|_| ContractError::ArithmeticOverflow)?;
-                    let destination_x = usize::try_from(destination_x)
-                        .map_err(|_| ContractError::ArithmeticOverflow)?;
-                    let frame_width = usize::try_from(frame_width)
-                        .map_err(|_| ContractError::ArithmeticOverflow)?;
-                    let index = destination_y
-                        .checked_mul(frame_width)
-                        .and_then(|value| value.checked_add(destination_x))
-                        .and_then(|value| value.checked_mul(4))
+                for local_x in 0..self.tile.width {
+                    let x = left
+                        .checked_add(local_x)
+                        .ok_or(ContractError::ArithmeticOverflow)?;
+                    let pixel = paint.pixel(self.tile, local_x, local_y)?;
+                    let index = usize::try_from(y)
+                        .ok()
+                        .and_then(|row| row.checked_mul(frame_width))
+                        .and_then(|offset| offset.checked_add(usize::try_from(x).ok()?))
+                        .and_then(|pixel| pixel.checked_mul(4))
                         .ok_or(ContractError::ArithmeticOverflow)?;
                     let end = index
                         .checked_add(4)
                         .ok_or(ContractError::ArithmeticOverflow)?;
-                    pixels[index..end].copy_from_slice(&[0, alpha, 0, u8::MAX]);
+                    pixels
+                        .get_mut(index..end)
+                        .ok_or(ContractError::InvalidDimensions)?
+                        .copy_from_slice(&pixel);
                 }
             }
         }
@@ -1052,11 +1015,73 @@ impl Renderer {
     }
 }
 
+/// Resolved paint for one sampled cell: a font mask or a block coverage percent.
+#[derive(Clone, Copy)]
+enum CellPaint<'a> {
+    Glyph(&'a GlyphMask),
+    Block(u8),
+}
+
+impl CellPaint<'_> {
+    fn pixel(
+        self,
+        tile: TileGeometry,
+        local_x: u32,
+        local_y: u32,
+    ) -> Result<[u8; 4], ContractError> {
+        match self {
+            Self::Glyph(mask) => blend(u32::from(glyph_alpha(mask, tile, local_x, local_y)?), 255),
+            Self::Block(coverage) => blend(u32::from(coverage), 100),
+        }
+    }
+}
+
+/// Mixes foreground over background as `coverage / scale`, rounding half up.
+fn blend(coverage: u32, scale: u32) -> Result<[u8; 4], ContractError> {
+    let inverse = scale
+        .checked_sub(coverage)
+        .ok_or(ContractError::ArithmeticOverflow)?;
+    let mut pixel = [0, 0, 0, u8::MAX];
+    for (channel, value) in pixel.iter_mut().take(3).enumerate() {
+        let total = FOREGROUND[channel]
+            .checked_mul(coverage)
+            .zip(BACKGROUND[channel].checked_mul(inverse))
+            .and_then(|(foreground, background)| foreground.checked_add(background))
+            .and_then(|sum| sum.checked_add(scale / 2))
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        *value = u8::try_from(total / scale).map_err(|_| ContractError::ArithmeticOverflow)?;
+    }
+    Ok(pixel)
+}
+
+fn glyph_alpha(mask: &GlyphMask, tile: TileGeometry, x: u32, y: u32) -> Result<u8, ContractError> {
+    let mask_width = i64::try_from(mask.width).map_err(|_| ContractError::ArithmeticOverflow)?;
+    let mask_height = i64::try_from(mask.height).map_err(|_| ContractError::ArithmeticOverflow)?;
+    let glyph_left = (i64::from(tile.width) - mask_width) / 2 + i64::from(mask.xmin);
+    let baseline = i64::midpoint(i64::from(tile.height), mask_height) + i64::from(mask.ymin);
+    let glyph_x = i64::from(x) - glyph_left;
+    let glyph_y = i64::from(y) - (baseline - i64::from(mask.ymin) - mask_height);
+    if glyph_x < 0 || glyph_y < 0 || glyph_x >= mask_width || glyph_y >= mask_height {
+        return Ok(0);
+    }
+    let row = usize::try_from(glyph_y).map_err(|_| ContractError::ArithmeticOverflow)?;
+    let column = usize::try_from(glyph_x).map_err(|_| ContractError::ArithmeticOverflow)?;
+    let index = row
+        .checked_mul(mask.width)
+        .and_then(|offset| offset.checked_add(column))
+        .ok_or(ContractError::ArithmeticOverflow)?;
+    mask.bitmap
+        .get(index)
+        .copied()
+        .ok_or(ContractError::InvalidDimensions)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{decode, DecodeLimits, Sampler};
     use image::{DynamicImage, ImageBuffer, ImageFormat, Rgba};
+    use image_to_binary_core::Ramp;
     use std::io::Cursor;
     use std::sync::Arc;
 
@@ -1483,5 +1508,155 @@ mod tests {
         complete.advance(u64::MAX, generation).unwrap();
         complete.cancel();
         assert_eq!(complete.finish(generation), Err(ContractError::Cancelled));
+    }
+
+    fn ramp_of(length: usize) -> Ramp {
+        let text: String = (0..length)
+            .map(|index| char::from(b'!' + u8::try_from(index).unwrap()))
+            .collect();
+        Ramp::new(&text).unwrap()
+    }
+
+    fn mode_options(mode: RenderMode, threshold: u8) -> RenderOptions {
+        RenderOptions {
+            sampling: Sampling::Average,
+            mode,
+            threshold,
+            ..RenderOptions::default()
+        }
+    }
+
+    fn glyph_at(luma: u8, options: &RenderOptions) -> char {
+        cell_glyph(SampleCell::new(luma, [0; 4]), options)
+    }
+
+    #[test]
+    fn ascii_endpoints_select_first_and_last_entries() {
+        for length in [1, 2, 10, 64] {
+            let ramp = ramp_of(length);
+            let options = mode_options(RenderMode::Ascii(ramp), 128);
+            let bytes = ramp.as_bytes();
+            assert_eq!(
+                glyph_at(0, &options),
+                char::from(bytes[0]),
+                "length {length}"
+            );
+            assert_eq!(
+                glyph_at(255, &options),
+                char::from(bytes[length - 1]),
+                "length {length}"
+            );
+        }
+    }
+
+    #[test]
+    fn ascii_index_is_monotone_over_every_luma_value() {
+        for length in [1, 2, 3, 10, 64] {
+            let ramp = ramp_of(length);
+            let options = mode_options(RenderMode::Ascii(ramp), 128);
+            let mut previous = 0;
+            for luma in 0..=255 {
+                let glyph = glyph_at(luma, &options);
+                let index = ramp
+                    .as_bytes()
+                    .iter()
+                    .position(|byte| char::from(*byte) == glyph)
+                    .unwrap();
+                assert!(index >= previous, "length {length} luma {luma}");
+                previous = index;
+            }
+            assert_eq!(previous, length - 1);
+        }
+    }
+
+    #[test]
+    fn ascii_rounds_to_nearest_level_at_midpoints() {
+        let ramp = Ramp::new("abc").unwrap();
+        let options = mode_options(RenderMode::Ascii(ramp), 128);
+        assert_eq!(glyph_at(63, &options), 'a');
+        assert_eq!(glyph_at(64, &options), 'b');
+        assert_eq!(glyph_at(191, &options), 'b');
+        assert_eq!(glyph_at(192, &options), 'c');
+        assert_eq!(glyph_at(254, &options), 'c');
+    }
+
+    #[test]
+    fn binary_follows_threshold_boundary() {
+        let options = mode_options(RenderMode::Binary, 128);
+        assert_eq!(glyph_at(127, &options), '1');
+        assert_eq!(glyph_at(128, &options), '0');
+        assert_eq!(glyph_at(0, &options), '1');
+        assert_eq!(glyph_at(255, &options), '0');
+    }
+
+    #[test]
+    fn block_level_boundaries_are_nearest_rounded() {
+        let options = mode_options(RenderMode::Block, 128);
+        let expected = [
+            (0, ' '),
+            (31, ' '),
+            (32, '\u{2591}'),
+            (95, '\u{2591}'),
+            (96, '\u{2592}'),
+            (159, '\u{2592}'),
+            (160, '\u{2593}'),
+            (223, '\u{2593}'),
+            (224, '\u{2588}'),
+            (255, '\u{2588}'),
+        ];
+        for (luma, glyph) in expected {
+            assert_eq!(glyph_at(luma, &options), glyph, "luma {luma}");
+        }
+    }
+
+    #[test]
+    fn block_coverage_matches_its_five_levels() {
+        let coverage: Vec<u8> = BLOCK_LEVELS
+            .iter()
+            .map(|(glyph, _)| block_coverage(*glyph))
+            .collect();
+        assert_eq!(coverage, [0, 25, 50, 75, 100]);
+        assert_eq!(block_coverage('x'), 0);
+    }
+
+    #[test]
+    fn glyph_alpha_blend_is_exact_identity_on_green_over_black() {
+        for alpha in 0..=255_u32 {
+            let expected = u8::try_from(alpha).unwrap();
+            assert_eq!(blend(alpha, 255).unwrap(), [0, expected, 0, 255]);
+        }
+    }
+
+    #[test]
+    fn block_blend_mixes_foreground_and_background_by_percent() {
+        assert_eq!(blend(0, 100).unwrap(), [0, 0, 0, 255]);
+        assert_eq!(blend(25, 100).unwrap(), [0, 64, 0, 255]);
+        assert_eq!(blend(50, 100).unwrap(), [0, 128, 0, 255]);
+        assert_eq!(blend(75, 100).unwrap(), [0, 191, 0, 255]);
+        assert_eq!(blend(100, 100).unwrap(), [0, 255, 0, 255]);
+        assert_eq!(blend(101, 100), Err(ContractError::ArithmeticOverflow));
+    }
+
+    #[test]
+    fn ascii_and_block_reject_non_average_sampling() {
+        for mode in [RenderMode::Block, RenderMode::Ascii(Ramp::DEFAULT_ASCII)] {
+            let options = RenderOptions {
+                sampling: Sampling::Classic,
+                mode,
+                ..RenderOptions::default()
+            };
+            assert_eq!(
+                options.validate().unwrap_err().to_string(),
+                "invalid settings: render mode sampling"
+            );
+        }
+        assert!(RenderOptions::default().validate().is_ok());
+        assert!(RenderOptions {
+            sampling: Sampling::Average,
+            mode: RenderMode::Binary,
+            ..RenderOptions::default()
+        }
+        .validate()
+        .is_ok());
     }
 }

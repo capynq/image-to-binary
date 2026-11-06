@@ -19,6 +19,11 @@ pub struct SampleCell {
 }
 
 impl SampleCell {
+    #[cfg(test)]
+    pub(crate) const fn new(luma: u8, color: [u8; 4]) -> Self {
+        Self { luma, color }
+    }
+
     /// Returns the integer luminance value, ignoring source alpha.
     #[must_use]
     pub const fn luma(self) -> u8 {
@@ -31,7 +36,7 @@ impl SampleCell {
         self.color
     }
 
-    /// Maps this luminance to the classic binary byte without allocating text.
+    /// Maps this luminance to the classic binary byte; this is the only luma-threshold comparison.
     #[must_use]
     pub const fn binary(self, threshold: u8) -> u8 {
         if self.luma < threshold {
