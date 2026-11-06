@@ -7,7 +7,7 @@ optional `heif` feature of `image-to-binary-processing`:
 - `requirements.txt`: build tools (cmake, ninja, pkgconf) installed into `.local/tools`.
 - `build.sh`: downloads, verifies, and builds the static libraries under `.local/native-codecs/<triple>/`. Re-running is a no-op when versions, hashes, and flags are unchanged.
 - `cargo-with-codecs.sh`: runs cargo with `PKG_CONFIG_LIBDIR` and `SYSTEM_DEPS_LINK=static` for the host target, and fails if the prefix has not been built.
-- `make-fixtures.sh` and `make_fixture_png.py`: regenerate the HEIC/AVIF test fixtures in `crates/processing/tests/fixtures/heif/` (macOS `sips` required).
+- `make-fixtures.sh`, `make_fixture_png.py`, and `add_transform.py`: regenerate the HEIC/AVIF test fixtures in `crates/processing/tests/fixtures/heif/` (macOS `sips` and ffmpeg with `libsvtav1` required; `add_transform.py` is stdlib-only and adds `irot`/`imir` transforms). Byte-identical regeneration holds only on the `sips` and ffmpeg versions recorded in `crates/processing/tests/fixtures/heif/PROVENANCE.md`.
 - `licenses/`: license texts copied from the verified source archives. See `THIRD_PARTY_NOTICES.md`.
 
 ## Prerequisites

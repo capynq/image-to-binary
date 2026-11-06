@@ -2,12 +2,17 @@
 
 use image::error::{DecodingError, ImageFormatHint};
 use image::ImageError;
-use image_to_binary_core::{ContractError, Dimensions};
+use image_to_binary_core::{ContractError, Dimensions, ResourceLimits};
 use libheif_rs::{
     ColorSpace, HeifContext, HeifError, HeifErrorCode, HeifErrorSubCode, LibHeif, RgbChroma,
 };
 
 use super::{DecodeError, DecodeLimits, DecodedSource, NativeFormat};
+
+/// libheif's own security ceiling. Its internal decode can exceed the visible
+/// pixel count by a padded margin, so the caller budget is enforced from the
+/// handle dimensions instead and this ceiling only bounds crafted files.
+const LIBHEIF_SECURITY_PIXELS: u64 = ResourceLimits::default().max_pixels().saturating_mul(2);
 
 /// Decodes the primary item into owned, tightly packed RGBA8.
 ///
@@ -25,7 +30,7 @@ pub(super) fn decode_native(
     let mut context =
         HeifContext::read_from_bytes(bytes).map_err(|error| map_heif_error(&error, format))?;
     let mut security = context.security_limits();
-    security.set_max_image_size_pixels(limits.resource.max_pixels());
+    security.set_max_image_size_pixels(LIBHEIF_SECURITY_PIXELS);
     context
         .set_security_limits(&security)
         .map_err(|error| map_heif_error(&error, format))?;

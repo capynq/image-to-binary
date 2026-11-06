@@ -1257,6 +1257,62 @@ Completion checklist:
 - [ ] Pixel-depth/orientation tests pass.
 - [ ] Limit behavior is consistent.
 
+#### 4.3.1 Verify native format coverage
+
+Objective: close format, normalization and limit coverage for the native decode
+path and record it in `docs/format-coverage.md`.
+
+Ordered steps:
+
+1. Add reproducible fixtures for rotation, mirroring, alpha, 10-bit, grey and
+   multi-image HEIC/AVIF.
+2. Test each format and pixel-depth, orientation and limit property natively.
+3. Mark every browser cell as not yet verified until 4.3.2.
+
+Acceptance checks: every verified cell names a test that can fail on that
+property; default and `heif` builds pass.
+
+Proposed commit title: `test: cover native image formats`
+
+Completion checklist:
+
+- [x] Native format matrix reviewed.
+- [x] Pixel-depth/orientation tests pass on both builds.
+- [x] Limit claims match what the tests can detect.
+
+Validation: 148 default-build and 170 `heif`-build processing tests pass on macOS
+arm64 with none ignored. The matrix records 52 verified property cells, 9 not
+applicable, 2 not yet verified (PNG and WebP multi-frame policy) and 1
+unavailable. Independent mutation review confirmed primary-item, EXIF orientation
+and stride handling are detected. Pixel limits are product-based, so a
+width/height swap is observable only through the per-axis decoder limit and output
+dimensions, and the matrix claims only those. PNG runs a full 50 MP decode; other
+codecs prove the limit check only. libheif's internal allocation up to twice the
+caller limit is untested. All 13 fixtures regenerate byte-identically on matching
+tool versions.
+
+#### 4.3.2 Verify browser format coverage
+
+Objective: fill the browser column of `docs/format-coverage.md`.
+
+Prerequisites: 4.2.
+
+Ordered steps:
+
+1. Run each format fixture through the browser import path in available engines.
+2. Compare decoded pixels and exports with native references.
+3. Verify the browser-lower-limit behavior for every adapter.
+
+Acceptance checks: browser cells are verified or explicitly unavailable.
+
+Proposed commit title: `test: complete image format coverage`
+
+Completion checklist:
+
+- [ ] Browser matrix column reviewed.
+- [ ] Browser limit behavior is consistent with native.
+- [ ] Parent 4.3 checklist reflects verified evidence.
+
 ### 5.1 Add the Tauri shell
 
 Objective: package the shared UI and core behind a native Tauri window.
