@@ -1277,9 +1277,22 @@ Proposed commit title: `feat: add Tauri desktop shell`
 
 Completion checklist:
 
-- [ ] Window geometry checks pass.
-- [ ] IPC contract reviewed.
-- [ ] Available OS smoke checks pass.
+- [x] Window geometry checks pass.
+- [x] IPC contract reviewed.
+- [x] Available OS smoke checks pass.
+
+Validation: formatting, clippy with warnings denied, and 30 tests pass, and the
+default binary contains no smoke strings or smoke permissions. The macOS arm64
+smoke run passed 24/24 checks on the final bundle and CSP: 1280×800 default, a
+640×480 request clamped to 800×600, a larger resize honoured, no page reload or
+CSP violation across resizes, byte-exact binary IPC, and the worker off the UI
+thread. Results carry their generation and consumers must compare it: delivery
+suppression is best effort, because a result crosses IPC after delivery. Shutdown
+waits at most 2 s and then detaches, so a job that never checkpoints cannot hang
+exit. Tauri buffers a raw IPC body before any size check, so 5.2 must not send
+file bytes through invoke. Processing and progress commands land with their
+callers in 5.2. Windows and Linux were not run. This subphase landed before 4.3
+closed because the shell depends only on the 4.1 codec configuration.
 
 ### 5.2 Add native processing, files, dialogs, and drop
 

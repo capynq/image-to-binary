@@ -1,0 +1,42 @@
+[package]
+name = "image-to-binary-desktop"
+version = "0.1.0"
+description = "Tauri native shell for image-to-binary"
+edition = "2021"
+license = "GPL-3.0-only"
+rust-version = "1.88"
+publish = false
+
+[workspace]
+
+[lib]
+name = "image_to_binary_desktop"
+
+[[bin]]
+name = "image-to-binary-desktop"
+path = "src/main.rs"
+
+[features]
+default = []
+custom-protocol = ["tauri/custom-protocol"]
+native-codecs = ["image-to-binary-processing/heif"]
+smoke = ["custom-protocol"]
+
+[dependencies]
+image-to-binary-adapters = { path = "../adapters" }
+image-to-binary-core = { path = "../core" }
+image-to-binary-export = { path = "../export" }
+image-to-binary-processing = { path = "../processing" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = "=2.11.6"
+
+[build-dependencies]
+tauri-build = "=2.6.3"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "deny"
+pedantic = "warn"

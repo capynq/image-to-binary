@@ -11,6 +11,9 @@ export default defineConfig({
   worker: {
     format: 'es',
   },
+  build: {
+    assetsInlineLimit: 0,
+  },
   server: {
     host: 'localhost',
     fs: {

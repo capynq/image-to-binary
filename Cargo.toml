@@ -6,6 +6,7 @@ members = [
     "crates/adapters",
     "crates/wasm",
 ]
+exclude = ["crates/desktop"]
 resolver = "2"
 
 [workspace.package]

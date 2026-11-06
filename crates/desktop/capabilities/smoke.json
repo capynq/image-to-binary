@@ -1,0 +1,6 @@
+{
+  "identifier": "smoke-probe",
+  "description": "Smoke-only commands; loaded only by builds with the smoke feature.",
+  "windows": ["main"],
+  "permissions": ["allow-echo-binary", "allow-smoke-page", "allow-smoke-worker-probe"]
+}

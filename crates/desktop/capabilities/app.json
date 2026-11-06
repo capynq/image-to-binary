@@ -1,0 +1,6 @@
+{
+  "identifier": "main-window",
+  "description": "Read-only build identity and engine limits for the main window.",
+  "windows": ["main"],
+  "permissions": ["allow-app-info", "allow-app-limits"]
+}
