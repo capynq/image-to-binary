@@ -3,6 +3,10 @@
 use image_to_binary_core::ContractError;
 use image_to_binary_processing::Job;
 
+mod artwork_png;
+
+pub use artwork_png::{ArtworkPngTask, PngTaskError};
+
 /// Adapter-owned session state; resources are released when the session drops.
 #[derive(Debug)]
 pub struct Session {

@@ -2,6 +2,8 @@
 
 use std::fmt;
 use std::io::{self, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use image_to_binary_core::{Cancellation, ContractError, Generation};
 
@@ -54,6 +56,8 @@ pub enum ExportError {
     Row(Box<ExportError>),
     /// The PNG encoder or output sink failed.
     Png(png::EncodingError),
+    /// Shared browser chunk storage is unavailable after a poisoned lock.
+    Sink(&'static str),
 }
 
 impl fmt::Display for ExportError {
@@ -62,6 +66,7 @@ impl fmt::Display for ExportError {
             Self::Contract(error) => error.fmt(formatter),
             Self::Row(error) => write!(formatter, "row provider failed: {error}"),
             Self::Png(error) => error.fmt(formatter),
+            Self::Sink(reason) => write!(formatter, "chunk sink failed: {reason}"),
         }
     }
 }
@@ -72,6 +77,7 @@ impl std::error::Error for ExportError {
             Self::Contract(error) => Some(error),
             Self::Row(error) => Some(error),
             Self::Png(error) => Some(error),
+            Self::Sink(_) => None,
         }
     }
 }
@@ -161,11 +167,11 @@ impl PngExportPlan {
         F: FnMut(u32) -> Result<Vec<u8>, ExportError>,
     {
         cancellation.check(generation)?;
-        let row_length = usize::try_from(u64::from(self.width) * 4)
-            .map_err(|_| ContractError::ArithmeticOverflow)?;
-        let mut counted = CountedWriter::new(sink, self.max_encoded_bytes);
+        let row_length = row_byte_length(self.width)?;
+        let flags = Arc::new(WriteFlags::default());
+        let counted = CountedWriter::new(sink, self.max_encoded_bytes, Arc::clone(&flags));
         let result = encode_png_rows(
-            &mut counted,
+            counted,
             self.width,
             self.height,
             row_length,
@@ -173,15 +179,72 @@ impl PngExportPlan {
             generation,
             &mut rows,
         );
-        if counted.limit_reached {
+        if flags.resource_limit.load(Ordering::Acquire) {
             return Err(ContractError::ResourceLimitExceeded.into());
         }
         result
     }
+
+    /// Starts an owned incremental encoder that writes the PNG header to `sink`.
+    ///
+    /// The encoder uses the same settings as [`PngExportPlan::encode`], so equal
+    /// RGBA8 rows produce equal bytes on both paths. Trailer write failures are
+    /// reported by [`PngStreamEncoder::finish`] through the shared failure flags.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExportError::Contract`] when the header exceeds the output
+    /// ceiling and [`ExportError::Png`] for other header write failures.
+    pub fn stream_encoder<W: Write + 'static>(
+        self,
+        sink: W,
+    ) -> Result<PngStreamEncoder<W>, ExportError> {
+        let row_length = row_byte_length(self.width)?;
+        let flags = Arc::new(WriteFlags::default());
+        let counted = CountedWriter::new(sink, self.max_encoded_bytes, Arc::clone(&flags));
+        let writer = configured_encoder(counted, self.width, self.height)
+            .write_header()
+            .map_err(|error| png_error(&flags, error))?;
+        let stream = writer
+            .into_stream_writer()
+            .map_err(|error| png_error(&flags, error))?;
+        Ok(PngStreamEncoder {
+            stream,
+            flags,
+            height: self.height,
+            row_length,
+            rows_written: 0,
+        })
+    }
+}
+
+fn row_byte_length(width: u32) -> Result<usize, ExportError> {
+    let bytes = u64::from(width)
+        .checked_mul(4)
+        .ok_or(ContractError::ArithmeticOverflow)?;
+    Ok(usize::try_from(bytes).map_err(|_| ContractError::ArithmeticOverflow)?)
+}
+
+/* Shared PNG settings: the borrowed and owned encoders must agree byte-for-byte. */
+fn configured_encoder<W: Write>(sink: W, width: u32, height: u32) -> png::Encoder<'static, W> {
+    let mut encoder = png::Encoder::new(sink, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.set_compression(png::Compression::Fast);
+    encoder.set_filter(png::Filter::NoFilter);
+    encoder
+}
+
+fn png_error(flags: &WriteFlags, error: png::EncodingError) -> ExportError {
+    if flags.resource_limit.load(Ordering::Acquire) {
+        ExportError::Contract(ContractError::ResourceLimitExceeded)
+    } else {
+        ExportError::Png(error)
+    }
 }
 
 fn encode_png_rows<W, F>(
-    counted: &mut CountedWriter<'_, W>,
+    counted: CountedWriter<&mut W>,
     width: u32,
     height: u32,
     row_length: usize,
@@ -193,12 +256,9 @@ where
     W: Write,
     F: FnMut(u32) -> Result<Vec<u8>, ExportError>,
 {
-    let mut encoder = png::Encoder::new(counted, width, height);
-    encoder.set_color(png::ColorType::Rgba);
-    encoder.set_depth(png::BitDepth::Eight);
-    encoder.set_compression(png::Compression::Fast);
-    encoder.set_filter(png::Filter::NoFilter);
-    let mut writer = encoder.write_header().map_err(ExportError::Png)?;
+    let mut writer = configured_encoder(counted, width, height)
+        .write_header()
+        .map_err(ExportError::Png)?;
     let mut stream = writer.stream_writer().map_err(ExportError::Png)?;
     for row in 0..height {
         cancellation.check(generation)?;
@@ -219,32 +279,40 @@ where
     writer_result.map_err(ExportError::Png)
 }
 
-struct CountedWriter<'a, W> {
-    sink: &'a mut W,
-    bytes: u64,
-    limit: u64,
-    limit_reached: bool,
+/* Shared failure flags: png's owned stream writer drops its inner writer on
+finish and discards trailer errors, so the encoder must read these flags. */
+#[derive(Debug, Default)]
+struct WriteFlags {
+    resource_limit: AtomicBool,
+    failed: AtomicBool,
 }
 
-impl<'a, W> CountedWriter<'a, W> {
-    fn new(sink: &'a mut W, limit: u64) -> Self {
+/* Owned sinks are flushed when the counting writer drops, which happens inside
+png's StreamWriter::finish; png never flushes the sink itself on that path. */
+struct CountedWriter<S: Write> {
+    sink: S,
+    bytes: u64,
+    limit: u64,
+    flags: Arc<WriteFlags>,
+}
+
+impl<S: Write> CountedWriter<S> {
+    fn new(sink: S, limit: u64, flags: Arc<WriteFlags>) -> Self {
         Self {
             sink,
             bytes: 0,
             limit,
-            limit_reached: false,
+            flags,
         }
     }
-}
 
-impl<W: Write> Write for CountedWriter<'_, W> {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+    fn write_counted(&mut self, bytes: &[u8]) -> io::Result<usize> {
         if bytes.is_empty() {
             return Ok(0);
         }
         let remaining = self.limit.saturating_sub(self.bytes);
         if remaining == 0 {
-            self.limit_reached = true;
+            self.flags.resource_limit.store(true, Ordering::Release);
             return Err(io::Error::other("encoded PNG output limit exceeded"));
         }
         let allowed = usize::try_from(remaining)
@@ -266,10 +334,317 @@ impl<W: Write> Write for CountedWriter<'_, W> {
             .ok_or_else(|| io::Error::other("encoded byte count overflow"))?;
         Ok(written)
     }
+}
+
+impl<S: Write> CountedWriter<S> {
+    fn record_sink_error(&self, error: &io::Error) {
+        self.flags.failed.store(true, Ordering::Release);
+        let storage_ceiling = error
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<ContractError>())
+            .is_some_and(|contract| *contract == ContractError::ResourceLimitExceeded);
+        if storage_ceiling {
+            self.flags.resource_limit.store(true, Ordering::Release);
+        }
+    }
+}
+
+impl<S: Write> Write for CountedWriter<S> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let result = self.write_counted(bytes);
+        if let Err(error) = &result {
+            self.record_sink_error(error);
+        }
+        result
+    }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.sink.flush()
+        let result = self.sink.flush();
+        if let Err(error) = &result {
+            self.record_sink_error(error);
+        }
+        result
     }
+}
+
+impl<S: Write> Drop for CountedWriter<S> {
+    fn drop(&mut self) {
+        if let Err(error) = self.sink.flush() {
+            self.record_sink_error(&error);
+        }
+    }
+}
+
+/// Incremental RGBA8 PNG encoder that owns its sink and accepts complete rows
+/// across many calls.
+///
+/// Invariants: every accepted write is a whole number of rows, the row total
+/// never exceeds the plan height, and the encoded byte count never exceeds the
+/// plan ceiling. Dropping an unfinished encoder discards the stream without
+/// reporting an error; callers must also drop or discard any bytes already
+/// written to the sink.
+pub struct PngStreamEncoder<W: Write + 'static> {
+    stream: png::StreamWriter<'static, CountedWriter<W>>,
+    flags: Arc<WriteFlags>,
+    height: u32,
+    row_length: usize,
+    rows_written: u32,
+}
+
+impl<W: Write + 'static> PngStreamEncoder<W> {
+    /// Writes one or more complete RGBA8 rows.
+    ///
+    /// The slice length must be a whole multiple of `width * 4`. Rows beyond the
+    /// plan height are rejected before any byte is written.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ContractError::InvalidDimensions`] for a partial row,
+    /// [`ContractError::InvalidProgress`] when the rows exceed the plan height,
+    /// [`ContractError::ResourceLimitExceeded`] when the encoded ceiling or the
+    /// sink's own storage ceiling is reached, or [`ExportError::Png`] for other
+    /// sink failures.
+    pub fn write_rows(&mut self, rows: &[u8]) -> Result<(), ExportError> {
+        if rows.len() % self.row_length != 0 {
+            return Err(ContractError::InvalidDimensions.into());
+        }
+        let count = u32::try_from(rows.len() / self.row_length)
+            .map_err(|_| ContractError::ArithmeticOverflow)?;
+        let rows_written = self
+            .rows_written
+            .checked_add(count)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        if rows_written > self.height {
+            return Err(ContractError::InvalidProgress.into());
+        }
+        self.stream
+            .write_all(rows)
+            .map_err(|error| png_error(&self.flags, png::EncodingError::IoError(error)))?;
+        self.rows_written = rows_written;
+        Ok(())
+    }
+
+    /// Finalizes the PNG after every planned row has been written.
+    ///
+    /// Finalization releases the owned sink, which flushes it; a flush failure
+    /// is returned here, so a buffered sink cannot report success after losing
+    /// data.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ContractError::InvalidProgress`] when rows are missing,
+    /// [`ContractError::ResourceLimitExceeded`] when the trailer exceeds the
+    /// ceiling or the sink's storage ceiling is reached, or [`ExportError::Png`]
+    /// when finalization, a trailer write, or the final flush fails.
+    pub fn finish(self) -> Result<(), ExportError> {
+        let Self {
+            stream,
+            flags,
+            height,
+            rows_written,
+            ..
+        } = self;
+        if rows_written != height {
+            return Err(ContractError::InvalidProgress.into());
+        }
+        let result = stream.finish();
+        if flags.resource_limit.load(Ordering::Acquire) {
+            return Err(ContractError::ResourceLimitExceeded.into());
+        }
+        result.map_err(|error| png_error(&flags, error))?;
+        if flags.failed.load(Ordering::Acquire) {
+            return Err(ExportError::Png(png::EncodingError::IoError(
+                io::Error::other("PNG trailer could not be written"),
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl<W: Write + 'static> std::fmt::Debug for PngStreamEncoder<W> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PngStreamEncoder")
+            .field("height", &self.height)
+            .field("rows_written", &self.rows_written)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug)]
+struct PendingChunks {
+    chunk_size: usize,
+    max_pending_bytes: u64,
+    pending_bytes: u64,
+    completed: Vec<Vec<u8>>,
+    current: Vec<u8>,
+    closed: bool,
+}
+
+impl PendingChunks {
+    fn push(&mut self, mut bytes: &[u8]) -> Result<(), ContractError> {
+        if self.closed {
+            return Err(ContractError::InvalidSettings("closed chunk sink"));
+        }
+        let requested =
+            u64::try_from(bytes.len()).map_err(|_| ContractError::ArithmeticOverflow)?;
+        let pending = self
+            .pending_bytes
+            .checked_add(requested)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        if pending > self.max_pending_bytes {
+            return Err(ContractError::ResourceLimitExceeded);
+        }
+        while !bytes.is_empty() {
+            let take = (self.chunk_size - self.current.len()).min(bytes.len());
+            self.current.extend_from_slice(&bytes[..take]);
+            self.pending_bytes = self
+                .pending_bytes
+                .checked_add(u64::try_from(take).map_err(|_| ContractError::ArithmeticOverflow)?)
+                .ok_or(ContractError::ArithmeticOverflow)?;
+            bytes = &bytes[take..];
+            if self.current.len() == self.chunk_size {
+                let next = allocate_chunk(self.chunk_size)?;
+                self.completed
+                    .try_reserve(1)
+                    .map_err(|_| ContractError::ResourceLimitExceeded)?;
+                let full = std::mem::replace(&mut self.current, next);
+                self.completed.push(full);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn allocate_chunk(chunk_size: usize) -> Result<Vec<u8>, ContractError> {
+    let mut chunk = Vec::new();
+    chunk
+        .try_reserve_exact(chunk_size)
+        .map_err(|_| ContractError::ResourceLimitExceeded)?;
+    Ok(chunk)
+}
+
+fn lock_chunks(
+    shared: &Mutex<PendingChunks>,
+) -> Result<MutexGuard<'_, PendingChunks>, ExportError> {
+    shared
+        .lock()
+        .map_err(|_| ExportError::Sink("pending chunk storage lock was poisoned"))
+}
+
+/// Write half of a drainable browser chunk channel.
+///
+/// `Send` so native adapters may move it across threads. Its pending storage is
+/// shared only with the paired [`BrowserChunkDrain`].
+#[derive(Debug)]
+pub struct BrowserChunkWriter {
+    shared: Arc<Mutex<PendingChunks>>,
+}
+
+impl Write for BrowserChunkWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let mut state = self
+            .shared
+            .lock()
+            .map_err(|_| io::Error::other("pending chunk storage lock was poisoned"))?;
+        state.push(bytes).map_err(io::Error::other)?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Drain half of a browser chunk channel.
+///
+/// Completed chunks leave storage exactly once through [`Self::drain`]. The
+/// final partial chunk is returned only by [`Self::take_remaining`], which
+/// closes the channel.
+#[derive(Debug)]
+pub struct BrowserChunkDrain {
+    shared: Arc<Mutex<PendingChunks>>,
+}
+
+impl BrowserChunkDrain {
+    /// Moves completed chunks out of storage and releases their pending bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExportError::Sink`] when the shared storage lock was poisoned.
+    pub fn drain(&self) -> Result<Vec<Vec<u8>>, ExportError> {
+        let mut state = lock_chunks(&self.shared)?;
+        let drained = std::mem::take(&mut state.completed);
+        for chunk in &drained {
+            let released = u64::try_from(chunk.len())
+                .map_err(|_| ExportError::Contract(ContractError::ArithmeticOverflow))?;
+            state.pending_bytes = state
+                .pending_bytes
+                .checked_sub(released)
+                .ok_or(ExportError::Contract(ContractError::ArithmeticOverflow))?;
+        }
+        Ok(drained)
+    }
+
+    /// Closes the channel and returns every undrained chunk, including the
+    /// final partial chunk.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExportError::Sink`] when the shared storage lock was poisoned,
+    /// or a resource-limit contract error when the result vector cannot grow.
+    pub fn take_remaining(self) -> Result<Vec<Vec<u8>>, ExportError> {
+        let mut state = lock_chunks(&self.shared)?;
+        let mut chunks = std::mem::take(&mut state.completed);
+        if !state.current.is_empty() {
+            chunks
+                .try_reserve(1)
+                .map_err(|_| ExportError::Contract(ContractError::ResourceLimitExceeded))?;
+            chunks.push(std::mem::take(&mut state.current));
+        }
+        state.pending_bytes = 0;
+        state.closed = true;
+        Ok(chunks)
+    }
+}
+
+/// Creates a writer and drain pair for browser-facing PNG chunks.
+///
+/// Completed chunks hold exactly `chunk_size` bytes. `max_pending_bytes` bounds
+/// completed chunks plus the partial chunk until they are drained; a write that
+/// would exceed it is rejected whole.
+///
+/// # Errors
+///
+/// Returns [`ContractError::InvalidSettings`] for a zero or oversized chunk
+/// size, or a pending bound smaller than one chunk, and
+/// [`ContractError::ResourceLimitExceeded`] when the first chunk cannot be
+/// reserved.
+pub fn browser_chunk_channel(
+    chunk_size: usize,
+    max_pending_bytes: u64,
+) -> Result<(BrowserChunkWriter, BrowserChunkDrain), ExportError> {
+    if chunk_size == 0 || chunk_size > MAX_BROWSER_CHUNK_BYTES {
+        return Err(ContractError::InvalidSettings("chunk size").into());
+    }
+    let chunk_bytes = u64::try_from(chunk_size).map_err(|_| ContractError::ArithmeticOverflow)?;
+    if max_pending_bytes < chunk_bytes {
+        return Err(ContractError::InvalidSettings("pending limit").into());
+    }
+    let shared = Arc::new(Mutex::new(PendingChunks {
+        chunk_size,
+        max_pending_bytes,
+        pending_bytes: 0,
+        completed: Vec::new(),
+        current: allocate_chunk(chunk_size)?,
+        closed: false,
+    }));
+    Ok((
+        BrowserChunkWriter {
+            shared: Arc::clone(&shared),
+        },
+        BrowserChunkDrain { shared },
+    ))
 }
 
 /// Bounded browser-facing chunk sink retaining encoded chunks for Blob creation.
@@ -379,6 +754,263 @@ mod tests {
     use super::*;
     use image_to_binary_core::{OutputFormat, ResourceLimits};
     use std::io::Cursor;
+
+    fn pattern_row(row: u32, row_length: usize) -> Vec<u8> {
+        (0..row_length)
+            .map(|index| {
+                let value = u64::from(row) * 31 + u64::try_from(index).unwrap() * 7;
+                u8::try_from(value % 251).unwrap()
+            })
+            .collect()
+    }
+
+    fn decoded_pixels(bytes: &[u8]) -> (u32, u32, Vec<u8>) {
+        let mut reader = png::Decoder::new(Cursor::new(bytes.to_vec()))
+            .read_info()
+            .unwrap();
+        let mut decoded = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut decoded).unwrap();
+        (info.width, info.height, decoded)
+    }
+
+    #[derive(Debug)]
+    struct BufferedSink {
+        buffer: Vec<u8>,
+        target: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for BufferedSink {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.buffer.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            let mut target = self
+                .target
+                .lock()
+                .map_err(|_| io::Error::other("target lock poisoned"))?;
+            target.append(&mut self.buffer);
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct FlushFailSink;
+
+    impl Write for FlushFailSink {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::other("test flush failure"))
+        }
+    }
+
+    #[test]
+    fn stream_finish_flushes_buffered_sink_into_target() {
+        let plan = PngExportPlan::new(17, 11, 1 << 20).unwrap();
+        let row_length = 17 * 4;
+        let mut native = Vec::new();
+        plan.encode(
+            &mut native,
+            &Cancellation::new(Generation::new(3)),
+            Generation::new(3),
+            |row| Ok(pattern_row(row, row_length)),
+        )
+        .unwrap();
+        let target = Arc::new(Mutex::new(Vec::new()));
+        let mut encoder = plan
+            .stream_encoder(BufferedSink {
+                buffer: Vec::new(),
+                target: Arc::clone(&target),
+            })
+            .unwrap();
+        for row in 0..11 {
+            encoder.write_rows(&pattern_row(row, row_length)).unwrap();
+        }
+        encoder.finish().unwrap();
+        assert_eq!(*target.lock().unwrap(), native);
+    }
+
+    #[test]
+    fn stream_finish_reports_flush_failure() {
+        let plan = PngExportPlan::new(3, 2, 64 * 1024).unwrap();
+        let mut encoder = plan.stream_encoder(FlushFailSink).unwrap();
+        encoder.write_rows(&[1; 24]).unwrap();
+        assert!(matches!(encoder.finish(), Err(ExportError::Png(_))));
+    }
+
+    #[test]
+    fn sink_storage_ceiling_is_typed_as_resource_limit() {
+        let plan = PngExportPlan::new(64, 64, 1 << 20).unwrap();
+        let (writer, _drain) = browser_chunk_channel(64, 100).unwrap();
+        let mut encoder = plan.stream_encoder(writer).unwrap();
+        let result = (0..64).try_for_each(|row| encoder.write_rows(&pattern_row(row, 256)));
+        let result = result.and_then(|()| encoder.finish());
+        assert!(matches!(
+            result,
+            Err(ExportError::Contract(ContractError::ResourceLimitExceeded))
+        ));
+    }
+
+    fn assert_send<T: Send>() {}
+
+    #[test]
+    fn stream_encoder_is_send_and_matches_encode_bytes() {
+        assert_send::<PngStreamEncoder<BrowserChunkWriter>>();
+        assert_send::<BrowserChunkDrain>();
+        let plan = PngExportPlan::new(17, 11, 1 << 20).unwrap();
+        let row_length = 17 * 4;
+        let mut native = Vec::new();
+        plan.encode(
+            &mut native,
+            &Cancellation::new(Generation::new(1)),
+            Generation::new(1),
+            |row| Ok(pattern_row(row, row_length)),
+        )
+        .unwrap();
+        let (writer, drain) = browser_chunk_channel(7, 1 << 20).unwrap();
+        let mut encoder = plan.stream_encoder(writer).unwrap();
+        let mut pixels = Vec::new();
+        for row in 0..11 {
+            let bytes = pattern_row(row, row_length);
+            encoder.write_rows(&bytes).unwrap();
+            pixels.extend_from_slice(&bytes);
+        }
+        encoder.finish().unwrap();
+        let streamed: Vec<u8> = drain
+            .take_remaining()
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect();
+        assert_eq!(streamed, native);
+        assert_eq!(decoded_pixels(&streamed), (17, 11, pixels));
+    }
+
+    #[test]
+    fn stream_batches_drain_completed_chunks_once() {
+        let plan = PngExportPlan::new(17, 11, 1 << 20).unwrap();
+        let row_length = 17 * 4;
+        let mut native = Vec::new();
+        plan.encode(
+            &mut native,
+            &Cancellation::new(Generation::new(2)),
+            Generation::new(2),
+            |row| Ok(pattern_row(row, row_length)),
+        )
+        .unwrap();
+        let (writer, drain) = browser_chunk_channel(16, 1 << 20).unwrap();
+        let mut encoder = plan.stream_encoder(writer).unwrap();
+        let mut collected = Vec::new();
+        for (start, count) in [(0_u32, 3_u32), (3, 3), (6, 3), (9, 2)] {
+            let mut bytes = Vec::new();
+            for row in start..start + count {
+                bytes.extend_from_slice(&pattern_row(row, row_length));
+            }
+            encoder.write_rows(&bytes).unwrap();
+            let drained = drain.drain().unwrap();
+            assert!(drain.drain().unwrap().is_empty());
+            assert!(drained.iter().all(|chunk| chunk.len() == 16));
+            collected.extend(drained);
+        }
+        encoder.finish().unwrap();
+        collected.extend(drain.take_remaining().unwrap());
+        let streamed: Vec<u8> = collected.into_iter().flatten().collect();
+        assert_eq!(streamed, native);
+    }
+
+    #[test]
+    fn stream_encoder_validates_rows_and_finalization() {
+        let plan = PngExportPlan::new(3, 2, 64 * 1024).unwrap();
+        let (writer, _drain) = browser_chunk_channel(64, 1 << 16).unwrap();
+        let mut encoder = plan.stream_encoder(writer).unwrap();
+        assert!(matches!(
+            encoder.write_rows(&[0; 11]),
+            Err(ExportError::Contract(ContractError::InvalidDimensions))
+        ));
+        encoder.write_rows(&[]).unwrap();
+        encoder.write_rows(&[7; 12]).unwrap();
+        assert!(matches!(
+            encoder.write_rows(&[0; 24]),
+            Err(ExportError::Contract(ContractError::InvalidProgress))
+        ));
+        encoder.write_rows(&[9; 12]).unwrap();
+        encoder.finish().unwrap();
+
+        let (writer, _drain) = browser_chunk_channel(64, 1 << 16).unwrap();
+        let mut early = plan.stream_encoder(writer).unwrap();
+        early.write_rows(&[1; 12]).unwrap();
+        assert!(matches!(
+            early.finish(),
+            Err(ExportError::Contract(ContractError::InvalidProgress))
+        ));
+    }
+
+    #[test]
+    fn stream_encoder_enforces_encoded_limit() {
+        let plan = PngExportPlan::new(64, 64, 200).unwrap();
+        let (writer, _drain) = browser_chunk_channel(64, 1 << 16).unwrap();
+        let mut encoder = plan.stream_encoder(writer).unwrap();
+        let result = (0..64).try_for_each(|row| encoder.write_rows(&pattern_row(row, 256)));
+        let result = result.and_then(|()| encoder.finish());
+        assert!(matches!(
+            result,
+            Err(ExportError::Contract(ContractError::ResourceLimitExceeded))
+        ));
+    }
+
+    #[test]
+    fn stream_encoder_reports_sink_and_trailer_failures() {
+        let plan = PngExportPlan::new(3, 2, 64 * 1024).unwrap();
+        let mut encoder = plan
+            .stream_encoder(TestSink::failing(Some(40), false))
+            .unwrap();
+        let result = match encoder.write_rows(&[1; 24]) {
+            Ok(()) => encoder.finish(),
+            Err(error) => Err(error),
+        };
+        assert!(matches!(result, Err(ExportError::Png(_))));
+
+        let mut encoder = plan.stream_encoder(IendFailSink).unwrap();
+        encoder.write_rows(&[1; 24]).unwrap();
+        assert!(matches!(
+            encoder.finish(),
+            Err(ExportError::Png(png::EncodingError::IoError(_)))
+        ));
+    }
+
+    #[test]
+    fn browser_channel_drains_once_and_bounds_pending_bytes() {
+        let (mut writer, drain) = browser_chunk_channel(3, 6).unwrap();
+        writer.write_all(&[1, 2, 3, 4, 5]).unwrap();
+        assert_eq!(drain.drain().unwrap(), vec![vec![1, 2, 3]]);
+        assert!(drain.drain().unwrap().is_empty());
+        writer.write_all(&[6, 7, 8, 9]).unwrap();
+        assert!(writer.write(&[10]).is_err());
+        assert_eq!(drain.drain().unwrap(), vec![vec![4, 5, 6], vec![7, 8, 9]]);
+        writer.write_all(&[10]).unwrap();
+        assert_eq!(drain.take_remaining().unwrap(), vec![vec![10]]);
+        assert!(writer.write(&[11]).is_err());
+    }
+
+    #[test]
+    fn browser_channel_rejects_invalid_settings_and_poisoned_locks() {
+        assert!(browser_chunk_channel(0, 8).is_err());
+        assert!(browser_chunk_channel(MAX_BROWSER_CHUNK_BYTES + 1, u64::MAX).is_err());
+        assert!(browser_chunk_channel(4, 3).is_err());
+
+        let (mut writer, drain) = browser_chunk_channel(4, 16).unwrap();
+        let shared = Arc::clone(&writer.shared);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = shared.lock().unwrap();
+            panic!("poison the chunk storage lock");
+        }));
+        assert!(writer.write(&[1]).is_err());
+        assert!(matches!(drain.drain(), Err(ExportError::Sink(_))));
+    }
 
     fn plan() -> PngExportPlan {
         PngExportPlan::new(3, 2, 64 * 1024).unwrap()

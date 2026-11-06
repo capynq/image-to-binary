@@ -1056,9 +1056,19 @@ Proposed commit title: `feat: add incremental PNG export task`
 
 Completion checklist:
 
-- [ ] Pixel parity, chunk ownership and failure tests pass.
-- [ ] Formatting, strict Clippy and focused export tests pass.
-- [ ] Independent ownership and resource review passes.
+- [x] Pixel parity, chunk ownership and failure tests pass.
+- [x] Formatting, strict Clippy and focused export tests pass.
+- [x] Independent ownership and resource review passes.
+
+Validation: 25 export and 13 adapter tests pass; workspace formatting, strict
+Clippy, and the WASM target check pass. `PngStreamEncoder` lives in `export` and
+`ArtworkPngTask` in `adapters`, so WASM and native share one task while `export`
+stays independent of `processing`. Output is byte-identical to
+`PngExportPlan::encode` through one shared encoder configuration. Because the
+owned encoder keeps its sink, it flushes on finish and reports failure itself; a
+pending-storage breach is a typed resource-limit error. Pending storage is not
+tied to the row budget, so `PngTaskLimits` documents that it must hold one
+advance's output. No WASM or browser runtime is claimed by this subphase.
 
 #### 3.4.3 Expose export through WASM
 
