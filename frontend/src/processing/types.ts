@@ -10,6 +10,16 @@ export type StudioJobStatus =
 
 export type ExportFormat = 'png' | 'text'
 
+export type ExportStatus = 'idle' | 'running' | 'ready' | 'failed'
+
+/** JSON-safe export lifecycle; the encoded bytes live only in the adapter-owned artifact. */
+export interface ExportSnapshot {
+  readonly status: ExportStatus
+  readonly progress: number
+  readonly byteLength: number | null
+  readonly error: string | null
+}
+
 /** Immutable settings shared by preview and export operations. */
 export interface StudioSettings {
   readonly cellSize: number
@@ -54,6 +64,7 @@ export interface StudioSnapshot {
   readonly metadata: StudioMetadata | null
   readonly preview: PreviewSnapshot | null
   readonly original: PreviewSnapshot | null
+  readonly export: ExportSnapshot
   readonly error: string | null
 }
 
@@ -77,6 +88,16 @@ export interface PreviewArtifact {
   dispose(): void
 }
 
+/** Opaque encoded export; `blob` is the only handle to the bytes, which never enter JSON state. */
+export interface ExportArtifact {
+  readonly blob: Blob
+  readonly byteLength: number
+  dispose(): void
+}
+
+/** Receives a fraction in [0, 1]. */
+export type ExportProgressListener = (fraction: number) => void
+
 /** `artwork` renders the converted output; `original` shows the bounded imported image. */
 export type PreviewKind = 'artwork' | 'original'
 
@@ -95,13 +116,18 @@ export interface ProcessingAdapter {
     context: JobContext,
     kind?: PreviewKind,
   ): Promise<PreviewArtifact>
+  /**
+   * Encodes `source` with `settings`. Rejects with the typed adapter error when `format` is
+   * unavailable; `onProgress` may run zero or more times before the result settles.
+   */
   export(
     session: ProcessingSession,
     source: ImportedSource,
     format: ExportFormat,
     settings: StudioSettings,
     context: JobContext,
-  ): Promise<Blob>
+    onProgress?: ExportProgressListener,
+  ): Promise<ExportArtifact>
   cancel(session: ProcessingSession, operationId: number): void
   dispose(session: ProcessingSession): void
 }

@@ -1,9 +1,13 @@
 import { createDemoImage } from './demoImage'
 import { defaultUrlApi, isDemoFixture, UnsupportedInputError } from './demoAdapter'
+import { createExportAccumulator } from './exportAccumulator'
+import type { ExportAccumulator, ExportAccumulatorOptions } from './exportAccumulator'
 import { validateEncodedImport } from './protocol'
 import { renderPreviewPng } from './previewRenderer'
 import type { PreviewRenderer } from './previewRenderer'
 import type {
+  ExportArtifact,
+  ExportProgressListener,
   ImportInput,
   ImportedResult,
   ImportedSource,
@@ -19,7 +23,7 @@ import type { PreviewPixels, ProcessingClient, RgbaImport, SourceHandle } from '
 
 export class ExportUnavailableError extends Error {
   constructor() {
-    super('Export is not available until the PNG and text export phases.')
+    super('Text export is not available until the text export phase.')
     this.name = 'ExportUnavailableError'
   }
 }
@@ -45,9 +49,21 @@ interface SessionState {
 
 /**
  * Adapter backed by the Rust WASM worker client. Preview pixels are encoded to
- * a PNG object URL on the main thread; export is explicitly unavailable.
+ * a PNG object URL on the main thread. PNG export streams through the shared
+ * scheduler into an adapter-owned accumulator; text export is unavailable.
  */
 export function createBrowserProcessingAdapter(options: BrowserAdapterOptions): ProcessingAdapter {
+  return createAdapterWithAccumulator(options, createExportAccumulator)
+}
+
+/**
+ * Internal seam, not re-exported from the package index: `makeAccumulator` builds the owner of
+ * each export's chunks, so tests can observe release. Production code uses the public factory.
+ */
+export function createAdapterWithAccumulator(
+  options: BrowserAdapterOptions,
+  makeAccumulator: (accumulatorOptions: ExportAccumulatorOptions) => ExportAccumulator,
+): ProcessingAdapter {
   const urlApi = options.urlApi ?? defaultUrlApi()
   const renderPreview = options.renderPreview ?? renderPreviewPng
   const makeDemoImage = options.createDemoImage ?? createDemoImage
@@ -187,9 +203,38 @@ export function createBrowserProcessingAdapter(options: BrowserAdapterOptions): 
         createArtifact,
       )
     },
-    async export(session): Promise<Blob> {
-      assertActive(assertSession(session))
-      throw new ExportUnavailableError()
+    async export(
+      session,
+      source,
+      format,
+      settings,
+      context,
+      onProgress?: ExportProgressListener,
+    ): Promise<ExportArtifact> {
+      const state = assertSession(session)
+      assertActive(state)
+      const record = sourceOf(state, source)
+      if (format !== 'png') {
+        throw new ExportUnavailableError()
+      }
+      validateSettings(settings)
+      const accumulator = makeAccumulator(onProgress === undefined ? {} : { onProgress })
+      try {
+        return await clientOf(state).exportPng(
+          record.handle,
+          {
+            cellSize: settings.cellSize,
+            fontSize: settings.fontSize,
+            threshold: settings.threshold,
+            sampling: 'classic',
+          },
+          context.operationId,
+          accumulator,
+          (completion) => accumulator.finish(completion),
+        )
+      } finally {
+        accumulator.release()
+      }
     },
     cancel(session, operationId): void {
       assertSession(session).client?.cancel(operationId)

@@ -31,7 +31,21 @@ export interface EngineSession {
   ): EngineStage
   /** Starts the bounded original-image preview job; shares advance, cancel and finish. */
   startOriginalPreview(generation: number): EngineStage
+  /** Starts a PNG export that samples the same grid as a preview with the same settings. */
+  startExport(
+    generation: number,
+    cellSize: number,
+    fontSize: number,
+    threshold: number,
+    sampling: PreviewSampling,
+  ): EngineStage
   advance(generation: number, pixelBudget: number): EngineStage
+  /** Returns encoded chunks completed since the last drain; each array is JS-owned. */
+  drainExport(generation: number): Uint8Array[]
+  /** Returns the chunks not yet drained; the job is released on success. */
+  finishExport(generation: number): Uint8Array[]
+  progressCompleted(): number
+  progressTotal(): number
   cancel(generation: number): void
   finish(generation: number): EngineFrame
   dispose(): void

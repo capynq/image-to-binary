@@ -1,6 +1,8 @@
 import { createDemoProcessingAdapter } from '../processing/demoAdapter'
 import type {
+  ExportArtifact,
   ExportFormat,
+  ExportSnapshot,
   ImportInput,
   ImportedResult,
   PreviewArtifact,
@@ -37,15 +39,45 @@ export interface StudioController {
    */
   preview(kind?: PreviewKind): Promise<void>
   exportDemo(format?: ExportFormat): Promise<Blob>
+  /**
+   * Encodes the accepted source with the settings in effect when the export starts. A newer
+   * preview, settings change, source change, reset or disposal supersedes it without publishing.
+   * Listeners run after each snapshot is complete, so a listener may call back into the
+   * controller; such a call is judged against the snapshot that was just committed.
+   */
+  startExport(): Promise<void>
+  /** The ready PNG export, or null. Kept out of snapshots; the download phase reads it. */
+  readyExport(): ExportArtifact | null
   reset(): void
   cancel(): void
   dispose(): void
 }
 
+type OperationKind = 'import' | 'preview' | 'export' | 'textExport'
+
 interface ActiveOperation {
   readonly operationId: number
   readonly generation: number
+  readonly kind: OperationKind
 }
+
+interface Disposable {
+  dispose(): void
+}
+
+const IDLE_EXPORT: ExportSnapshot = Object.freeze({
+  status: 'idle',
+  progress: 0,
+  byteLength: null,
+  error: null,
+})
+
+const RUNNING_EXPORT: ExportSnapshot = Object.freeze({
+  status: 'running',
+  progress: 0,
+  byteLength: null,
+  error: null,
+})
 
 /** Creates a controller with isolated session ownership and immutable snapshots. */
 export function createStudioController(options: StudioControllerOptions = {}): StudioController {
@@ -60,6 +92,7 @@ export function createStudioController(options: StudioControllerOptions = {}): S
     metadata: null,
     preview: null,
     original: null,
+    export: IDLE_EXPORT,
     error: null,
   })
   validateSettings(snapshot.settings)
@@ -68,53 +101,73 @@ export function createStudioController(options: StudioControllerOptions = {}): S
   let operationSequence = 0
   let activeOperation: ActiveOperation | null = null
   let ownedImport: ImportedResult | null = null
+  let readyExport: ExportArtifact | null = null
   const artifacts: Record<PreviewKind, PreviewArtifact | null> = { artwork: null, original: null }
 
   const getSnapshot = (): StudioSnapshot => snapshot
 
-  const emit = (): void => {
-    for (const listener of listeners) {
-      listener()
-    }
-  }
-
-  const setSnapshot = (patch: Partial<StudioSnapshot>): void => {
+  /**
+   * Publishes one complete snapshot, then notifies listeners. Every field of a transition is
+   * already in place when the first listener runs, so a reentrant call sees a consistent state.
+   * `discards` are resources no longer referenced by the snapshot. Every listener runs and every
+   * discard is released even when a listener throws; the first listener error is then rethrown
+   * once, after cleanup. The committed state is never rolled back.
+   */
+  const commit = (
+    patch: Partial<StudioSnapshot>,
+    discards: ReadonlyArray<Disposable | null>,
+  ): void => {
     snapshot = Object.freeze({ ...snapshot, ...patch })
-    emit()
-  }
-
-  const releaseArtifact = (kind: PreviewKind): void => {
-    const previous = artifacts[kind]
-    artifacts[kind] = null
-    setSnapshot(viewPatch(kind, null))
-    disposeQuietly(previous)
-  }
-
-  /** Atomically swaps the source and clears both artifacts; releases old resources afterwards. */
-  const replaceOwned = (next: ImportedResult | null, patch: Partial<StudioSnapshot>): void => {
-    const previous = [artifacts.artwork, artifacts.original, ownedImport]
-    artifacts.artwork = null
-    artifacts.original = null
-    ownedImport = next
-    setSnapshot({ ...patch, preview: null, original: null })
-    for (const resource of previous) {
+    let listenerFailure: { readonly error: unknown } | null = null
+    for (const listener of listeners) {
+      try {
+        listener()
+      } catch (error) {
+        listenerFailure ??= { error }
+      }
+    }
+    for (const resource of discards) {
       disposeQuietly(resource)
     }
+    if (listenerFailure !== null) throw listenerFailure.error
   }
 
-  const invalidate = (): void => {
-    if (activeOperation !== null) {
-      adapter.cancel(session, activeOperation.operationId)
-      activeOperation = null
+  /** Cancels the running operation without publishing; returns its kind, if any. */
+  const supersede = (): OperationKind | null => {
+    const running = activeOperation
+    if (running === null) return null
+    activeOperation = null
+    adapter.cancel(session, running.operationId)
+    return running.kind
+  }
+
+  const exportIdleIf = (cancelled: OperationKind | null): Partial<StudioSnapshot> =>
+    cancelled === 'export' ? { export: IDLE_EXPORT } : {}
+
+  const beginOperation = (
+    status: 'importing' | 'processing' | 'exporting',
+    kind: OperationKind,
+    extra: Partial<StudioSnapshot> = {},
+    discards: ReadonlyArray<Disposable | null> = [],
+  ): ActiveOperation => {
+    const cancelled = supersede()
+    const operation: ActiveOperation = {
+      operationId: ++operationSequence,
+      generation: snapshot.generation + 1,
+      kind,
     }
-    setSnapshot({ generation: snapshot.generation + 1 })
-  }
-
-  const beginOperation = (status: 'importing' | 'processing' | 'exporting'): ActiveOperation => {
-    invalidate()
-    const operation = { operationId: ++operationSequence, generation: snapshot.generation }
     activeOperation = operation
-    setSnapshot({ status, progress: 0, error: null })
+    commit(
+      {
+        ...exportIdleIf(cancelled),
+        ...extra,
+        generation: operation.generation,
+        status,
+        progress: 0,
+        error: null,
+      },
+      discards,
+    )
     return operation
   }
 
@@ -123,41 +176,61 @@ export function createStudioController(options: StudioControllerOptions = {}): S
     activeOperation?.operationId === operation.operationId &&
     snapshot.generation === operation.generation
 
-  const fail = (operation: ActiveOperation, error: unknown): void => {
-    if (isCurrent(operation)) {
-      activeOperation = null
-      const message = (error instanceof Error ? error.message : String(error)).trimEnd()
-      const separator = /[.!?…]$/.test(message) ? ' ' : '. '
-      const text =
-        ownedImport === null || message === ''
-          ? message
-          : `${message}${separator}Previous image remains available.`
-      setSnapshot({ status: 'error', error: text, progress: 0 })
-    }
+  const fail = (
+    operation: ActiveOperation,
+    error: unknown,
+    extra: Partial<StudioSnapshot> = {},
+  ): void => {
+    if (!isCurrent(operation)) return
+    activeOperation = null
+    const message = errorText(error)
+    const separator = /[.!?…]$/.test(message) ? ' ' : '. '
+    const text =
+      ownedImport === null || message === ''
+        ? message
+        : `${message}${separator}Previous image remains available.`
+    commit({ status: 'error', error: text, progress: 0, ...extra }, [])
+  }
+
+  /** Swaps the source and clears every source-derived artifact in one commit. */
+  const replaceOwned = (next: ImportedResult | null, patch: Partial<StudioSnapshot>): void => {
+    const discards: Array<Disposable | null> = [
+      artifacts.artwork,
+      artifacts.original,
+      ownedImport,
+      readyExport,
+    ]
+    artifacts.artwork = null
+    artifacts.original = null
+    ownedImport = next
+    readyExport = null
+    commit({ ...patch, preview: null, original: null, export: IDLE_EXPORT }, discards)
   }
 
   const importSource = async (input: ImportInput): Promise<void> => {
     if (disposed) {
       throw new Error('Studio controller is disposed.')
     }
-    const operation = beginOperation('importing')
+    const operation = beginOperation('importing', 'import')
+    let imported: ImportedResult
     try {
-      const imported: ImportedResult = await adapter.import(session, input, operation)
-      if (!isCurrent(operation)) {
-        disposeQuietly(imported)
-        return
-      }
-      activeOperation = null
-      replaceOwned(imported, {
-        status: 'ready',
-        metadata: Object.freeze({ ...imported.metadata }),
-        progress: 1,
-      })
+      imported = await adapter.import(session, input, operation)
     } catch (error) {
       const current = isCurrent(operation)
       fail(operation, error)
       if (current) throw error
+      return
     }
+    if (!isCurrent(operation)) {
+      disposeQuietly(imported)
+      return
+    }
+    activeOperation = null
+    replaceOwned(imported, {
+      status: 'ready',
+      metadata: Object.freeze({ ...imported.metadata }),
+      progress: 1,
+    })
   }
 
   const preview = async (kind: PreviewKind = 'artwork'): Promise<void> => {
@@ -171,23 +244,25 @@ export function createStudioController(options: StudioControllerOptions = {}): S
     if (owned === null) {
       throw new Error('Import an image before previewing.')
     }
-    const operation = beginOperation('processing')
+    const operation = beginOperation('processing', 'preview')
+    let artifact: PreviewArtifact
     try {
-      const artifact = await adapter.preview(
-        session,
-        owned.source,
-        snapshot.settings,
-        operation,
-        kind,
-      )
-      if (!isCurrent(operation)) {
-        disposeQuietly(artifact)
-        return
-      }
-      const previous = artifacts[kind]
-      artifacts[kind] = artifact
-      activeOperation = null
-      setSnapshot({
+      artifact = await adapter.preview(session, owned.source, snapshot.settings, operation, kind)
+    } catch (error) {
+      const current = isCurrent(operation)
+      fail(operation, error)
+      if (current) throw error
+      return
+    }
+    if (!isCurrent(operation)) {
+      disposeQuietly(artifact)
+      return
+    }
+    const previous = artifacts[kind]
+    artifacts[kind] = artifact
+    activeOperation = null
+    commit(
+      {
         ...viewPatch(
           kind,
           Object.freeze({
@@ -198,13 +273,62 @@ export function createStudioController(options: StudioControllerOptions = {}): S
         ),
         status: 'ready',
         progress: 1,
-      })
-      disposeQuietly(previous)
+      },
+      [previous],
+    )
+  }
+
+  const startExport = async (): Promise<void> => {
+    if (disposed) {
+      throw new Error('Studio controller is disposed.')
+    }
+    const owned = ownedImport
+    if (owned === null) {
+      throw new Error('Import an image before exporting.')
+    }
+    const previousReady = readyExport
+    readyExport = null
+    const operation = beginOperation('exporting', 'export', { export: RUNNING_EXPORT }, [
+      previousReady,
+    ])
+    if (!isCurrent(operation)) return
+    const settings = snapshot.settings
+    let artifact: ExportArtifact
+    try {
+      artifact = await adapter.export(
+        session,
+        owned.source,
+        'png',
+        settings,
+        operation,
+        (fraction) => {
+          if (isCurrent(operation)) {
+            commit({ export: { ...snapshot.export, progress: fraction } }, [])
+          }
+        },
+      )
     } catch (error) {
       const current = isCurrent(operation)
-      fail(operation, error)
+      fail(operation, error, {
+        export: { status: 'failed', progress: 0, byteLength: null, error: errorText(error) },
+      })
       if (current) throw error
+      return
     }
+    if (!isCurrent(operation)) {
+      disposeQuietly(artifact)
+      return
+    }
+    activeOperation = null
+    readyExport = artifact
+    commit(
+      {
+        status: 'ready',
+        progress: 1,
+        export: { status: 'ready', progress: 1, byteLength: artifact.byteLength, error: null },
+      },
+      [],
+    )
   }
 
   const controller: StudioController = {
@@ -225,20 +349,33 @@ export function createStudioController(options: StudioControllerOptions = {}): S
       try {
         validateSettings(settings)
       } catch (error) {
-        invalidate()
-        setSnapshot({
-          status: 'error',
-          error: error instanceof Error ? error.message : String(error),
-        })
+        const cancelled = supersede()
+        commit(
+          {
+            generation: snapshot.generation + 1,
+            ...exportIdleIf(cancelled),
+            status: 'error',
+            error: error instanceof Error ? error.message : String(error),
+          },
+          [],
+        )
         throw error
       }
-      invalidate()
-      releaseArtifact('artwork')
-      setSnapshot({
-        settings: cloneSettings(settings),
-        status: ownedImport === null ? 'idle' : 'ready',
-        error: null,
-      })
+      supersede()
+      const discards: Array<Disposable | null> = [artifacts.artwork, readyExport]
+      artifacts.artwork = null
+      readyExport = null
+      commit(
+        {
+          settings: cloneSettings(settings),
+          generation: snapshot.generation + 1,
+          status: ownedImport === null ? 'idle' : 'ready',
+          preview: null,
+          export: IDLE_EXPORT,
+          error: null,
+        },
+        discards,
+      )
     },
     preview,
     exportDemo: async (format = 'text') => {
@@ -249,57 +386,84 @@ export function createStudioController(options: StudioControllerOptions = {}): S
       if (owned === null) {
         throw new Error('Import an image before exporting.')
       }
-      const operation = beginOperation('exporting')
+      const settings = snapshot.settings
+      const operation = beginOperation('exporting', 'textExport')
+      let artifact: ExportArtifact
       try {
-        const result = await adapter.export(
-          session,
-          owned.source,
-          format,
-          snapshot.settings,
-          operation,
-        )
-        if (!isCurrent(operation)) {
-          throw new StaleOperationError()
-        }
-        activeOperation = null
-        setSnapshot({ status: 'ready', progress: 1 })
-        return result
+        artifact = await adapter.export(session, owned.source, format, settings, operation)
       } catch (error) {
         fail(operation, error)
         throw error
       }
+      if (!isCurrent(operation)) {
+        disposeQuietly(artifact)
+        throw new StaleOperationError()
+      }
+      activeOperation = null
+      commit({ status: 'ready', progress: 1 }, [])
+      return artifact.blob
     },
+    startExport,
+    readyExport: () => readyExport,
     reset: () => {
       if (disposed) {
         return
       }
-      invalidate()
-      replaceOwned(null, { status: 'idle', metadata: null, progress: 0, error: null })
+      supersede()
+      replaceOwned(null, {
+        generation: snapshot.generation + 1,
+        status: 'idle',
+        metadata: null,
+        progress: 0,
+        error: null,
+      })
     },
     cancel: () => {
       if (disposed || activeOperation === null) {
         return
       }
-      invalidate()
-      setSnapshot({ status: 'cancelled', progress: 0, error: null })
+      const cancelled = supersede()
+      commit(
+        {
+          generation: snapshot.generation + 1,
+          status: 'cancelled',
+          progress: 0,
+          error: null,
+          ...exportIdleIf(cancelled),
+        },
+        [],
+      )
     },
     dispose: () => {
       if (disposed) {
         return
       }
-      invalidate()
-      replaceOwned(null, { metadata: null })
-      adapter.dispose(session)
+      supersede()
+      const generation = snapshot.generation + 1
       disposed = true
-      setSnapshot({ status: 'disposed', metadata: null, progress: 0, error: null })
-      listeners.clear()
+      try {
+        replaceOwned(null, {
+          generation,
+          status: 'disposed',
+          metadata: null,
+          progress: 0,
+          error: null,
+        })
+      } finally {
+        adapter.dispose(session)
+        listeners.clear()
+      }
     },
   }
 
   return controller
 }
 
-function disposeQuietly(resource: { dispose(): void } | null): void {
+function errorText(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error)).trimEnd()
+}
+
+function disposeQuietly(resource: Disposable | null): void {
   try {
     resource?.dispose()
   } catch {}

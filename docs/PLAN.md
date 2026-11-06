@@ -1119,9 +1119,20 @@ Proposed commit title: `feat: add worker PNG export transport`
 
 Completion checklist:
 
-- [ ] Scheduler, transfer and Blob lifecycle tests pass.
-- [ ] Frontend formatting, types and production build pass.
-- [ ] Independent transport/ownership review passes.
+- [x] Scheduler, transfer and Blob lifecycle tests pass.
+- [x] Frontend formatting, types and production build pass.
+- [x] Independent transport/ownership review passes.
+
+Validation: 236 frontend tests, formatting, type checking, and the production
+build pass. Export runs through the existing scheduler in the single physical
+slot and transfers sequence-numbered chunks; the client fails closed on gaps or
+total mismatches, and a superseded job's chunks never reach a Blob. Each
+controller transition now commits one complete snapshot, runs every listener,
+then disposes superseded resources, so a reentrant listener cannot pair old
+settings with a new generation and a throwing listener cannot leak an artifact.
+The worker posts without acknowledgement, so up to the 256 MiB ceiling can queue,
+and `new Blob(parts)` can transiently hold about twice the encoded size: this is
+bounded but not constant memory. No real-browser run is claimed by this subphase.
 
 #### 3.4.5 Add PNG download and browser acceptance
 

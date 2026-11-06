@@ -1,5 +1,6 @@
 import type { EngineFrame, EngineSession, ProcessingEngine } from './engine'
 import {
+  MAX_ENCODED_BYTES,
   MAX_RETAINED_SOURCES,
   eventData,
   isWorkerRequest,
@@ -9,6 +10,8 @@ import {
   validateRgbaImage,
 } from './protocol'
 import type {
+  ExportedReply,
+  ExportRequest,
   ImportedReply,
   ImportRequest,
   ImportEncodedRequest,
@@ -52,7 +55,12 @@ interface ActiveJob {
   cancelled: boolean
 }
 
-type JobRequest = ImportRequest | ImportEncodedRequest | PreviewRequest | OriginalPreviewRequest
+type JobRequest =
+  | ImportRequest
+  | ImportEncodedRequest
+  | PreviewRequest
+  | OriginalPreviewRequest
+  | ExportRequest
 
 type Outcome =
   | { readonly kind: 'reply'; readonly reply: WorkerReply; readonly transfer: Transferable[] }
@@ -252,6 +260,97 @@ export function createWorkerHost(
     }
   }
 
+  /**
+   * Streams the PNG as ordered `exportChunk` messages, each transferring its own buffer,
+   * then returns the `exported` totals. Every advance is followed by a drain and a progress
+   * message, and yields first so cancel and release messages are observed between advances.
+   */
+  const exportSource = async (
+    request: ExportRequest,
+    job: ActiveJob,
+    yielder: TaskYielder,
+    engine: ProcessingEngine,
+  ): Promise<ExportedReply> => {
+    const record = sources.get(request.sourceId)
+    if (record === undefined) {
+      throw new JobFailure('unknown_source', 'The source is not available in the worker.')
+    }
+    const { session } = record
+    const generation = request.requestId
+    const { cellSize, fontSize, threshold, sampling } = request.parameters
+    const emitted = { sequence: 0, byteLength: 0 }
+    const postChunks = (chunks: Uint8Array[]): void => {
+      for (const chunk of chunks) {
+        if (chunk.byteLength === 0) continue
+        assertRunning(job)
+        if (emitted.byteLength + chunk.byteLength > MAX_ENCODED_BYTES) {
+          throw new JobFailure('resource_limit_exceeded', 'The encoded PNG exceeds the byte limit.')
+        }
+        const bytes = exactBuffer(chunk)
+        const length = bytes.byteLength
+        endpoint.postMessage(
+          {
+            type: 'exportChunk',
+            requestId: request.requestId,
+            operationId: request.operationId,
+            sequence: emitted.sequence,
+            bytes,
+          } satisfies WorkerReply,
+          [bytes],
+        )
+        emitted.sequence += 1
+        emitted.byteLength += length
+      }
+    }
+    let started = false
+    let finished = false
+    try {
+      assertRunning(job)
+      let stage = session.startExport(generation, cellSize, fontSize, threshold, sampling)
+      started = true
+      while (stage !== engine.readyStage) {
+        if (stage === engine.failedStage) {
+          throw new JobFailure('internal', 'The export job failed.')
+        }
+        assertRunning(job)
+        await yielder.yield()
+        assertRunning(job)
+        stage = session.advance(generation, pixelBudget)
+        postChunks(session.drainExport(generation))
+        const total = session.progressTotal()
+        assertRunning(job)
+        endpoint.postMessage(
+          {
+            type: 'exportProgress',
+            requestId: request.requestId,
+            operationId: request.operationId,
+            completed: Math.min(session.progressCompleted(), total),
+            total,
+          } satisfies WorkerReply,
+          [],
+        )
+      }
+      assertRunning(job)
+      const finalChunks = session.finishExport(generation)
+      finished = true
+      postChunks(finalChunks)
+      return {
+        type: 'exported',
+        requestId: request.requestId,
+        operationId: request.operationId,
+        chunkCount: emitted.sequence,
+        byteLength: emitted.byteLength,
+      }
+    } catch (error) {
+      if (started && !finished && !disposed && !doomed.has(record)) {
+        try {
+          session.cancel(generation)
+        } catch {}
+      }
+      throw error
+    }
+  }
+
   const execute = async (
     request: JobRequest,
     job: ActiveJob,
@@ -270,6 +369,13 @@ export function createWorkerHost(
         return {
           kind: 'reply',
           reply: await importEncodedSource(request, job, yielder, engine),
+          transfer: [],
+        }
+      }
+      if (request.type === 'export') {
+        return {
+          kind: 'reply',
+          reply: await exportSource(request, job, yielder, engine),
           transfer: [],
         }
       }
@@ -306,7 +412,11 @@ export function createWorkerHost(
       requestId: request.requestId,
       operationId: request.operationId,
       sourceId:
-        request.type === 'preview' || request.type === 'originalPreview' ? request.sourceId : null,
+        request.type === 'preview' ||
+        request.type === 'originalPreview' ||
+        request.type === 'export'
+          ? request.sourceId
+          : null,
       cancelled: false,
     }
     active = job
@@ -384,6 +494,7 @@ export function createWorkerHost(
       case 'importEncoded':
       case 'preview':
       case 'originalPreview':
+      case 'export':
         if (data.requestId <= lastAcceptedRequestId) {
           raiseFatal('The worker received a replayed or out-of-order request id.')
           return
@@ -436,6 +547,20 @@ function closeSession(session: EngineSession): void {
   try {
     session.free()
   } catch {}
+}
+
+/** Returns a buffer spanning exactly the view, transferring the original when it already does. */
+function exactBuffer(view: Uint8Array): ArrayBuffer {
+  if (
+    view.buffer instanceof ArrayBuffer &&
+    view.byteOffset === 0 &&
+    view.byteLength === view.buffer.byteLength
+  ) {
+    return view.buffer
+  }
+  const copy = new Uint8Array(view.byteLength)
+  copy.set(view)
+  return copy.buffer
 }
 
 function closeFrame(frame: EngineFrame): void {

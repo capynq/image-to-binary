@@ -5,10 +5,13 @@ export {
   UnsupportedPreviewKindError,
 } from './demoAdapter'
 export { createBrowserProcessingAdapter, ExportUnavailableError } from './browserAdapter'
+export { ExportLimitError, MAX_EXPORT_BYTES } from './exportAccumulator'
 export { createProcessingClient, ProcessingWorkerError } from './workerClient'
 export type {
   EncodedImport,
   EncodedImportSource,
+  ExportCompletion,
+  ExportSink,
   PreviewPixels,
   ProcessingClient,
   ProcessingClientOptions,
@@ -17,7 +20,11 @@ export type {
 } from './workerClient'
 export type {
   DemoFixtureInput,
+  ExportArtifact,
   ExportFormat,
+  ExportProgressListener,
+  ExportSnapshot,
+  ExportStatus,
   ImportedSource,
   ImportedResult,
   ImportInput,

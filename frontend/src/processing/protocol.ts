@@ -54,6 +54,13 @@ export interface OriginalPreviewRequest extends RequestIdentity {
   readonly sourceId: number
 }
 
+/** Starts a PNG export of a retained source; answered by ordered `exportChunk` messages and one `exported`. */
+export interface ExportRequest extends RequestIdentity {
+  readonly type: 'export'
+  readonly sourceId: number
+  readonly parameters: PreviewParameters
+}
+
 export interface CancelRequest extends RequestIdentity {
   readonly type: 'cancel'
 }
@@ -68,6 +75,7 @@ export type WorkerRequest =
   | ImportEncodedRequest
   | PreviewRequest
   | OriginalPreviewRequest
+  | ExportRequest
   | CancelRequest
   | ReleaseSourceRequest
 
@@ -90,6 +98,27 @@ export interface PreviewedReply extends RequestIdentity {
   readonly pixels: ArrayBuffer
 }
 
+/** One ordered, worker-owned slice of the PNG; `sequence` starts at 0 and never repeats. */
+export interface ExportChunkReply extends RequestIdentity {
+  readonly type: 'exportChunk'
+  readonly sequence: number
+  readonly bytes: ArrayBuffer
+}
+
+/** Monotonic encoding progress in the engine's unit; `completed` never exceeds `total`. */
+export interface ExportProgressReply extends RequestIdentity {
+  readonly type: 'exportProgress'
+  readonly completed: number
+  readonly total: number
+}
+
+/** Terminal success: totals the client compares with the chunks it received. */
+export interface ExportedReply extends RequestIdentity {
+  readonly type: 'exported'
+  readonly chunkCount: number
+  readonly byteLength: number
+}
+
 export interface CancelledReply extends RequestIdentity {
   readonly type: 'cancelled'
 }
@@ -106,7 +135,15 @@ export interface FatalReply {
   readonly message: string
 }
 
-export type WorkerReply = ImportedReply | PreviewedReply | CancelledReply | FailedReply | FatalReply
+export type WorkerReply =
+  | ImportedReply
+  | PreviewedReply
+  | ExportChunkReply
+  | ExportProgressReply
+  | ExportedReply
+  | CancelledReply
+  | FailedReply
+  | FatalReply
 
 export interface ValidationFailure {
   readonly code: 'invalid_argument' | 'invalid_dimensions' | 'resource_limit_exceeded'
@@ -264,6 +301,7 @@ export function isWorkerRequest(value: unknown): value is WorkerRequest {
         isArrayBuffer(value.pixels)
       )
     case 'preview':
+    case 'export':
       return hasIdentity(value) && isCount(value.sourceId) && isPreviewParameters(value.parameters)
     case 'importEncoded':
       return hasIdentity(value) && typeof value.name === 'string' && isArrayBuffer(value.bytes)
@@ -285,6 +323,28 @@ export function isWorkerReply(value: unknown): value is WorkerReply {
       return hasIdentity(value) && isSourceId(value.sourceId) && hasSourceMetadata(value)
     case 'previewed':
       return hasIdentity(value) && hasPreviewFrame(value)
+    case 'exportChunk':
+      return (
+        hasIdentity(value) &&
+        isCount(value.sequence) &&
+        isArrayBuffer(value.bytes) &&
+        value.bytes.byteLength > 0 &&
+        value.bytes.byteLength <= MAX_ENCODED_BYTES
+      )
+    case 'exportProgress':
+      return (
+        hasIdentity(value) &&
+        isCount(value.completed) &&
+        isCount(value.total) &&
+        value.completed <= value.total
+      )
+    case 'exported':
+      return (
+        hasIdentity(value) &&
+        isCount(value.chunkCount) &&
+        isCount(value.byteLength) &&
+        value.byteLength <= MAX_ENCODED_BYTES
+      )
     case 'cancelled':
       return hasIdentity(value)
     case 'failed':

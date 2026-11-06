@@ -1,5 +1,6 @@
 import type {
   DemoFixtureInput,
+  ExportArtifact,
   ImportedSource,
   ImportedResult,
   ImportInput,
@@ -150,7 +151,7 @@ export function createDemoProcessingAdapter(options: DemoAdapterOptions = {}): P
         finishOperation(demoSession, guard)
       }
     },
-    async export(session, source, format, settings, context): Promise<Blob> {
+    async export(session, source, format, settings, context): Promise<ExportArtifact> {
       const demoSession = assertSession(session)
       assertActive(demoSession)
       assertSource(demoSession, source)
@@ -162,9 +163,10 @@ export function createDemoProcessingAdapter(options: DemoAdapterOptions = {}): P
       try {
         await delay(0)
         assertOperationActive(demoSession, context, guard)
-        return new Blob([fixtureChars(settings.threshold).join('\n')], {
+        const blob = new Blob([fixtureChars(settings.threshold).join('\n')], {
           type: 'text/plain;charset=utf-8',
         })
+        return { blob, byteLength: blob.size, dispose: () => undefined }
       } finally {
         finishOperation(demoSession, guard)
       }

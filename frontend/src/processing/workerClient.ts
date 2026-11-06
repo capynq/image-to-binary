@@ -9,6 +9,10 @@ import {
   validateRgbaImage,
 } from './protocol'
 import type {
+  ExportChunkReply,
+  ExportProgressReply,
+  ExportRequest,
+  ExportedReply,
   ImportEncodedRequest,
   ImportedReply,
   ImportRequest,
@@ -67,6 +71,29 @@ export interface PreviewPixels {
   readonly pixels: ArrayBuffer
 }
 
+/**
+ * Adapter-side consumer of one export. Both methods run on the client's message path and
+ * a throw fails the export and cancels the worker job; no later chunk reaches the sink.
+ *
+ * Backpressure: the worker posts chunks without acknowledgement, so chunks can queue on the
+ * port until the 256 MiB encoded ceiling. The sink must therefore keep every accepted chunk
+ * (the adapter's accumulator does) and bound its own work per call. Memory is bounded by that
+ * ceiling but is not constant, and the finished Blob may transiently hold about twice the
+ * encoded size while its parts are copied.
+ */
+export interface ExportSink {
+  /** Takes ownership of one ordered, transferred chunk. */
+  accept(chunk: ArrayBuffer): void
+  /** Receives a fraction in [0, 1] for the current export only. */
+  progress(fraction: number): void
+}
+
+/** Worker totals, already checked against the chunks the sink accepted. */
+export interface ExportCompletion {
+  readonly chunkCount: number
+  readonly byteLength: number
+}
+
 export interface ProcessingClientOptions {
   /** Called lazily on the first operation; never during construction. */
   readonly createEndpoint: () => ClientEndpoint
@@ -102,6 +129,17 @@ export interface ProcessingClient {
     finalize: (pixels: PreviewPixels) => Promise<T>,
   ): Promise<T>
   originalPreviewPixels(source: SourceHandle, operationId: number): Promise<PreviewPixels>
+  /**
+   * Streams a PNG of `source` through the shared scheduler. `finalize` runs only after the
+   * export completed and remained current, so its result is never published when superseded.
+   */
+  exportPng<T extends Releasable>(
+    source: SourceHandle,
+    parameters: PreviewParameters,
+    operationId: number,
+    sink: ExportSink,
+    finalize: (completion: ExportCompletion) => T,
+  ): Promise<T>
   cancel(operationId: number): void
   dispose(): void
 }
@@ -116,12 +154,38 @@ export class ProcessingWorkerError extends Error {
   }
 }
 
+type RequestKind = 'import' | 'preview' | 'export'
+
+type RequestReply = ImportedReply | PreviewedReply | ExportedReply
+
+type RequestMessage =
+  | ImportRequest
+  | ImportEncodedRequest
+  | PreviewRequest
+  | OriginalPreviewRequest
+  | ExportRequest
+
+const REPLY_TYPE = {
+  import: 'imported',
+  preview: 'previewed',
+  export: 'exported',
+} as const satisfies Record<RequestKind, RequestReply['type']>
+
+/** Client-side state of one export; chunks are accepted only while the request is not cancelled. */
+interface ExportStream {
+  readonly sink: ExportSink
+  nextSequence: number
+  receivedBytes: number
+  failure: Error | null
+}
+
 interface PendingRequest {
   readonly requestId: number
   readonly operationId: number
-  readonly kind: 'import' | 'preview'
+  readonly kind: RequestKind
   cancelSent: boolean
-  readonly resolve: (reply: ImportedReply | PreviewedReply) => void
+  readonly stream: ExportStream | null
+  readonly resolve: (reply: RequestReply) => void
   readonly reject: (reason: Error) => void
 }
 
@@ -255,6 +319,37 @@ class WorkerProcessingClient implements ProcessingClient {
     )
   }
 
+  exportPng<T extends Releasable>(
+    source: SourceHandle,
+    parameters: PreviewParameters,
+    operationId: number,
+    sink: ExportSink,
+    finalize: (completion: ExportCompletion) => T,
+  ): Promise<T> {
+    const terminal = this.terminalError()
+    if (terminal !== null) return Promise.reject(terminal)
+    if (this.sources.get(source.sourceId) !== source) {
+      return Promise.reject(this.unownedSource())
+    }
+    return this.schedule<T>(operationId, async (context) => {
+      context.checkpoint()
+      this.assertUsable()
+      if (this.sources.get(source.sourceId) !== source) throw this.unownedSource()
+      const request: ExportRequest = {
+        type: 'export',
+        requestId: context.generation,
+        operationId,
+        sourceId: source.sourceId,
+        parameters: { ...parameters },
+      }
+      const stream: ExportStream = { sink, nextSequence: 0, receivedBytes: 0, failure: null }
+      const reply = await this.request('export', request, [], stream)
+      if (reply.type !== 'exported') throw this.protocolViolation('Unexpected export reply.')
+      context.checkpoint()
+      return finalize({ chunkCount: reply.chunkCount, byteLength: reply.byteLength })
+    })
+  }
+
   cancel(operationId: number): void {
     const job = this.jobs.get(operationId)
     if (job === undefined) return
@@ -381,10 +476,11 @@ class WorkerProcessingClient implements ProcessingClient {
   }
 
   private request(
-    kind: 'import' | 'preview',
-    message: ImportRequest | ImportEncodedRequest | PreviewRequest | OriginalPreviewRequest,
+    kind: RequestKind,
+    message: RequestMessage,
     transfer: Transferable[],
-  ): Promise<ImportedReply | PreviewedReply> {
+    stream: ExportStream | null = null,
+  ): Promise<RequestReply> {
     const endpoint = this.openEndpoint()
     return new Promise((resolve, reject) => {
       const entry: PendingRequest = {
@@ -392,6 +488,7 @@ class WorkerProcessingClient implements ProcessingClient {
         operationId: message.operationId,
         kind,
         cancelSent: false,
+        stream,
         resolve,
         reject,
       }
@@ -474,13 +571,28 @@ class WorkerProcessingClient implements ProcessingClient {
       this.fail(new ProcessingWorkerError('worker_fatal', data.message))
       return
     }
+    if (data.type === 'exportChunk' || data.type === 'exportProgress') {
+      this.handleExportStream(data)
+      return
+    }
     const entry = this.pending.get(data.requestId)
     const kindMatches =
       data.type === 'failed' ||
       data.type === 'cancelled' ||
-      (entry !== undefined && data.type === (entry.kind === 'import' ? 'imported' : 'previewed'))
+      (entry !== undefined && data.type === REPLY_TYPE[entry.kind])
     if (entry === undefined || entry.operationId !== data.operationId || !kindMatches) {
       this.fail(new Error('The processing worker sent an uncorrelated reply.'))
+      return
+    }
+    const stream = entry.stream
+    if (
+      data.type === 'exported' &&
+      stream !== null &&
+      stream.failure === null &&
+      !entry.cancelSent &&
+      (data.chunkCount !== stream.nextSequence || data.byteLength !== stream.receivedBytes)
+    ) {
+      this.protocolViolation('The export totals differ from the chunks received.')
       return
     }
     this.pending.delete(entry.requestId)
@@ -490,11 +602,49 @@ class WorkerProcessingClient implements ProcessingClient {
       case 'previewed':
         entry.resolve(data)
         return
+      case 'exported':
+        if (stream?.failure) entry.reject(stream.failure)
+        else entry.resolve(data)
+        return
       case 'cancelled':
-        entry.reject(new Error('The worker acknowledged cancellation.'))
+        entry.reject(stream?.failure ?? new Error('The worker acknowledged cancellation.'))
         return
       case 'failed':
-        entry.reject(new ProcessingWorkerError(data.code, data.message))
+        entry.reject(stream?.failure ?? new ProcessingWorkerError(data.code, data.message))
+    }
+  }
+
+  /**
+   * Drops any export message whose request is not the current, uncancelled export, so a
+   * superseded job can never accumulate. A current message must arrive in sequence.
+   */
+  private handleExportStream(data: ExportChunkReply | ExportProgressReply): void {
+    const entry = this.pending.get(data.requestId)
+    const stream = entry?.stream ?? null
+    if (entry === undefined || stream === null || entry.operationId !== data.operationId) return
+    if (entry.cancelSent) return
+    if (data.type === 'exportProgress') {
+      this.deliverToSink(entry, () =>
+        stream.sink.progress(data.total === 0 ? 0 : data.completed / data.total),
+      )
+      return
+    }
+    if (data.sequence !== stream.nextSequence) {
+      this.protocolViolation('The worker sent export chunks out of order.')
+      return
+    }
+    stream.nextSequence += 1
+    stream.receivedBytes += data.bytes.byteLength
+    this.deliverToSink(entry, () => stream.sink.accept(data.bytes))
+  }
+
+  private deliverToSink(entry: PendingRequest, deliver: () => void): void {
+    try {
+      deliver()
+    } catch (error) {
+      const stream = entry.stream
+      if (stream !== null) stream.failure ??= asError(error)
+      this.requestCancel(entry)
     }
   }
 

@@ -5,7 +5,7 @@ import type { ClientEndpoint, ProcessingClient, RgbaImport } from './workerClien
 import { createWorkerHost } from './workerHost'
 import type { HostEndpoint, WorkerHost } from './workerHost'
 
-export const FAKE_STAGES = { sampling: 1, preview: 2, ready: 3, failed: 4 } as const
+export const FAKE_STAGES = { sampling: 1, preview: 2, ready: 3, failed: 4, encoding: 5 } as const
 
 export const PARAMS: PreviewParameters = {
   cellSize: 12,
@@ -61,12 +61,29 @@ export class FakeFrame implements EngineFrame {
   }
 }
 
+/** Bytes of the fake PNG chunk produced by advance `index`, as `[index, index]`. */
+export function fakeChunkBytes(index: number): Uint8Array {
+  return Uint8Array.of(index, index)
+}
+
+/** Concatenated bytes a complete fake export with `steps` advances must deliver. */
+export function fakePngBytes(steps: number): Uint8Array {
+  const parts: number[] = []
+  for (let index = 1; index <= steps; index += 1) {
+    if (index * 2 >= steps) parts.push(index, index)
+  }
+  parts.push(255)
+  return Uint8Array.from(parts)
+}
+
 export class FakeSession implements EngineSession {
   disposeCalls = 0
   freed = false
   advances = 0
   readonly budgets: number[] = []
   private original = false
+  private exporting = false
+  private pending: Uint8Array[] = []
 
   constructor(
     private readonly engine: FakeEngine,
@@ -78,9 +95,49 @@ export class FakeSession implements EngineSession {
   startPreview(generation: number): number {
     this.engine.log.push(`start:${generation}`)
     this.original = false
+    this.exporting = false
     this.engine.onStart?.(generation)
     this.advances = 0
     return FAKE_STAGES.sampling
+  }
+
+  startExport(generation: number): number {
+    this.engine.log.push(`export:${generation}`)
+    this.original = false
+    this.exporting = true
+    this.engine.onStart?.(generation)
+    this.advances = 0
+    this.pending = []
+    return FAKE_STAGES.sampling
+  }
+
+  drainExport(generation: number): Uint8Array[] {
+    if (!this.exporting) throw new Error('no_job')
+    this.engine.log.push(`drain:${generation}`)
+    const drained = this.pending
+    this.pending = []
+    return drained
+  }
+
+  finishExport(generation: number): Uint8Array[] {
+    if (!this.exporting) throw new Error('no_job')
+    if (this.advances < this.engine.steps) throw new Error('job_incomplete')
+    this.engine.log.push(`finishExport:${generation}`)
+    const last = Uint8Array.of(255)
+    this.engine.drainedBuffers.push(last.buffer)
+    this.pending.push(last)
+    this.exporting = false
+    const drained = this.pending
+    this.pending = []
+    return drained
+  }
+
+  progressCompleted(): number {
+    return Math.min(this.advances, this.engine.steps)
+  }
+
+  progressTotal(): number {
+    return this.engine.steps
   }
 
   startOriginalPreview(generation: number): number {
@@ -95,12 +152,40 @@ export class FakeSession implements EngineSession {
     this.advances += 1
     this.budgets.push(pixelBudget)
     this.engine.notifyAdvance()
+    this.engine.onAdvance?.(this.advances)
+    if (this.exporting) return this.advanceExport()
     if (this.advances >= this.engine.steps) return FAKE_STAGES.ready
     return this.advances * 2 >= this.engine.steps ? FAKE_STAGES.preview : FAKE_STAGES.sampling
   }
 
+  private advanceExport(): number {
+    if (this.engine.failExportAt === this.advances) {
+      this.exporting = false
+      throw Object.assign(new Error('The fake encoder failed.'), { code: 'encode_failed' })
+    }
+    const encoding = this.advances * 2 >= this.engine.steps
+    if (encoding) this.pending.push(this.chunk(this.advances))
+    if (this.advances >= this.engine.steps) return FAKE_STAGES.ready
+    return encoding ? FAKE_STAGES.encoding : FAKE_STAGES.sampling
+  }
+
+  /** Fresh chunk; a sub-view option places it inside a larger buffer to exercise copying. */
+  private chunk(index: number): Uint8Array {
+    const bytes = fakeChunkBytes(index)
+    if (!this.engine.subViewChunks) {
+      this.engine.drainedBuffers.push(bytes.buffer)
+      return bytes
+    }
+    const backing = new Uint8Array(bytes.byteLength + 4)
+    backing.set(bytes, 2)
+    this.engine.drainedBuffers.push(backing.buffer)
+    return backing.subarray(2, 2 + bytes.byteLength)
+  }
+
   cancel(generation: number): void {
     this.engine.log.push(`cancel:${generation}`)
+    this.exporting = false
+    this.pending = []
   }
 
   finish(generation: number): EngineFrame {
@@ -127,7 +212,12 @@ export class FakeEngine implements ProcessingEngine {
   readonly log: string[] = []
   readonly sessions: FakeSession[] = []
   readonly frames: FakeFrame[] = []
+  /** Backing buffers of sub-view chunks, so tests can check that they were copied. */
+  readonly drainedBuffers: ArrayBufferLike[] = []
   readonly steps: number
+  readonly subViewChunks: boolean
+  /** The advance index (1-based) whose export call throws `encode_failed`, or null. */
+  readonly failExportAt: number | null
   failNextCreate: string | null = null
   failNextEncoded: string | null = null
   encodedMetadata = { width: 2, height: 1, channels: 4 }
@@ -135,10 +225,20 @@ export class FakeEngine implements ProcessingEngine {
   readonly encodedInputs: number[] = []
   onEncodedCreate: (() => void) | null = null
   onStart: ((generation: number) => void) | null = null
+  /** Runs synchronously inside each advance, after its count is incremented. */
+  onAdvance: ((advance: number) => void) | null = null
   private waiters: Array<() => void> = []
 
-  constructor(options: { readonly steps?: number } = {}) {
+  constructor(
+    options: {
+      readonly steps?: number
+      readonly subViewChunks?: boolean
+      readonly failExportAt?: number
+    } = {},
+  ) {
     this.steps = options.steps ?? 3
+    this.subViewChunks = options.subViewChunks ?? false
+    this.failExportAt = options.failExportAt ?? null
   }
 
   createSession(width: number, height: number, pixels: Uint8Array): EngineSession {

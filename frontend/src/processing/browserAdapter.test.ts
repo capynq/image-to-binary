@@ -3,9 +3,12 @@ import { createBrowserProcessingAdapter, ExportUnavailableError } from './browse
 import type { BrowserAdapterOptions } from './browserAdapter'
 import { createDemoProcessingAdapter, UnsupportedPreviewKindError } from './demoAdapter'
 import type { JobContext, PreviewKind, ProcessingAdapter } from './types'
+import type { PreviewParameters } from './protocol'
 import { DEFAULT_SETTINGS } from './types'
 import type {
   EncodedImportSource,
+  ExportCompletion,
+  ExportSink,
   PreviewPixels,
   ProcessingClient,
   Releasable,
@@ -52,6 +55,16 @@ class FakeClient implements ProcessingClient {
     const image = typeof source === 'function' ? await source() : source
     this.encoded = { name: image.name, bytes: new Uint8Array(image.bytes) }
     return this.handleFor(image.name, 3, 2)
+  }
+
+  exportPng<T extends Releasable>(
+    _source: SourceHandle,
+    _parameters: PreviewParameters,
+    _operationId: number,
+    _sink: ExportSink,
+    _finalize: (completion: ExportCompletion) => T,
+  ): Promise<T> {
+    return Promise.reject(new Error('export is not faked in this suite'))
   }
 
   originalPreview<T extends Releasable>(
@@ -340,7 +353,7 @@ describe('browser processing adapter', () => {
     ).rejects.toThrow('does not belong')
   })
 
-  it('rejects export explicitly and never fabricates output', async () => {
+  it('rejects text export explicitly and routes PNG export through the client', async () => {
     const { adapter } = harness()
     const session = adapter.createSession()
     const { source } = await adapter.import(session, { kind: 'demo' }, context(1))
@@ -349,7 +362,7 @@ describe('browser processing adapter', () => {
     ).rejects.toBeInstanceOf(ExportUnavailableError)
     await expect(
       adapter.export(session, source, 'png', DEFAULT_SETTINGS, context(3)),
-    ).rejects.toBeInstanceOf(ExportUnavailableError)
+    ).rejects.toThrow('export is not faked')
   })
 
   it('reports a disposed session before export unavailability', async () => {
