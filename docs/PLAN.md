@@ -1548,6 +1548,76 @@ Completion checklist:
 - [ ] Cross-adapter parity passes.
 - [ ] Long-output memory behavior reviewed.
 
+Parent 6.3 keeps the scope and checklist above and stays incomplete until
+6.3.1 and 6.3.2 are both committed. The split adds no scope.
+
+Text format contract, shared by every adapter: UTF-8 with no BOM; LF only, never
+CR; exactly one line per grid row and `grid.width()` characters per line; every
+line, including the last, ends with one LF; no metadata of any kind; spaces are
+preserved exactly, including trailing spaces and all-space lines. Each character
+comes from `cell_glyph` over the same grid and options as PNG export, so tone,
+invert, threshold, mode, and ramp apply identically and color has no effect.
+Chunks are byte-level and may split a multi-byte character, so a consumer must
+concatenate bytes before decoding.
+
+#### 6.3.1 Add the text grid contract and task
+
+Objective: produce deterministic text rows and a resumable task that shares the
+PNG export lifecycle, with no change to the WASM JavaScript API or the UI.
+
+Ordered steps:
+
+1. Add `text_rows` with the same validation as `render_rows` and a batch ceiling.
+2. Extract the export lifecycle into one private generic core, with PNG and text
+   as its two row encoders, keeping `ArtworkPngTask` behavior unchanged.
+3. Add `ArtworkTextTask` over that core with bounded chunked output.
+
+Acceptance checks: exact bytes match the contract for every mode, multi-byte
+output survives one-byte chunks, and PNG output and lifecycle are unchanged.
+
+Proposed commit title: `feat: add deterministic text grid export task`
+
+Completion checklist:
+
+- [x] Exact-byte format tests pass for classic, ASCII, custom-ramp, and block.
+- [x] Refactored PNG task is byte-identical to the previous commit.
+- [x] Independent lifecycle and memory review passes.
+
+Validation: workspace tests pass (adapters 28, core 9, export 25, processing 101
+unit and 30 acceptance, wasm 32), plus 107 unit and 30 acceptance processing tests
+through the `heif` wrapper, with formatting, strict Clippy, and the WASM target
+check. Building the previous commit and this tree separately gave 128 identical
+PNG outputs across grids, modes, row budgets, and chunk sizes; a one-byte change
+altered all of them plus the aggregate. The review found the state machine, error
+variants, and release points unchanged; the only `ArtworkPngTask` test edit is one
+renamed test. Peak memory is one row batch plus undrained chunks; the row ceiling
+applies to the worst-case reservation, so a batch stays within it even for block
+output. Cancellation granularity is one row batch, at most 16 MiB of text. A
+single row over that ceiling is unreachable under the 50 MP cap.
+
+#### 6.3.2 Export text through the browser and native adapters
+
+Objective: offer UTF-8 text download and prove adapters agree byte for byte.
+
+Prerequisites: 3.4; 5.2 native export path; 6.3.1.
+
+Ordered steps:
+
+1. Pass a text output kind through the WASM session, worker protocol, and adapter.
+2. Add accessible text export and download controls alongside PNG.
+3. Compare browser and native text output byte for byte on shared fixtures.
+
+Acceptance checks: downloaded text matches the contract, uses the same grid as
+PNG, and is byte-identical across adapters for the same settings.
+
+Proposed commit title: `feat: export deterministic text grids`
+
+Completion checklist:
+
+- [ ] WASM and worker text parity pass.
+- [ ] Browser and native text are byte-identical on shared fixtures.
+- [ ] Real-browser text download passes.
+
 ### 7.1 Implement visual primitives
 
 Objective: build reusable accessible controls, canvas, inspector, metadata,

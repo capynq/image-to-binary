@@ -10,7 +10,8 @@ pub use decode::{decode, DecodeError, DecodeLimits, DecodedSource, NativeFormat}
 pub use original::{OriginalPreviewTask, ORIGINAL_PREVIEW_MAX_EDGE};
 pub use renderer::{
     cell_glyph, AspectGeometry, PreviewAdvance, PreviewTask, RenderError, RenderOptions,
-    RenderedFrame, Renderer, RendererCacheStats, MAX_RENDER_ROW_BYTES,
+    RenderedFrame, Renderer, RendererCacheStats, MAX_RENDER_ROW_BYTES, MAX_TEXT_GLYPH_BYTES,
+    MAX_TEXT_ROW_BYTES,
 };
 pub use sampling::{
     SampleCell, SampleGrid, Sampler, SamplerCacheStats, SamplingAdvance, SamplingPlan, SamplingTask,

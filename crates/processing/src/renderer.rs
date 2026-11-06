@@ -35,6 +35,17 @@ const BLOCK_LEVELS: [(char, u8); 5] = [
 /// the stricter of the two limits is enforced.
 pub const MAX_RENDER_ROW_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Maximum worst-case UTF-8 bytes one [`Renderer::text_rows`] call may reserve.
+///
+/// The stricter of this ceiling and [`RenderOptions::max_output_bytes`] applies.
+pub const MAX_TEXT_ROW_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Upper bound on the UTF-8 length of any character [`cell_glyph`] returns.
+///
+/// Printable ASCII ramps and binary digits take one byte; block characters take
+/// three. Batch sizing uses this bound so a batch never exceeds its byte ceiling.
+pub const MAX_TEXT_GLYPH_BYTES: usize = 3;
+
 /// Returns the checked RGBA8 byte size of a pixel region within both limits.
 fn checked_row_budget(
     width: u32,
@@ -175,6 +186,17 @@ pub fn cell_glyph(cell: SampleCell, options: &RenderOptions) -> char {
             BLOCK_LEVELS.get(index).map_or(' ', |(glyph, _)| *glyph)
         }
     }
+}
+
+/// Returns the worst-case UTF-8 bytes of one text row: every cell at the
+/// maximum glyph length plus its LF.
+fn text_row_bound(grid: &crate::SampleGrid) -> Result<u64, ContractError> {
+    let overflow = || ContractError::ArithmeticOverflow;
+    let glyph_bytes = u64::try_from(MAX_TEXT_GLYPH_BYTES).map_err(|_| overflow())?;
+    u64::from(grid.width())
+        .checked_mul(glyph_bytes)
+        .and_then(|bytes| bytes.checked_add(1))
+        .ok_or_else(overflow)
 }
 
 fn level_index(luma: usize, levels: usize) -> usize {
@@ -785,6 +807,74 @@ impl Renderer {
                 .checked_mul(tile.height)
                 .ok_or(ContractError::ArithmeticOverflow)?,
         ))
+    }
+
+    /// Renders grid rows `start..start + count` as UTF-8 text lines.
+    ///
+    /// Text format, which every adapter must reproduce byte for byte:
+    /// - UTF-8, no BOM, LF (0x0A) only, never CR.
+    /// - Exactly one line per grid row, exactly `grid.width()` characters per line.
+    /// - Every line, INCLUDING the last, ends with one LF. Output is never empty because grids are at least one cell.
+    /// - No metadata of any kind in the output: no header, dimensions, settings, or timestamp.
+    /// - Spaces are preserved exactly, including trailing spaces on a line and lines of only spaces. Nothing is trimmed.
+    /// - Each character comes from [`cell_glyph`] over the same grid and options as PNG export, so tone, invert, threshold, mode and ramp apply identically. Colour has no effect on text.
+    ///
+    /// The buffer is reserved once at the worst-case size, `grid.width()` times
+    /// [`MAX_TEXT_GLYPH_BYTES`] plus one LF per row, and that reservation may not
+    /// exceed [`MAX_TEXT_ROW_BYTES`] or `options.max_output_bytes`. Actual output
+    /// is never longer than the reservation and may be shorter for narrow glyphs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ContractError::InvalidDimensions`] for a zero `count` or a range
+    /// outside the grid, [`ContractError::ResourceLimitExceeded`] when the
+    /// worst-case reservation exceeds either limit or cannot be reserved, and
+    /// another contract error for invalid settings, grid geometry, or arithmetic
+    /// overflow.
+    pub fn text_rows(
+        &self,
+        grid: &crate::SampleGrid,
+        options: RenderOptions,
+        start: u32,
+        count: u32,
+    ) -> Result<Vec<u8>, RenderError> {
+        options.validate()?;
+        self.validate_grid(grid, options)?;
+        if count == 0 {
+            return Err(ContractError::InvalidDimensions.into());
+        }
+        let end = start
+            .checked_add(count)
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        if end > grid.height() {
+            return Err(ContractError::InvalidDimensions.into());
+        }
+        let row_bytes = text_row_bound(grid)?;
+        let worst_case = row_bytes
+            .checked_mul(u64::from(count))
+            .ok_or(ContractError::ArithmeticOverflow)?;
+        let ceiling = MAX_TEXT_ROW_BYTES.min(options.max_output_bytes);
+        if worst_case > ceiling {
+            return Err(ContractError::ResourceLimitExceeded.into());
+        }
+        let capacity =
+            usize::try_from(worst_case).map_err(|_| ContractError::ResourceLimitExceeded)?;
+        let mut text = Vec::new();
+        text.try_reserve_exact(capacity)
+            .map_err(|_| ContractError::ResourceLimitExceeded)?;
+        for row in start..end {
+            for column in 0..grid.width() {
+                let cell = grid
+                    .cell(column, row)
+                    .ok_or(ContractError::InvalidDimensions)?;
+                let mut utf8 = [0; 4];
+                text.extend_from_slice(
+                    cell_glyph(cell, &options).encode_utf8(&mut utf8).as_bytes(),
+                );
+            }
+            text.push(b'\n');
+        }
+        Ok(text)
     }
 
     fn tile_geometry(&self, options: RenderOptions) -> Result<TileGeometry, RenderError> {
@@ -2081,5 +2171,297 @@ mod tests {
             .pixels()
             .chunks_exact(4)
             .all(|pixel| pixel == [1, 2, 3, 255]));
+    }
+
+    fn text_options(sampling: Sampling, mode: RenderMode) -> RenderOptions {
+        RenderOptions {
+            cell_size: 5,
+            font_size: 30,
+            sampling,
+            mode,
+            ..RenderOptions::default()
+        }
+    }
+
+    fn text_grid(
+        columns: u32,
+        rows: u32,
+        sampling: Sampling,
+        luma: impl Fn(u32, u32) -> u8 + Send + Sync + 'static,
+    ) -> Arc<crate::SampleGrid> {
+        let cell_height = match sampling {
+            Sampling::Classic => 5,
+            Sampling::Average => u32::from(
+                Renderer::new()
+                    .unwrap()
+                    .aspect_geometry(5, 30)
+                    .unwrap()
+                    .source_cell_height,
+            ),
+        };
+        let source = source_pixels(columns * 5, rows * cell_height, move |x, y| {
+            let value = luma(x / 5, y / cell_height);
+            [value, value, value, 255]
+        });
+        let mut sampler = Sampler::new(source);
+        match sampling {
+            Sampling::Classic => sampler.sample(5, Sampling::Classic).unwrap(),
+            Sampling::Average => sampler.sample_average_rect(5, cell_height).unwrap(),
+        }
+    }
+
+    fn text_of(grid: &crate::SampleGrid, options: RenderOptions) -> Vec<u8> {
+        Renderer::new()
+            .unwrap()
+            .text_rows(grid, options, 0, grid.height())
+            .unwrap()
+    }
+
+    fn black_white_cells(pattern: &[&[u8]]) -> Arc<crate::SampleGrid> {
+        let rows = u32::try_from(pattern.len()).unwrap();
+        let columns = u32::try_from(pattern[0].len()).unwrap();
+        let cells: Vec<Vec<u8>> = pattern.iter().map(|row| row.to_vec()).collect();
+        let sampling = Sampling::Average;
+        text_grid(columns, rows, sampling, move |x, y| {
+            if cells[usize::try_from(y).unwrap()][usize::try_from(x).unwrap()] == b'w' {
+                255
+            } else {
+                0
+            }
+        })
+    }
+
+    #[test]
+    fn binary_text_matches_exact_bytes() {
+        let grid = black_white_cells(&[b"kwk", b"wkw"]);
+        let options = text_options(Sampling::Average, RenderMode::Binary);
+        assert_eq!(text_of(&grid, options), b"101\n010\n");
+    }
+
+    #[test]
+    fn ascii_default_ramp_text_matches_exact_bytes() {
+        let grid = black_white_cells(&[b"kwk", b"wkw"]);
+        let options = text_options(Sampling::Average, RenderMode::Ascii(Ramp::DEFAULT_ASCII));
+        assert_eq!(text_of(&grid, options), " @ \n@ @\n".as_bytes());
+    }
+
+    #[test]
+    fn ascii_custom_ramp_with_space_matches_exact_bytes() {
+        let grid = black_white_cells(&[b"kwk", b"wkw"]);
+        let ramp = Ramp::new(" .#").unwrap();
+        let options = text_options(Sampling::Average, RenderMode::Ascii(ramp));
+        assert_eq!(text_of(&grid, options), b" # \n# #\n");
+    }
+
+    #[test]
+    fn block_text_matches_exact_multibyte_bytes() {
+        let grid = black_white_cells(&[b"kwk", b"wkw"]);
+        let options = text_options(Sampling::Average, RenderMode::Block);
+        assert_eq!(
+            text_of(&grid, options),
+            " \u{2588} \n\u{2588} \u{2588}\n".as_bytes()
+        );
+
+        let levels = text_grid(5, 1, Sampling::Average, |x, _| {
+            [0, 64, 128, 191, 255][x as usize]
+        });
+        assert_eq!(
+            text_of(&levels, options),
+            " \u{2591}\u{2592}\u{2593}\u{2588}\n".as_bytes()
+        );
+    }
+
+    #[test]
+    fn trailing_and_all_space_lines_are_preserved() {
+        let grid = black_white_cells(&[b"kkk", b"wkk"]);
+        let options = text_options(Sampling::Average, RenderMode::Ascii(Ramp::DEFAULT_ASCII));
+        assert_eq!(text_of(&grid, options), b"   \n@  \n");
+    }
+
+    #[test]
+    fn text_is_valid_utf8_with_lf_only_and_grid_shape() {
+        let grid = text_grid(7, 5, Sampling::Average, |x, y| {
+            u8::try_from((x * 37 + y * 91) % 256).unwrap()
+        });
+        for mode in [
+            RenderMode::Binary,
+            RenderMode::Ascii(Ramp::DEFAULT_ASCII),
+            RenderMode::Block,
+        ] {
+            let bytes = text_of(&grid, text_options(Sampling::Average, mode));
+            assert!(!bytes.contains(&b'\r'));
+            assert!(!bytes.starts_with(&[0xEF, 0xBB, 0xBF]));
+            assert_eq!(bytes.last(), Some(&b'\n'));
+            let text = String::from_utf8(bytes).unwrap();
+            let lines: Vec<&str> = text.split('\n').collect();
+            assert_eq!(lines.len(), 6);
+            assert_eq!(lines[5], "");
+            for line in &lines[..5] {
+                assert_eq!(line.chars().count(), 7);
+            }
+        }
+    }
+
+    #[test]
+    fn every_character_is_the_cell_glyph_and_dimensions_agree() {
+        let grid = text_grid(4, 3, Sampling::Average, |x, y| {
+            u8::try_from((x * 70 + y * 20) % 256).unwrap()
+        });
+        let options = text_options(Sampling::Average, RenderMode::Block);
+        let renderer = Renderer::new().unwrap();
+        let text = String::from_utf8(text_of(&grid, options)).unwrap();
+        let mut characters = text.chars().filter(|character| *character != '\n');
+        for y in 0..grid.height() {
+            for x in 0..grid.width() {
+                let cell = grid.cell(x, y).unwrap();
+                assert_eq!(characters.next(), Some(cell_glyph(cell, &options)));
+            }
+        }
+        assert!(characters.next().is_none());
+        let geometry = renderer.aspect_geometry(5, 30).unwrap();
+        assert_eq!(
+            renderer.frame_dimensions(&grid, options).unwrap(),
+            (
+                grid.width() * u32::from(geometry.output_cell_width),
+                grid.height() * u32::from(geometry.output_cell_height),
+            )
+        );
+    }
+
+    #[test]
+    fn tone_and_threshold_change_text_while_colour_does_not() {
+        let darker = text_grid(2, 1, Sampling::Classic, |x, _| [100, 200][x as usize]);
+        let binary = text_options(Sampling::Classic, RenderMode::Binary);
+        assert_eq!(text_of(&darker, binary), b"10\n");
+
+        let inverted = RenderOptions {
+            style: RenderStyle {
+                invert: true,
+                ..RenderStyle::default()
+            },
+            ..binary
+        };
+        assert_eq!(text_of(&darker, inverted), b"01\n");
+
+        let raised = RenderOptions {
+            threshold: 100,
+            ..binary
+        };
+        assert_eq!(text_of(&darker, raised), b"00\n");
+
+        let flattened = RenderOptions {
+            style: RenderStyle {
+                contrast: -100,
+                ..RenderStyle::default()
+            },
+            ..binary
+        };
+        assert_eq!(text_of(&darker, flattened), b"00\n");
+
+        let recoloured = RenderOptions {
+            style: RenderStyle {
+                foreground: Rgb {
+                    red: 9,
+                    green: 9,
+                    blue: 9,
+                },
+                background: Rgb {
+                    red: 200,
+                    green: 0,
+                    blue: 0,
+                },
+                color: ColorMode::Source,
+                ..RenderStyle::default()
+            },
+            ..binary
+        };
+        assert_eq!(text_of(&darker, recoloured), b"10\n");
+    }
+
+    #[test]
+    fn text_batches_concatenate_to_the_full_text() {
+        let grid = text_grid(6, 7, Sampling::Average, |x, y| {
+            u8::try_from((x * 41 + y * 13) % 256).unwrap()
+        });
+        let options = text_options(Sampling::Average, RenderMode::Ascii(Ramp::DEFAULT_ASCII));
+        let renderer = Renderer::new().unwrap();
+        let full = renderer.text_rows(&grid, options, 0, 7).unwrap();
+        assert_eq!(full, text_of(&grid, options));
+        for batch in [1, 2, 3, 6] {
+            let mut joined = Vec::new();
+            let mut start = 0;
+            while start < 7 {
+                let count = batch.min(7 - start);
+                joined.extend(renderer.text_rows(&grid, options, start, count).unwrap());
+                start += count;
+            }
+            assert_eq!(joined, full, "batch {batch}");
+        }
+    }
+
+    #[test]
+    fn text_rows_reject_the_same_ranges_as_render_rows() {
+        let grid = text_grid(3, 4, Sampling::Average, |_, _| 128);
+        let options = text_options(Sampling::Average, RenderMode::Block);
+        let mut renderer = Renderer::new().unwrap();
+        for (start, count) in [(0, 0), (4, 1), (2, 3), (u32::MAX, 2)] {
+            let text = renderer
+                .text_rows(&grid, options, start, count)
+                .unwrap_err();
+            let rows = renderer
+                .render_rows(&grid, options, start, count)
+                .unwrap_err();
+            assert_eq!(format!("{text:?}"), format!("{rows:?}"), "{start}+{count}");
+        }
+        assert!(matches!(
+            renderer.text_rows(&grid, options, 0, 0),
+            Err(RenderError::Contract(ContractError::InvalidDimensions))
+        ));
+        assert!(matches!(
+            renderer.text_rows(&grid, options, u32::MAX, 2),
+            Err(RenderError::Contract(ContractError::ArithmeticOverflow))
+        ));
+    }
+
+    #[test]
+    fn text_batch_respects_the_output_ceiling() {
+        let grid = text_grid(3, 2, Sampling::Classic, |_, _| 0);
+        let tight = RenderOptions {
+            max_output_bytes: 19,
+            ..text_options(Sampling::Classic, RenderMode::Binary)
+        };
+        let renderer = Renderer::new().unwrap();
+        assert!(matches!(
+            renderer.text_rows(&grid, tight, 0, 2),
+            Err(RenderError::Contract(ContractError::ResourceLimitExceeded))
+        ));
+        let exact = RenderOptions {
+            max_output_bytes: 20,
+            ..tight
+        };
+        assert_eq!(
+            renderer.text_rows(&grid, exact, 0, 2).unwrap(),
+            b"111\n111\n"
+        );
+    }
+
+    #[test]
+    fn glyph_byte_bound_covers_every_mode() {
+        let printable: String = (0x20_u8..0x20 + 64).map(char::from).collect();
+        let ramp = Ramp::new(&printable).unwrap();
+        for luma in 0..=255_u8 {
+            for mode in [
+                RenderMode::Binary,
+                RenderMode::Ascii(ramp),
+                RenderMode::Block,
+            ] {
+                let options = RenderOptions {
+                    mode,
+                    ..RenderOptions::default()
+                };
+                let glyph = glyph_at(luma, &options);
+                assert!(glyph.len_utf8() <= MAX_TEXT_GLYPH_BYTES, "luma {luma}");
+            }
+        }
     }
 }

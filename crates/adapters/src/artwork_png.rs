@@ -1,158 +1,64 @@
-use std::fmt;
 use std::sync::Arc;
 
-use image_to_binary_core::{Cancellation, ContractError, Generation, Progress};
+use image_to_binary_core::{ContractError, Generation};
 use image_to_binary_export::{
-    browser_chunk_channel, BrowserChunkDrain, BrowserChunkWriter, ExportError, PngExportPlan,
-    PngStreamEncoder,
+    browser_chunk_channel, BrowserChunkWriter, PngExportPlan, PngStreamEncoder,
 };
-use image_to_binary_processing::{
-    RenderError, RenderOptions, Renderer, SampleGrid, MAX_RENDER_ROW_BYTES,
+use image_to_binary_processing::{RenderOptions, Renderer, SampleGrid, MAX_RENDER_ROW_BYTES};
+
+#[cfg(test)]
+use image_to_binary_core::Cancellation;
+
+#[cfg(test)]
+use crate::artwork_task::TaskState;
+use crate::artwork_task::{
+    export_error, ArtworkTask, PngTaskError, PngTaskLimits, RowEncoder, TaskSetup,
 };
 
-/// Failures returned by [`ArtworkPngTask`].
-#[derive(Debug)]
-pub enum PngTaskError {
-    /// A contract, cancellation, or generation check rejected the call.
-    Contract(ContractError),
-    /// Rendering a row batch failed.
-    Render(RenderError),
-    /// Encoding or browser chunk storage failed.
-    Export(ExportError),
-    /// A previous cancellation or failure already released the task.
-    Terminated,
-}
-
-impl fmt::Display for PngTaskError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Contract(error) => error.fmt(formatter),
-            Self::Render(error) => error.fmt(formatter),
-            Self::Export(error) => error.fmt(formatter),
-            Self::Terminated => formatter.write_str("PNG export task was already terminated"),
-        }
-    }
-}
-
-impl std::error::Error for PngTaskError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Contract(error) => Some(error),
-            Self::Render(error) => Some(error),
-            Self::Export(error) => Some(error),
-            Self::Terminated => None,
-        }
-    }
-}
-
-struct ActiveJob {
-    grid: Arc<SampleGrid>,
-    renderer: Renderer,
-    options: RenderOptions,
+/// Row encoder that streams RGBA8 pixel rows into a PNG encoder.
+pub struct PngRows {
     encoder: PngStreamEncoder<BrowserChunkWriter>,
-    drain: BrowserChunkDrain,
-    next_row: u32,
-    batch_rows: u32,
 }
 
-impl ActiveJob {
-    fn encode_rows(&mut self, progress: &mut Progress, mut rows: u64) -> Result<(), PngTaskError> {
-        while rows > 0 {
-            let batch = u32::try_from(rows.min(u64::from(self.batch_rows)))
-                .map_err(|_| PngTaskError::Contract(ContractError::ArithmeticOverflow))?;
-            let pixels = self
-                .renderer
-                .render_rows(&self.grid, self.options, self.next_row, batch)
-                .map_err(PngTaskError::Render)?;
-            self.encoder.write_rows(&pixels).map_err(export_error)?;
-            self.next_row = self
-                .next_row
-                .checked_add(batch)
-                .ok_or(PngTaskError::Contract(ContractError::ArithmeticOverflow))?;
-            progress
-                .advance(u64::from(batch))
-                .map_err(PngTaskError::Contract)?;
-            rows = rows
-                .checked_sub(u64::from(batch))
-                .ok_or(PngTaskError::Contract(ContractError::ArithmeticOverflow))?;
-        }
-        Ok(())
+impl RowEncoder for PngRows {
+    const TASK_NAME: &'static str = "ArtworkPngTask";
+    const FINISHED_REASON: &'static str = "finished PNG job";
+
+    fn write_rows(
+        &mut self,
+        renderer: &mut Renderer,
+        grid: &SampleGrid,
+        options: RenderOptions,
+        start: u32,
+        count: u32,
+    ) -> Result<(), PngTaskError> {
+        let pixels = renderer
+            .render_rows(grid, options, start, count)
+            .map_err(PngTaskError::Render)?;
+        self.encoder.write_rows(&pixels).map_err(export_error)
     }
-}
 
-enum TaskState {
-    Active(Box<ActiveJob>),
-    Finished,
-    Terminated(Option<ContractError>),
-}
-
-/// Output and storage ceilings for an [`ArtworkPngTask`].
-///
-/// `max_encoded_bytes` bounds the whole PNG, including header and trailer.
-/// `chunk_size` is the size of each completed chunk and must be in
-/// `1..=1 MiB`. `max_pending_bytes` bounds undrained chunk storage and must be
-/// at least `chunk_size`. Pending storage is not tied to the row budget, so it
-/// must hold everything one `advance` can emit, and it should exceed png's
-/// internal 4 KiB write granularity. A breach is terminal even if the caller
-/// drains between advances.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PngTaskLimits {
-    max_encoded_bytes: u64,
-    chunk_size: usize,
-    max_pending_bytes: u64,
-}
-
-impl PngTaskLimits {
-    /// Creates limits; [`ArtworkPngTask::new`] validates them.
-    #[must_use]
-    pub const fn new(max_encoded_bytes: u64, chunk_size: usize, max_pending_bytes: u64) -> Self {
-        Self {
-            max_encoded_bytes,
-            chunk_size,
-            max_pending_bytes,
-        }
+    fn finish_rows(self) -> Result<(), PngTaskError> {
+        self.encoder.finish().map_err(export_error)
     }
 }
 
 /// Owned resumable PNG export of one sampled artwork grid.
 ///
-/// Releasing the task (by dropping it, finishing it, or a terminal failure)
-/// releases the grid, renderer, encoder, and chunk storage.
-///
 /// Each advance renders at most its row budget of grid rows, converts them to
 /// RGBA8 pixel rows, and feeds them to a streaming PNG encoder whose output
-/// lands in browser chunk storage. Only one row batch of pixels is alive at a
-/// time, and a batch never exceeds [`MAX_RENDER_ROW_BYTES`] or the render
-/// options' output ceiling; larger spans are split internally.
+/// lands in browser chunk storage. A batch never exceeds [`MAX_RENDER_ROW_BYTES`]
+/// or the render options' output ceiling.
 ///
-/// Invariants: progress counts source-grid rows and never exceeds the grid
-/// height. A cancellation, stale generation, rendering failure, encoding
-/// failure, or sink failure is terminal: the encoder, the chunk storage,
-/// the renderer, and the grid are released, and later calls return the same
-/// contract error or [`PngTaskError::Terminated`]. Usage errors such as a zero
-/// budget or finishing before all rows are encoded leave the task unchanged.
-///
-/// Browser Blob accumulation retains encoded bytes, so the browser path is not
+/// Peak memory is one RGBA8 row batch, the undrained chunks held in pending
+/// storage (bounded by `max_pending_bytes`), and the grid. Browser Blob
+/// accumulation retains every encoded byte, so the browser path is not
 /// constant-memory; only the rendered frame is never retained whole. Encoding
 /// within one row batch is synchronous and cannot be preempted; cancellation
 /// takes effect at the next advance or finish boundary.
-pub struct ArtworkPngTask {
-    progress: Progress,
-    grid_row_pixels: u64,
-    cancellation: Cancellation,
-    state: TaskState,
-}
+pub type ArtworkPngTask = ArtworkTask<PngRows>;
 
-impl fmt::Debug for ArtworkPngTask {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ArtworkPngTask")
-            .field("progress", &self.progress)
-            .finish_non_exhaustive()
-    }
-}
-
-impl ArtworkPngTask {
+impl ArtworkTask<PngRows> {
     /// Creates a PNG export task for one generation over `grid`.
     ///
     /// The PNG header and browser chunk storage are reserved synchronously.
@@ -170,11 +76,7 @@ impl ArtworkPngTask {
         generation: Generation,
         limits: PngTaskLimits,
     ) -> Result<Self, PngTaskError> {
-        let PngTaskLimits {
-            max_encoded_bytes,
-            chunk_size,
-            max_pending_bytes,
-        } = limits;
+        let (max_encoded_bytes, chunk_size, max_pending_bytes) = limits.into_parts();
         let (frame_width, frame_height) = renderer
             .frame_dimensions(&grid, options)
             .map_err(PngTaskError::Render)?;
@@ -188,27 +90,18 @@ impl ArtworkPngTask {
         let (writer, drain) =
             browser_chunk_channel(chunk_size, max_pending_bytes).map_err(export_error)?;
         let encoder = plan.stream_encoder(writer).map_err(export_error)?;
-        let progress = Progress::new(u64::from(grid.height())).map_err(PngTaskError::Contract)?;
-        Ok(Self {
-            progress,
-            grid_row_pixels,
-            cancellation: Cancellation::new(generation),
-            state: TaskState::Active(Box::new(ActiveJob {
-                grid,
-                renderer,
-                options,
-                encoder,
+        Self::start(
+            grid,
+            renderer,
+            options,
+            generation,
+            TaskSetup {
+                encoder: PngRows { encoder },
                 drain,
-                next_row: 0,
                 batch_rows,
-            })),
-        })
-    }
-
-    /// Returns completed and total source-grid rows.
-    #[must_use]
-    pub const fn progress(&self) -> Progress {
-        self.progress
+                grid_row_units: grid_row_pixels,
+            },
+        )
     }
 
     /// Returns the output pixels one grid row contributes to the frame
@@ -216,132 +109,7 @@ impl ArtworkPngTask {
     /// convert a pixel budget into whole rows without dividing by zero.
     #[must_use]
     pub const fn pixels_per_grid_row(&self) -> u64 {
-        self.grid_row_pixels
-    }
-
-    /// Requests cancellation; the next boundary call releases the task.
-    pub fn cancel(&self) {
-        self.cancellation.cancel();
-    }
-
-    /// Renders and encodes at most `row_budget` grid rows.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ContractError::InvalidProgress`] for a zero budget without
-    /// changing state. Cancellation and stale generations are checked at entry
-    /// and exit; a failed check, render, encode, or sink operation makes the
-    /// task terminal.
-    pub fn advance(
-        &mut self,
-        generation: Generation,
-        row_budget: u64,
-    ) -> Result<Progress, PngTaskError> {
-        if row_budget == 0 {
-            return Err(PngTaskError::Contract(ContractError::InvalidProgress));
-        }
-        self.ensure_open()?;
-        if let Err(error) = self.cancellation.check(generation) {
-            return Err(self.fail(PngTaskError::Contract(error)));
-        }
-        let remaining = self
-            .progress
-            .total()
-            .checked_sub(self.progress.completed())
-            .ok_or(PngTaskError::Contract(ContractError::InvalidProgress))?;
-        let count = row_budget.min(remaining);
-        let result = match &mut self.state {
-            TaskState::Active(job) => job.encode_rows(&mut self.progress, count),
-            _ => Err(PngTaskError::Terminated),
-        };
-        let result = result.and_then(|()| {
-            self.cancellation
-                .check(generation)
-                .map_err(PngTaskError::Contract)
-        });
-        match result {
-            Ok(()) => Ok(self.progress),
-            Err(error) => Err(self.fail(error)),
-        }
-    }
-
-    /// Moves completed chunks out of storage; each chunk is returned once.
-    ///
-    /// # Errors
-    ///
-    /// Returns a terminal error after cancellation, after a poisoned chunk lock,
-    /// or when the task is finished or already terminated.
-    pub fn drain_chunks(&mut self) -> Result<Vec<Vec<u8>>, PngTaskError> {
-        self.ensure_open()?;
-        if self.cancellation.is_cancelled() {
-            return Err(self.fail(PngTaskError::Contract(ContractError::Cancelled)));
-        }
-        let result = match &self.state {
-            TaskState::Active(job) => job.drain.drain().map_err(export_error),
-            _ => Err(PngTaskError::Terminated),
-        };
-        result.map_err(|error| self.fail(error))
-    }
-
-    /// Finalizes the PNG exactly once and returns every remaining chunk.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ContractError::InvalidProgress`] when rows remain, without
-    /// changing state. A second finish returns [`ContractError::InvalidSettings`].
-    /// Cancellation, stale generations, and encoder or sink failures are
-    /// terminal.
-    pub fn finish(&mut self, generation: Generation) -> Result<Vec<Vec<u8>>, PngTaskError> {
-        self.ensure_open()?;
-        if let Err(error) = self.cancellation.check(generation) {
-            return Err(self.fail(PngTaskError::Contract(error)));
-        }
-        if self.progress.completed() != self.progress.total() {
-            return Err(PngTaskError::Contract(ContractError::InvalidProgress));
-        }
-        let job = match std::mem::replace(&mut self.state, TaskState::Finished) {
-            TaskState::Active(job) => *job,
-            other => {
-                self.state = other;
-                return Err(PngTaskError::Terminated);
-            }
-        };
-        let ActiveJob { encoder, drain, .. } = job;
-        let result = encoder
-            .finish()
-            .map_err(export_error)
-            .and_then(|()| drain.take_remaining().map_err(export_error));
-        match result {
-            Ok(chunks) => Ok(chunks),
-            Err(error) => Err(self.fail(error)),
-        }
-    }
-
-    fn ensure_open(&self) -> Result<(), PngTaskError> {
-        match &self.state {
-            TaskState::Active(_) => Ok(()),
-            TaskState::Finished => Err(PngTaskError::Contract(ContractError::InvalidSettings(
-                "finished PNG job",
-            ))),
-            TaskState::Terminated(Some(error)) => Err(PngTaskError::Contract(error.clone())),
-            TaskState::Terminated(None) => Err(PngTaskError::Terminated),
-        }
-    }
-
-    fn fail(&mut self, error: PngTaskError) -> PngTaskError {
-        let retained = match &error {
-            PngTaskError::Contract(contract) => Some(contract.clone()),
-            PngTaskError::Render(_) | PngTaskError::Export(_) | PngTaskError::Terminated => None,
-        };
-        self.state = TaskState::Terminated(retained);
-        error
-    }
-}
-
-fn export_error(error: ExportError) -> PngTaskError {
-    match error {
-        ExportError::Contract(contract) => PngTaskError::Contract(contract),
-        other => PngTaskError::Export(other),
+        self.grid_row_units()
     }
 }
 
@@ -699,7 +467,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_sink_is_terminal_and_replays_as_terminated() {
+    fn pending_limit_breach_is_terminal_and_replays_the_contract_error() {
         let grid = sampled(85, 61, Sampling::Classic, 8);
         let mut task = new_task(&grid, options(Sampling::Classic, 8), u64::MAX, 64);
         let mut failure = None;

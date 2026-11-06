@@ -4,8 +4,12 @@ use image_to_binary_core::ContractError;
 use image_to_binary_processing::Job;
 
 mod artwork_png;
+mod artwork_task;
+mod artwork_text;
 
-pub use artwork_png::{ArtworkPngTask, PngTaskError, PngTaskLimits};
+pub use artwork_png::ArtworkPngTask;
+pub use artwork_task::{PngTaskError, PngTaskLimits};
+pub use artwork_text::ArtworkTextTask;
 
 /// Adapter-owned session state; resources are released when the session drops.
 #[derive(Debug)]
