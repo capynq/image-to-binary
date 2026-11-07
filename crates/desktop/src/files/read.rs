@@ -247,6 +247,7 @@ mod tests {
         assert_eq!(error.code(), ErrorCode::EncodedTooLarge);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_path_swapped_to_a_directory_after_the_check_is_rejected() {
         let dir = TestDir::new("read-swap");
@@ -254,6 +255,18 @@ mod tests {
         let swapped = dir.path().to_path_buf();
         let error = open_regular_file_with(&file, 1024, move |_| File::open(&swapped)).unwrap_err();
         assert_eq!(error.code(), ErrorCode::InvalidArgument);
+    }
+
+    /* Windows refuses to open a directory without backup semantics, so the open step fails
+    before the handle check can run and the failure maps to the open error code. */
+    #[cfg(windows)]
+    #[test]
+    fn a_path_swapped_to_a_directory_that_the_os_will_not_open_is_rejected() {
+        let dir = TestDir::new("read-swap");
+        let file = dir.file("swap.png", b"regular at check time");
+        let swapped = dir.path().to_path_buf();
+        let error = open_regular_file_with(&file, 1024, move |_| File::open(&swapped)).unwrap_err();
+        assert_eq!(error.code(), ErrorCode::DecodeFailed);
     }
 
     #[cfg(unix)]

@@ -592,20 +592,23 @@ mod tests {
             ErrorCode::EncodedTooLarge
         );
 
-        let fifo = dir.path().join("pipe.png");
-        let made = std::process::Command::new("mkfifo")
-            .arg(&fifo)
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
-        if made {
-            let pipe = files.insert_source(fifo).unwrap();
-            assert_eq!(
-                import(&files, &slot, pipe).unwrap_err().code(),
-                ErrorCode::InvalidArgument
-            );
-        } else {
-            eprintln!("skipping the FIFO case: mkfifo is unavailable");
+        #[cfg(unix)]
+        {
+            let fifo = dir.path().join("pipe.png");
+            let made = std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false);
+            if made {
+                let pipe = files.insert_source(fifo).unwrap();
+                assert_eq!(
+                    import(&files, &slot, pipe).unwrap_err().code(),
+                    ErrorCode::InvalidArgument
+                );
+            } else {
+                eprintln!("skipping the FIFO case: mkfifo is unavailable");
+            }
         }
         assert!(slot.lock().is_none());
     }
