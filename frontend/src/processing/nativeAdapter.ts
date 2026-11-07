@@ -3,7 +3,6 @@ import { defaultUrlApi, isDemoFixture } from './demoAdapter'
 import type { NativeBridge, NativeChannel } from './nativeBridge'
 import { isCount, malformedReply, nativeError } from './nativeErrors'
 import { parsePreviewFrame } from './nativeFrame'
-import { samplingForMode } from './protocol'
 import { renderPreviewPng } from './previewRenderer'
 import type { PreviewRenderer } from './previewRenderer'
 import type {
@@ -23,7 +22,7 @@ import type {
   StudioSettings,
   UrlApi,
 } from './types'
-import { ExportCancelledError, validateSettings } from './types'
+import { ExportCancelledError, previewParametersOf, validateSettings } from './types'
 import { ProcessingWorkerError } from './workerClient'
 import type { PreviewPixels } from './workerClient'
 
@@ -267,7 +266,7 @@ export function createNativeProcessingAdapter(options: NativeAdapterOptions): Pr
           await state.pendingCancel
           body = await bridge.invoke('start_preview', {
             kind,
-            settings: kind === 'artwork' ? wireSettings(settings) : null,
+            settings: kind === 'artwork' ? previewParametersOf(settings) : null,
             generation,
             progress: progressChannel(generation, onProgress),
           })
@@ -320,7 +319,7 @@ export function createNativeProcessingAdapter(options: NativeAdapterOptions): Pr
         let reply: unknown
         try {
           reply = await bridge.invoke('export_png', {
-            settings: wireSettings(settings),
+            settings: previewParametersOf(settings),
             sinkId: sink.id,
             generation,
             progress: progressChannel(generation, onProgress),
@@ -368,17 +367,6 @@ function isNativeFile(input: ImportInput): input is NativeFileInput {
   return (
     typeof input === 'object' && input !== null && 'kind' in input && input.kind === 'native-file'
   )
-}
-
-function wireSettings(settings: StudioSettings) {
-  return {
-    cellSize: settings.cellSize,
-    fontSize: settings.fontSize,
-    threshold: settings.threshold,
-    sampling: samplingForMode(settings.mode),
-    mode: settings.mode,
-    ramp: settings.ramp,
-  }
 }
 
 function cancelledError(): ProcessingWorkerError {

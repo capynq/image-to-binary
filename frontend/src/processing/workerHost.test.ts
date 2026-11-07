@@ -63,6 +63,11 @@ function sendPreview(raw: RawHost, requestId: number, sourceId: number): void {
       sampling: 'classic',
       mode: 'binary',
       ramp: DEFAULT_RAMP,
+      foreground: '#00ff00',
+      background: '#000000',
+      colorMode: 'monochrome',
+      contrast: 0,
+      invert: false,
     },
   })
 }
@@ -345,6 +350,13 @@ describe('worker host render modes', () => {
     const engine = new FakeEngine()
     const raw = openHost(engine)
     await roundTrip(raw, () => sendImport(raw, 1))
+    const style = {
+      foreground: '#112233',
+      background: '#f0e0d0',
+      colorMode: 'source',
+      contrast: -40,
+      invert: true,
+    }
     const parameters = {
       cellSize: 12,
       fontSize: 16,
@@ -352,6 +364,7 @@ describe('worker host render modes', () => {
       sampling: 'average',
       mode: 'ascii',
       ramp: ' .#@',
+      ...style,
     }
     await roundTrip(raw, () =>
       raw.send({ type: 'preview', requestId: 2, operationId: 2, sourceId: 1, parameters }),
@@ -375,6 +388,7 @@ describe('worker host render modes', () => {
         sampling: 'average',
         mode: 'ascii',
         ramp: ' .#@',
+        ...style,
       },
       {
         kind: 'export',
@@ -385,6 +399,7 @@ describe('worker host render modes', () => {
         sampling: 'average',
         mode: 'block',
         ramp: DEFAULT_RAMP,
+        ...style,
       },
     ])
   })

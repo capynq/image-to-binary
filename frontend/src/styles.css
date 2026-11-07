@@ -737,3 +737,65 @@ a.button {
   font-size: 0.8rem;
   overflow-wrap: anywhere;
 }
+.style-fields {
+  min-width: 0;
+}
+.colour-field {
+  margin-top: 4px;
+}
+.colour-controls {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+.colour-picker,
+.colour-hex {
+  min-width: 0;
+}
+.colour-picker .field-label,
+.colour-hex .field-label {
+  display: block;
+}
+.colour-input {
+  display: block;
+  width: 56px;
+  min-height: 44px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel);
+  cursor: pointer;
+}
+.choice-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.check-row {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 10px;
+  margin-top: 17px;
+  color: var(--text);
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.check-row input[type='checkbox'] {
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+.check-row:has(input:focus-visible) {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.range-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+}

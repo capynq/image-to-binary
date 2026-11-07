@@ -120,6 +120,11 @@ describe('controller paired previews', () => {
       threshold: 128,
       mode: 'binary' as const,
       ramp: DEFAULT_RAMP,
+      foreground: '#00ff00',
+      background: '#000000',
+      colorMode: 'monochrome',
+      contrast: 0,
+      invert: false,
     })
     controller.updateSettings({
       cellSize: 15,
@@ -127,6 +132,11 @@ describe('controller paired previews', () => {
       threshold: 128,
       mode: 'binary' as const,
       ramp: DEFAULT_RAMP,
+      foreground: '#00ff00',
+      background: '#000000',
+      colorMode: 'monochrome',
+      contrast: 0,
+      invert: false,
     })
     expect(h.revoked).toEqual(['blob:artwork-2'])
     expect(controller.getSnapshot().preview).toBeNull()

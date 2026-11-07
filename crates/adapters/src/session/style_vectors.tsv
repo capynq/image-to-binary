@@ -1,0 +1,36 @@
+kind	name	expected	value
+foreground	upper_case	ok	#FF8000
+foreground	lower_case	ok	#ff8000
+foreground	mixed_case	ok	#0a0B0c
+foreground	black	ok	#000000
+foreground	white	ok	#FFFFFF
+foreground	empty	foreground must be a #RRGGBB colour	
+foreground	hash_only	foreground must be a #RRGGBB colour	#
+foreground	shorthand	foreground must be a #RRGGBB colour	#fff
+foreground	no_hash	foreground must be a #RRGGBB colour	ff8000
+foreground	seven_digits	foreground must be a #RRGGBB colour	#ff80000
+foreground	non_hex_digit	foreground must be a #RRGGBB colour	#ff800g
+foreground	inner_space	foreground must be a #RRGGBB colour	#ff 800
+foreground	trailing_space	foreground must be a #RRGGBB colour	#ff8000 
+foreground	leading_space	foreground must be a #RRGGBB colour	 #ff8000
+foreground	function_form	foreground must be a #RRGGBB colour	rgb(0,0,0)
+background	lower_case	ok	#102040
+background	upper_case	ok	#AABBCC
+background	short	background must be a #RRGGBB colour	#10204
+background	no_hash	background must be a #RRGGBB colour	102040
+contrast	min	ok	-100
+contrast	negative_one	ok	-1
+contrast	zero	ok	0
+contrast	negative_zero	ok	-0
+contrast	one	ok	1
+contrast	max	ok	100
+contrast	below_min	contrast must be between -100 and 100	-101
+contrast	above_max	contrast must be between -100 and 100	101
+contrast	two_pow_53	contrast must be between -100 and 100	9007199254740992
+contrast	two_pow_53_plus_one	contrast must be between -100 and 100	9007199254740993
+contrast	one_e300	contrast must be between -100 and 100	1e300
+contrast	minus_one_e300	contrast must be between -100 and 100	-1e300
+contrast	fraction	contrast must be an integer	1.5
+contrast	nan	contrast must be an integer	NaN
+contrast	infinity	contrast must be an integer	Infinity
+contrast	minus_infinity	contrast must be an integer	-Infinity

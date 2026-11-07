@@ -1,8 +1,8 @@
 //! End-to-end phases of the smoke run. The real studio UI, running in the webview, drives import,
 //! preview, export, cancel and reset through its own buttons. The driver supplies only what a
 //! person would supply through the OS: dialog answers, which the smoke build queues as fixture
-//! paths, and window drag events. Exported bytes are compared with the browser reference files
-//! that `scratchpad` preparation extracts from `.local/wasm/reference.json`.
+//! paths, and window drag events. Exported bytes are compared with the reference files that the
+//! `reference_fixtures` example writes. Its command is documented on [`Assets`].
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -36,10 +36,19 @@ const MODE_RAMP: &str = " .oO@";
 const MODE_PREVIEW_BYTES: usize = 66 * 52 * 4;
 /// Byte length of the ASCII PNG export reference from the `ascii_custom` entry.
 const MODE_EXPORT_BYTES: usize = 5_282;
+/// Artwork preview size of the 64x40 fixture at cell 6 in classic binary, from the
+/// `mono_custom_colours` style entry.
+const STYLE_PREVIEW_SIZE: (u64, u64) = (60, 36);
+/// RGBA8 bytes of the styled preview: 60 × 36 × 4.
+const STYLE_PREVIEW_BYTES: usize = 60 * 36 * 4;
+/// Byte length of the styled PNG export reference from the `mono_custom_colours` entry.
+const STYLE_EXPORT_BYTES: usize = 9_986;
 const REJECTED_DROP_MESSAGE: &str =
     "Choose one image at a time. 2 files were selected, so nothing was changed.";
 
-/// Fixture and reference files, all prepared outside the repository.
+/// Fixture and reference files. `reference_fixtures` writes all of them into a directory:
+/// `cargo run -p image-to-binary-processing --example reference_fixtures -- <json> <ui.rgba> <dir>`.
+/// `run` fails the check when any file is missing or empty.
 struct Assets {
     png: PathBuf,
     png_export: PathBuf,
@@ -49,6 +58,8 @@ struct Assets {
     mode: PathBuf,
     mode_preview: PathBuf,
     mode_export: PathBuf,
+    style_preview: PathBuf,
+    style_export: PathBuf,
 }
 
 impl Assets {
@@ -62,6 +73,8 @@ impl Assets {
             mode: dir.join("mode64x40.png"),
             mode_preview: dir.join("mode64x40.ascii-custom.preview.rgba"),
             mode_export: dir.join("mode64x40.ascii-custom.export.png"),
+            style_preview: dir.join("style64x40.mono_custom_colours.preview.rgba"),
+            style_export: dir.join("style64x40.mono_custom_colours.export.png"),
         };
         let empty: Vec<String> = [
             &assets.png,
@@ -72,6 +85,8 @@ impl Assets {
             &assets.mode,
             &assets.mode_preview,
             &assets.mode_export,
+            &assets.style_preview,
+            &assets.style_export,
         ]
         .into_iter()
         .filter(|path| !fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.len() > 0))
@@ -89,6 +104,8 @@ impl Assets {
             &assets.mode,
             &assets.mode_preview,
             &assets.mode_export,
+            &assets.style_preview,
+            &assets.style_export,
         ]
         .into_iter()
         .filter(|path| !path.is_file())
@@ -211,6 +228,7 @@ fn check_main(recorder: &mut Recorder, main: &Value, assets: &Assets, scratch: &
     );
 
     check_mode(recorder, main, assets, scratch);
+    check_style(recorder, main, assets, scratch);
 
     let demo_metadata = text(&main["demo"], "metadata");
     let demo_preview = &main["demo"]["preview"];
@@ -311,6 +329,54 @@ fn check_mode(recorder: &mut Recorder, main: &Value, assets: &Assets, scratch: &
     );
 }
 
+/// The styled phase sets foreground and background colours in the studio and renders classic
+/// binary output. Its preview and PNG must equal the independently rendered `mono_custom_colours`
+/// reference, and every length is checked against the reference size.
+fn check_style(recorder: &mut Recorder, main: &Value, assets: &Assets, scratch: &Path) {
+    let style = &main["style"];
+    let preview = &style["preview"];
+    let expected_preview = read(&assets.style_preview);
+    let preview_size = (number(&preview["width"]), number(&preview["height"]));
+    let preview_pixels = bytes_of(&preview["rgba"]);
+    recorder.check(
+        "e2e_style_controls_applied_in_the_studio",
+        text(style, "foreground") == "#ff8000"
+            && text(style, "background") == "#102040"
+            && text(style, "colorMode") == "monochrome",
+        format!(
+            "foreground {:?}, background {:?}, colour mode {:?}",
+            text(style, "foreground"),
+            text(style, "background"),
+            text(style, "colorMode")
+        ),
+    );
+    recorder.check(
+        "e2e_styled_preview_matches_native_reference",
+        preview_size == STYLE_PREVIEW_SIZE
+            && preview_pixels.len() == STYLE_PREVIEW_BYTES
+            && expected_preview.len() == STYLE_PREVIEW_BYTES
+            && preview_pixels == expected_preview,
+        format!(
+            "size {preview_size:?}, {} bytes compared with {} reference bytes",
+            preview_pixels.len(),
+            expected_preview.len()
+        ),
+    );
+    let status = text(style, "exportStatus");
+    let exported = read(&scratch.join("style-mono.png"));
+    recorder.check(
+        "e2e_styled_export_matches_native_reference",
+        status.starts_with("Saved style-mono.png")
+            && exported.len() == STYLE_EXPORT_BYTES
+            && exported == read(&assets.style_export),
+        format!(
+            "status {status:?}; {} bytes against {} reference bytes",
+            exported.len(),
+            read(&assets.style_export).len()
+        ),
+    );
+}
+
 fn check_cancel_and_outputs(recorder: &mut Recorder, main: &Value, scratch: &Path) {
     let cancel_status = text(&main["cancel"], "status");
     recorder.check(
@@ -350,7 +416,7 @@ fn check_cancel_and_outputs(recorder: &mut Recorder, main: &Value, scratch: &Pat
                 .collect()
         })
         .unwrap_or_default();
-    let expected: BTreeSet<String> = ["png.png", "large.png", "mode-ascii.png"]
+    let expected: BTreeSet<String> = ["png.png", "large.png", "mode-ascii.png", "style-mono.png"]
         .into_iter()
         .map(str::to_owned)
         .collect();

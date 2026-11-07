@@ -9,7 +9,7 @@
 mod error;
 mod numbers;
 
-use image_to_binary_adapters::session::args::{self, TextArg};
+use image_to_binary_adapters::session::args::{self, BoolArg, StyleArgs, TextArg};
 use image_to_binary_adapters::session::{EncodedPlan, Frame, JobKind, Session, SourcePlan, Stage};
 use image_to_binary_core::Generation;
 use js_sys::{Error as JsError, Reflect, Uint8Array};
@@ -110,6 +110,59 @@ impl OwnedText {
     }
 }
 
+/// Optional style values as JS passed them, read after the mode and ramp. `undefined` and `null`
+/// are absent, so callers that omit every trailing argument keep the classic output.
+struct StyleInputs<'a> {
+    foreground: &'a JsValue,
+    background: &'a JsValue,
+    color_mode: &'a JsValue,
+    contrast: &'a JsValue,
+    invert: &'a JsValue,
+}
+
+impl StyleInputs<'_> {
+    fn owned(&self) -> OwnedStyle {
+        OwnedStyle {
+            foreground: OwnedText::of(self.foreground),
+            background: OwnedText::of(self.background),
+            color_mode: OwnedText::of(self.color_mode),
+            contrast: if self.contrast.is_undefined() || self.contrast.is_null() {
+                None
+            } else {
+                Some(number(self.contrast))
+            },
+            invert: if self.invert.is_undefined() || self.invert.is_null() {
+                BoolArg::Absent
+            } else {
+                self.invert
+                    .as_bool()
+                    .map_or(BoolArg::NotBool, BoolArg::Value)
+            },
+        }
+    }
+}
+
+/// Owned copy of [`StyleInputs`] that lends the borrowed [`StyleArgs`] for one call.
+struct OwnedStyle {
+    foreground: OwnedText,
+    background: OwnedText,
+    color_mode: OwnedText,
+    contrast: Option<f64>,
+    invert: BoolArg,
+}
+
+impl OwnedStyle {
+    fn args(&self) -> StyleArgs<'_> {
+        StyleArgs {
+            foreground: self.foreground.arg(),
+            background: self.background.arg(),
+            color_mode: self.color_mode.arg(),
+            contrast: self.contrast,
+            invert: self.invert,
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn start_job(
     session: &mut Session,
@@ -121,18 +174,21 @@ fn start_job(
     sampling: &JsValue,
     mode: &JsValue,
     ramp: &JsValue,
+    style: &StyleInputs<'_>,
 ) -> Result<Stage, BindingError> {
     let generation = generation_of(session, generation)?;
     let sampling = sampling.as_string();
     let mode = OwnedText::of(mode);
     let ramp = OwnedText::of(ramp);
-    let settings = args::preview_settings(
+    let style = style.owned();
+    let settings = args::preview_settings_styled(
         number(cell_size),
         number(font_size),
         number(threshold),
         sampling.as_deref(),
         mode.arg(),
         ramp.arg(),
+        style.args(),
     )
     .map_err(BindingError::from)?;
     match kind {
@@ -343,6 +399,12 @@ impl ImageSession {
         #[wasm_bindgen(unchecked_param_type = "\"binary\" | \"ascii\" | \"block\" | undefined")]
         mode: &JsValue,
         #[wasm_bindgen(unchecked_param_type = "string | undefined")] ramp: &JsValue,
+        #[wasm_bindgen(unchecked_param_type = "string | undefined")] foreground: &JsValue,
+        #[wasm_bindgen(unchecked_param_type = "string | undefined")] background: &JsValue,
+        #[wasm_bindgen(unchecked_param_type = "\"monochrome\" | \"source\" | undefined")]
+        color_mode: &JsValue,
+        #[wasm_bindgen(unchecked_param_type = "number | undefined")] contrast: &JsValue,
+        #[wasm_bindgen(unchecked_param_type = "boolean | undefined")] invert: &JsValue,
     ) -> Result<JobStage, JsValue> {
         lift(start_job(
             &mut self.inner,
@@ -354,6 +416,13 @@ impl ImageSession {
             sampling,
             mode,
             ramp,
+            &StyleInputs {
+                foreground,
+                background,
+                color_mode,
+                contrast,
+                invert,
+            },
         ))
         .map(JobStage::from)
     }
@@ -492,6 +561,12 @@ impl ImageSession {
         #[wasm_bindgen(unchecked_param_type = "\"binary\" | \"ascii\" | \"block\" | undefined")]
         mode: &JsValue,
         #[wasm_bindgen(unchecked_param_type = "string | undefined")] ramp: &JsValue,
+        #[wasm_bindgen(unchecked_param_type = "string | undefined")] foreground: &JsValue,
+        #[wasm_bindgen(unchecked_param_type = "string | undefined")] background: &JsValue,
+        #[wasm_bindgen(unchecked_param_type = "\"monochrome\" | \"source\" | undefined")]
+        color_mode: &JsValue,
+        #[wasm_bindgen(unchecked_param_type = "number | undefined")] contrast: &JsValue,
+        #[wasm_bindgen(unchecked_param_type = "boolean | undefined")] invert: &JsValue,
     ) -> Result<JobStage, JsValue> {
         lift(start_job(
             &mut self.inner,
@@ -503,6 +578,13 @@ impl ImageSession {
             sampling,
             mode,
             ramp,
+            &StyleInputs {
+                foreground,
+                background,
+                color_mode,
+                contrast,
+                invert,
+            },
         ))
         .map(JobStage::from)
     }

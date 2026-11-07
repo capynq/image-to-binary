@@ -5,9 +5,10 @@
 //! the first failure, so both shells return the same code and text for the same input.
 
 use image_to_binary_core::{
-    Generation, Ramp, RenderMode, Sampling, MAX_CELL_SIZE, MAX_FONT_SIZE, MAX_RAMP_LENGTH,
-    MAX_THRESHOLD, MIN_CELL_SIZE, MIN_FONT_SIZE, MIN_THRESHOLD,
+    Generation, Ramp, RenderMode, Sampling, MAX_CELL_SIZE, MAX_CONTRAST, MAX_FONT_SIZE,
+    MAX_RAMP_LENGTH, MAX_THRESHOLD, MIN_CELL_SIZE, MIN_CONTRAST, MIN_FONT_SIZE, MIN_THRESHOLD,
 };
+use image_to_binary_processing::{ColorMode, RenderStyle, Rgb};
 
 use super::error::{ErrorCode, SessionError};
 use super::plan::SourcePlan;
@@ -108,6 +109,58 @@ pub const RAMP_NOT_PRINTABLE_MESSAGE: &str = "ramp must contain only printable A
 /// Failure text for a ramp longer than `MAX_RAMP_LENGTH`. The browser pins the same text.
 pub const RAMP_TOO_LONG_MESSAGE: &str = "ramp must be at most 64 characters";
 
+/// Failure text for a colour that is not `#RRGGBB`. The browser pins the same text.
+pub const FOREGROUND_MESSAGE: &str = "foreground must be a #RRGGBB colour";
+/// Failure text for a background that is not `#RRGGBB`. The browser pins the same text.
+pub const BACKGROUND_MESSAGE: &str = "background must be a #RRGGBB colour";
+/// Failure text for a colour mode other than `monochrome` or `source`. The browser pins the same text.
+pub const COLOR_MODE_MESSAGE: &str = "colorMode must be \"monochrome\" or \"source\"";
+/// Failure text for a contrast outside the shared bounds. The browser pins the same text.
+pub const CONTRAST_RANGE_MESSAGE: &str = "contrast must be between -100 and 100";
+/// Failure text for a contrast that is not an integer. The browser pins the same text.
+pub const CONTRAST_INTEGER_MESSAGE: &str = "contrast must be an integer";
+/// Failure text for an invert value that is not a boolean. The browser pins the same text.
+pub const INVERT_BOOLEAN_MESSAGE: &str = "invert must be a boolean";
+
+/// A boolean argument as the shells receive it, mirroring [`TextArg`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BoolArg {
+    /// The argument was omitted or sent as `undefined` or `null`.
+    Absent,
+    /// The argument is a boolean.
+    Value(bool),
+    /// The argument has a non-boolean type.
+    NotBool,
+}
+
+/// Optional render style arguments, read after the mode and ramp. Every field defaults to the
+/// shared [`RenderStyle::default`], so an empty `StyleArgs` reproduces the classic output.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StyleArgs<'a> {
+    /// `#RRGGBB` foreground, or absent for the default.
+    pub foreground: TextArg<'a>,
+    /// `#RRGGBB` background, or absent for the default.
+    pub background: TextArg<'a>,
+    /// `monochrome` or `source`, or absent for `monochrome`.
+    pub color_mode: TextArg<'a>,
+    /// Contrast percent as a JS number, or `None` for `0`. Non-numbers arrive as `NaN`.
+    pub contrast: Option<f64>,
+    /// Invert flag, or absent for `false`.
+    pub invert: BoolArg,
+}
+
+impl Default for StyleArgs<'_> {
+    fn default() -> Self {
+        Self {
+            foreground: TextArg::Absent,
+            background: TextArg::Absent,
+            color_mode: TextArg::Absent,
+            contrast: None,
+            invert: BoolArg::Absent,
+        }
+    }
+}
+
 /// Validates preview settings in the browser's order: sampling first, then cell size, font size
 /// and threshold, each converted and range-checked before the next is read. Mode and ramp follow:
 /// the mode name, then the ramp, then the mode's sampling requirement.
@@ -129,6 +182,36 @@ pub fn preview_settings(
     sampling: Option<&str>,
     mode: TextArg<'_>,
     ramp: TextArg<'_>,
+) -> Result<PreviewSettings, SessionError> {
+    preview_settings_styled(
+        cell_size,
+        font_size,
+        threshold,
+        sampling,
+        mode,
+        ramp,
+        StyleArgs::default(),
+    )
+}
+
+/// Validates preview settings and the render style in one path. The style is checked after the
+/// mode and its sampling requirement, in this order: foreground, background, colour mode,
+/// contrast, invert. Each value is converted and range-checked before the next is read.
+///
+/// # Errors
+///
+/// Returns the errors of [`preview_settings`] and, for the style, `invalid_argument` for a
+/// non-string colour or colour mode, a non-integer contrast or a non-boolean invert, and
+/// `invalid_settings` for a malformed colour, an unknown colour mode or a contrast outside
+/// `MIN_CONTRAST..=MAX_CONTRAST`.
+pub fn preview_settings_styled(
+    cell_size: f64,
+    font_size: f64,
+    threshold: f64,
+    sampling: Option<&str>,
+    mode: TextArg<'_>,
+    ramp: TextArg<'_>,
+    style: StyleArgs<'_>,
 ) -> Result<PreviewSettings, SessionError> {
     let sampling = match sampling {
         Some("classic") => Sampling::Classic,
@@ -156,7 +239,112 @@ pub fn preview_settings(
             message: "ascii and block modes require average sampling".to_owned(),
         });
     }
-    PreviewSettings::new(cell_size, font_size, threshold, sampling)?.with_mode(mode)
+    let style = render_style(style)?;
+    PreviewSettings::new(cell_size, font_size, threshold, sampling)?
+        .with_mode(mode)?
+        .with_style(style)
+}
+
+/// Converts the style arguments in the order the browser contract defines.
+fn render_style(style: StyleArgs<'_>) -> Result<RenderStyle, SessionError> {
+    let defaults = RenderStyle::default();
+    let foreground = colour_argument(style.foreground, "foreground", FOREGROUND_MESSAGE)?
+        .unwrap_or(defaults.foreground);
+    let background = colour_argument(style.background, "background", BACKGROUND_MESSAGE)?
+        .unwrap_or(defaults.background);
+    let color = match style.color_mode {
+        TextArg::Absent | TextArg::Text("monochrome") => ColorMode::Monochrome,
+        TextArg::Text("source") => ColorMode::Source,
+        TextArg::Text(_) => {
+            return Err(SessionError::Argument {
+                code: ErrorCode::InvalidSettings,
+                message: COLOR_MODE_MESSAGE.to_owned(),
+            })
+        }
+        TextArg::NotText => {
+            return Err(SessionError::Argument {
+                code: ErrorCode::InvalidArgument,
+                message: "colorMode must be a string".to_owned(),
+            })
+        }
+    };
+    let contrast = contrast_argument(style.contrast)?;
+    let invert = match style.invert {
+        BoolArg::Absent => false,
+        BoolArg::Value(value) => value,
+        BoolArg::NotBool => {
+            return Err(SessionError::Argument {
+                code: ErrorCode::InvalidArgument,
+                message: INVERT_BOOLEAN_MESSAGE.to_owned(),
+            })
+        }
+    };
+    Ok(RenderStyle {
+        foreground,
+        background,
+        color,
+        contrast,
+        invert,
+    })
+}
+
+/// Converts an optional colour. A missing value is `None`; a supplied value must be a string
+/// holding `#RRGGBB`, with either hex case.
+fn colour_argument(
+    value: TextArg<'_>,
+    name: &str,
+    message: &str,
+) -> Result<Option<Rgb>, SessionError> {
+    match value {
+        TextArg::Absent => Ok(None),
+        TextArg::Text(text) => parse_colour(text)
+            .map(Some)
+            .ok_or_else(|| SessionError::Argument {
+                code: ErrorCode::InvalidSettings,
+                message: message.to_owned(),
+            }),
+        TextArg::NotText => Err(SessionError::Argument {
+            code: ErrorCode::InvalidArgument,
+            message: format!("{name} must be a string"),
+        }),
+    }
+}
+
+/// Parses `#RRGGBB` with either hex case, returning `None` for any other text.
+#[must_use]
+pub fn parse_colour(text: &str) -> Option<Rgb> {
+    let digits = text.strip_prefix('#')?;
+    if digits.len() != 6 || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let channel = |index: usize| u8::from_str_radix(&digits[index..index + 2], 16).ok();
+    Some(Rgb {
+        red: channel(0)?,
+        green: channel(2)?,
+        blue: channel(4)?,
+    })
+}
+
+/// Converts the contrast argument. An absent value is `0`; otherwise it must be an integer
+/// within the shared bounds.
+fn contrast_argument(value: Option<f64>) -> Result<i8, SessionError> {
+    let Some(value) = value else {
+        return Ok(0);
+    };
+    if !value.is_finite() || value.fract() != 0.0 {
+        return Err(SessionError::Argument {
+            code: ErrorCode::InvalidArgument,
+            message: CONTRAST_INTEGER_MESSAGE.to_owned(),
+        });
+    }
+    if value < f64::from(MIN_CONTRAST) || value > f64::from(MAX_CONTRAST) {
+        return Err(SessionError::Argument {
+            code: ErrorCode::InvalidSettings,
+            message: CONTRAST_RANGE_MESSAGE.to_owned(),
+        });
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    Ok(value as i8)
 }
 
 /// Converts the mode name and, for `ascii`, the ramp, in that order.
@@ -237,7 +425,7 @@ pub fn source_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image_to_binary_core::MAX_RAMP_LENGTH;
+    use image_to_binary_core::{MAX_CONTRAST, MAX_RAMP_LENGTH, MIN_CONTRAST};
 
     fn code<T: std::fmt::Debug>(result: Result<T, SessionError>) -> ErrorCode {
         result.unwrap_err().code()
@@ -245,6 +433,10 @@ mod tests {
 
     fn text<T: std::fmt::Debug>(result: Result<T, SessionError>) -> String {
         result.unwrap_err().message()
+    }
+
+    fn text_of<T: std::fmt::Debug>(result: Result<T, SessionError>) -> String {
+        text(result)
     }
 
     #[test]
@@ -635,5 +827,215 @@ mod tests {
             TextArg::Text("#"),
         )
         .is_ok());
+    }
+
+    fn styled(style: StyleArgs<'_>) -> Result<PreviewSettings, SessionError> {
+        preview_settings_styled(
+            5.0,
+            10.0,
+            128.0,
+            Some("average"),
+            TextArg::Text("block"),
+            TextArg::Absent,
+            style,
+        )
+    }
+
+    fn style_of(style: StyleArgs<'_>) -> RenderStyle {
+        styled(style).unwrap().style()
+    }
+
+    #[test]
+    fn an_empty_style_is_the_shared_default() {
+        assert_eq!(style_of(StyleArgs::default()), RenderStyle::default());
+        assert_eq!(
+            preview_settings(
+                5.0,
+                10.0,
+                128.0,
+                Some("classic"),
+                TextArg::Absent,
+                TextArg::Absent
+            )
+            .unwrap()
+            .style(),
+            RenderStyle::default()
+        );
+    }
+
+    #[test]
+    fn colours_parse_as_hex_in_either_case() {
+        let style = style_of(StyleArgs {
+            foreground: TextArg::Text("#FF8000"),
+            background: TextArg::Text("#0a0B0c"),
+            ..StyleArgs::default()
+        });
+        assert_eq!(
+            style.foreground,
+            Rgb {
+                red: 255,
+                green: 128,
+                blue: 0
+            }
+        );
+        assert_eq!(
+            style.background,
+            Rgb {
+                red: 10,
+                green: 11,
+                blue: 12
+            }
+        );
+    }
+
+    #[test]
+    fn non_string_colours_and_modes_are_invalid_arguments() {
+        assert_eq!(
+            code(styled(StyleArgs {
+                foreground: TextArg::NotText,
+                ..StyleArgs::default()
+            })),
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            code(styled(StyleArgs {
+                background: TextArg::NotText,
+                ..StyleArgs::default()
+            })),
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            code(styled(StyleArgs {
+                color_mode: TextArg::NotText,
+                ..StyleArgs::default()
+            })),
+            ErrorCode::InvalidArgument
+        );
+    }
+
+    #[test]
+    fn colour_mode_accepts_monochrome_and_source_only() {
+        assert_eq!(
+            style_of(StyleArgs {
+                color_mode: TextArg::Text("source"),
+                ..StyleArgs::default()
+            })
+            .color,
+            ColorMode::Source
+        );
+        assert_eq!(
+            style_of(StyleArgs {
+                color_mode: TextArg::Text("monochrome"),
+                ..StyleArgs::default()
+            })
+            .color,
+            ColorMode::Monochrome
+        );
+        let refused = styled(StyleArgs {
+            color_mode: TextArg::Text("Source"),
+            ..StyleArgs::default()
+        });
+        assert_eq!(code(refused.clone()), ErrorCode::InvalidSettings);
+        assert_eq!(text_of(refused), COLOR_MODE_MESSAGE);
+    }
+
+    #[test]
+    fn contrast_is_an_integer_within_the_shared_bounds() {
+        for value in [MIN_CONTRAST, -1, 0, 1, MAX_CONTRAST] {
+            assert_eq!(
+                style_of(StyleArgs {
+                    contrast: Some(f64::from(value)),
+                    ..StyleArgs::default()
+                })
+                .contrast,
+                value
+            );
+        }
+        for value in [
+            f64::from(MIN_CONTRAST) - 1.0,
+            f64::from(MAX_CONTRAST) + 1.0,
+            1000.0,
+        ] {
+            let refused = styled(StyleArgs {
+                contrast: Some(value),
+                ..StyleArgs::default()
+            });
+            assert_eq!(code(refused.clone()), ErrorCode::InvalidSettings, "{value}");
+            assert_eq!(text_of(refused), CONTRAST_RANGE_MESSAGE);
+        }
+        for value in [f64::NAN, f64::INFINITY, 1.5, -0.25] {
+            let refused = styled(StyleArgs {
+                contrast: Some(value),
+                ..StyleArgs::default()
+            });
+            assert_eq!(code(refused.clone()), ErrorCode::InvalidArgument, "{value}");
+            assert_eq!(text_of(refused), CONTRAST_INTEGER_MESSAGE);
+        }
+    }
+
+    #[test]
+    fn invert_is_a_boolean_and_defaults_to_false() {
+        assert!(
+            style_of(StyleArgs {
+                invert: BoolArg::Value(true),
+                ..StyleArgs::default()
+            })
+            .invert
+        );
+        assert!(!style_of(StyleArgs::default()).invert);
+        let refused = styled(StyleArgs {
+            invert: BoolArg::NotBool,
+            ..StyleArgs::default()
+        });
+        assert_eq!(code(refused.clone()), ErrorCode::InvalidArgument);
+        assert_eq!(text_of(refused), INVERT_BOOLEAN_MESSAGE);
+    }
+
+    #[test]
+    fn the_style_is_validated_after_the_mode_and_sampling_rules() {
+        let refused = preview_settings_styled(
+            5.0,
+            10.0,
+            128.0,
+            Some("classic"),
+            TextArg::Text("block"),
+            TextArg::Absent,
+            StyleArgs {
+                foreground: TextArg::Text("nope"),
+                ..StyleArgs::default()
+            },
+        );
+        assert_eq!(
+            text_of(refused),
+            "ascii and block modes require average sampling"
+        );
+    }
+
+    #[test]
+    fn the_style_message_constants_match_the_shared_bounds_and_names() {
+        assert_eq!(
+            CONTRAST_RANGE_MESSAGE,
+            format!("contrast must be between {MIN_CONTRAST} and {MAX_CONTRAST}")
+        );
+        assert_eq!(
+            COLOR_MODE_MESSAGE,
+            "colorMode must be \"monochrome\" or \"source\""
+        );
+    }
+
+    #[test]
+    fn colour_vectors_round_trip_every_channel() {
+        for channel in 0..=255_u8 {
+            let text = format!("#{channel:02x}{channel:02X}{channel:02x}");
+            assert_eq!(
+                parse_colour(&text),
+                Some(Rgb {
+                    red: channel,
+                    green: channel,
+                    blue: channel
+                }),
+                "{text}"
+            );
+        }
     }
 }

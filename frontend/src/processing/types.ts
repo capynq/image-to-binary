@@ -1,5 +1,25 @@
-import { DEFAULT_RAMP, isRenderModeName, validateRamp } from './protocol'
-import type { RenderModeName } from './protocol'
+import {
+  COLOR_MODE_MESSAGE,
+  DEFAULT_BACKGROUND,
+  DEFAULT_FOREGROUND,
+  DEFAULT_RAMP,
+  isColorModeName,
+  isRenderModeName,
+  samplingForMode,
+  validateColour,
+  validateContrast,
+  validateRamp,
+  INVERT_BOOLEAN_MESSAGE,
+} from './protocol'
+import type { ColorModeName, PreviewParameters, RenderModeName } from './protocol'
+import {
+  MAX_CELL_SIZE,
+  MAX_FONT_SIZE,
+  MAX_THRESHOLD,
+  MIN_CELL_SIZE,
+  MIN_FONT_SIZE,
+  MIN_THRESHOLD,
+} from './bounds'
 
 export type StudioJobStatus =
   | 'idle'
@@ -33,6 +53,11 @@ export interface StudioSettings {
   readonly threshold: number
   readonly mode: RenderModeName
   readonly ramp: string
+  readonly foreground: string
+  readonly background: string
+  readonly colorMode: ColorModeName
+  readonly contrast: number
+  readonly invert: boolean
 }
 
 export interface StudioMetadata {
@@ -189,25 +214,73 @@ export const DEFAULT_SETTINGS: StudioSettings = Object.freeze({
   threshold: 128,
   mode: 'binary',
   ramp: DEFAULT_RAMP,
+  foreground: DEFAULT_FOREGROUND,
+  background: DEFAULT_BACKGROUND,
+  colorMode: 'monochrome',
+  contrast: 0,
+  invert: false,
 })
 
 export function cloneSettings(settings: StudioSettings): StudioSettings {
   return Object.freeze({ ...settings })
 }
 
+/** The render parameters preview and export both send; one mapping keeps them on one snapshot. */
+export function previewParametersOf(settings: StudioSettings): PreviewParameters {
+  return {
+    cellSize: settings.cellSize,
+    fontSize: settings.fontSize,
+    threshold: settings.threshold,
+    sampling: samplingForMode(settings.mode),
+    mode: settings.mode,
+    ramp: settings.ramp,
+    foreground: settings.foreground,
+    background: settings.background,
+    colorMode: settings.colorMode,
+    contrast: settings.contrast,
+    invert: settings.invert,
+  }
+}
+
 export function validateSettings(settings: StudioSettings): void {
-  if (!Number.isInteger(settings.cellSize) || settings.cellSize < 5 || settings.cellSize > 30) {
-    throw new RangeError('Cell size must be an integer from 5 through 30.')
+  if (
+    !Number.isInteger(settings.cellSize) ||
+    settings.cellSize < MIN_CELL_SIZE ||
+    settings.cellSize > MAX_CELL_SIZE
+  ) {
+    throw new RangeError(
+      `Cell size must be an integer from ${MIN_CELL_SIZE} through ${MAX_CELL_SIZE}.`,
+    )
   }
-  if (!Number.isInteger(settings.fontSize) || settings.fontSize < 8 || settings.fontSize > 30) {
-    throw new RangeError('Font size must be an integer from 8 through 30.')
+  if (
+    !Number.isInteger(settings.fontSize) ||
+    settings.fontSize < MIN_FONT_SIZE ||
+    settings.fontSize > MAX_FONT_SIZE
+  ) {
+    throw new RangeError(
+      `Font size must be an integer from ${MIN_FONT_SIZE} through ${MAX_FONT_SIZE}.`,
+    )
   }
-  if (!Number.isInteger(settings.threshold) || settings.threshold < 0 || settings.threshold > 255) {
-    throw new RangeError('Threshold must be an integer from 0 through 255.')
+  if (
+    !Number.isInteger(settings.threshold) ||
+    settings.threshold < MIN_THRESHOLD ||
+    settings.threshold > MAX_THRESHOLD
+  ) {
+    throw new RangeError(
+      `Threshold must be an integer from ${MIN_THRESHOLD} through ${MAX_THRESHOLD}.`,
+    )
   }
   if (!isRenderModeName(settings.mode)) {
     throw new RangeError('Render mode must be binary, ascii or block.')
   }
   const rampProblem = validateRamp(settings.ramp)
   if (rampProblem !== null) throw new RangeError(rampProblem)
+  const foregroundProblem = validateColour(settings.foreground, 'foreground')
+  if (foregroundProblem !== null) throw new RangeError(foregroundProblem)
+  const backgroundProblem = validateColour(settings.background, 'background')
+  if (backgroundProblem !== null) throw new RangeError(backgroundProblem)
+  if (!isColorModeName(settings.colorMode)) throw new RangeError(COLOR_MODE_MESSAGE)
+  const contrastProblem = validateContrast(settings.contrast)
+  if (contrastProblem !== null) throw new RangeError(contrastProblem)
+  if (typeof settings.invert !== 'boolean') throw new RangeError(INVERT_BOOLEAN_MESSAGE)
 }

@@ -1,8 +1,18 @@
 import { describe, expect, it } from 'vitest'
+import { MAX_CONTRAST, MAX_RAMP_LENGTH, MIN_CONTRAST } from './bounds'
 import {
+  BACKGROUND_MESSAGE,
+  COLOR_MODE_MESSAGE,
+  CONTRAST_INTEGER_MESSAGE,
+  CONTRAST_RANGE_MESSAGE,
+  DEFAULT_BACKGROUND,
+  DEFAULT_FOREGROUND,
   DEFAULT_RAMP,
+  FOREGROUND_MESSAGE,
+  isColorModeName,
   MAX_ENCODED_BYTES,
-  MAX_RAMP_LENGTH,
+  validateColour,
+  validateContrast,
   RAMP_EMPTY_MESSAGE,
   RAMP_NOT_PRINTABLE_MESSAGE,
   RAMP_TOO_LONG_MESSAGE,
@@ -22,6 +32,11 @@ const parameters = {
   sampling: 'classic',
   mode: 'binary',
   ramp: DEFAULT_RAMP,
+  foreground: '#00ff00',
+  background: '#000000',
+  colorMode: 'monochrome',
+  contrast: 0,
+  invert: false,
 } as const
 
 describe('protocol guards', () => {
@@ -261,5 +276,84 @@ describe('render mode and ramp contract', () => {
     expect(isWorkerRequest({ ...base, parameters: { ...valid, mode: undefined } })).toBe(false)
     expect(isWorkerRequest({ ...base, parameters: { ...valid, ramp: 7 } })).toBe(false)
     expect(isWorkerRequest({ ...base, parameters: { ...valid, ramp: undefined } })).toBe(false)
+  })
+
+  it('rejects a preview or export whose style field is missing', () => {
+    const base = { type: 'preview', requestId: 1, operationId: 1, sourceId: 1 }
+    for (const field of Object.keys(parameters)) {
+      const partial: Record<string, unknown> = { ...parameters }
+      delete partial[field]
+      expect(isWorkerRequest({ ...base, parameters: partial })).toBe(false)
+      expect(isWorkerRequest({ ...base, type: 'export', parameters: partial })).toBe(false)
+    }
+  })
+
+  it('rejects style fields with the wrong type, value or range', () => {
+    const base = { type: 'preview', requestId: 1, operationId: 1, sourceId: 1 }
+    const invalid: Array<Partial<Record<keyof typeof parameters, unknown>>> = [
+      { foreground: '#0f0' },
+      { foreground: 'green' },
+      { background: 255 },
+      { background: '#gggggg' },
+      { colorMode: 'color' },
+      { colorMode: undefined },
+      { contrast: 1.5 },
+      { contrast: MAX_CONTRAST + 1 },
+      { contrast: MIN_CONTRAST - 1 },
+      { contrast: '0' },
+      { invert: 'false' },
+      { invert: 1 },
+    ]
+    for (const override of invalid) {
+      expect(isWorkerRequest({ ...base, parameters: { ...parameters, ...override } })).toBe(false)
+    }
+    expect(
+      isWorkerRequest({
+        ...base,
+        parameters: { ...parameters, contrast: MIN_CONTRAST, invert: true, colorMode: 'source' },
+      }),
+    ).toBe(true)
+  })
+})
+
+describe('colour and contrast validation', () => {
+  it('uses the default colours that the settings start with', () => {
+    expect(DEFAULT_FOREGROUND).toBe('#00ff00')
+    expect(DEFAULT_BACKGROUND).toBe('#000000')
+    expect(validateColour(DEFAULT_FOREGROUND, 'foreground')).toBeNull()
+    expect(validateColour(DEFAULT_BACKGROUND, 'background')).toBeNull()
+  })
+
+  it('accepts exactly # followed by six hex digits in either case', () => {
+    expect(validateColour('#00FF00', 'foreground')).toBeNull()
+    expect(validateColour('#aBcDeF', 'background')).toBeNull()
+    expect(validateColour('#012345', 'foreground')).toBeNull()
+  })
+
+  it('pins the readable colour messages', () => {
+    expect(FOREGROUND_MESSAGE).toBe('foreground must be a #RRGGBB colour')
+    expect(BACKGROUND_MESSAGE).toBe('background must be a #RRGGBB colour')
+  })
+
+  it('names the colour mode choices and only those', () => {
+    expect(isColorModeName('monochrome')).toBe(true)
+    expect(isColorModeName('source')).toBe(true)
+    expect(isColorModeName('color')).toBe(false)
+    expect(isColorModeName(undefined)).toBe(false)
+    expect(COLOR_MODE_MESSAGE).toBe('colorMode must be "monochrome" or "source"')
+  })
+
+  it('accepts every integer contrast within the bounds', () => {
+    expect(validateContrast(0)).toBeNull()
+    expect(validateContrast(MIN_CONTRAST)).toBeNull()
+    expect(validateContrast(MAX_CONTRAST)).toBeNull()
+  })
+
+  it('checks integers before range and names each failure', () => {
+    expect(validateContrast(0.5)).toBe(CONTRAST_INTEGER_MESSAGE)
+    expect(validateContrast(Number.NaN)).toBe(CONTRAST_INTEGER_MESSAGE)
+    expect(validateContrast(MAX_CONTRAST + 1)).toBe(CONTRAST_RANGE_MESSAGE)
+    expect(validateContrast(MIN_CONTRAST - 1)).toBe(CONTRAST_RANGE_MESSAGE)
+    expect(CONTRAST_RANGE_MESSAGE).toBe('contrast must be between -100 and 100')
   })
 })

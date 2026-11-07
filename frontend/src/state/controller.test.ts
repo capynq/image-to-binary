@@ -56,6 +56,11 @@ describe('studio controller', () => {
         threshold: 128,
         mode: 'binary' as const,
         ramp: DEFAULT_RAMP,
+        foreground: '#00ff00',
+        background: '#000000',
+        colorMode: 'monochrome',
+        contrast: 0,
+        invert: false,
       }),
     ).toThrow('Cell size')
     expect(controller.getSnapshot().status).toBe('error')
@@ -113,6 +118,11 @@ describe('studio controller', () => {
       threshold: 200,
       mode: 'binary' as const,
       ramp: DEFAULT_RAMP,
+      foreground: '#00ff00',
+      background: '#000000',
+      colorMode: 'monochrome',
+      contrast: 0,
+      invert: false,
     })
     release?.()
     await pending
@@ -151,6 +161,11 @@ describe('studio controller', () => {
         threshold: 128,
         mode: 'binary' as const,
         ramp: DEFAULT_RAMP,
+        foreground: '#00ff00',
+        background: '#000000',
+        colorMode: 'monochrome',
+        contrast: 0,
+        invert: false,
       }),
     ).toThrow('Cell size')
     release?.()

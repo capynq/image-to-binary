@@ -224,6 +224,11 @@ describe('native preview', () => {
     threshold: 128,
     mode: 'binary' as const,
     ramp: DEFAULT_RAMP,
+    foreground: '#00ff00',
+    background: '#000000',
+    colorMode: 'monochrome',
+    contrast: 0,
+    invert: false,
   }
 
   async function withSource(bridge: FakeBridge) {
@@ -277,6 +282,39 @@ describe('native preview', () => {
     })
     expect(calls[1]?.args).toMatchObject({
       settings: { sampling: 'average', mode: 'block', ramp: DEFAULT_RAMP },
+    })
+  })
+
+  it('sends the colour style over IPC with the same keys for preview and PNG export', async () => {
+    const bridge = new FakeBridge()
+      .on('import_demo', demoReply)
+      .on('start_preview', (args) => frameBody(Number(args?.generation), 2, 1))
+      .on('save_image_dialog', () => ({ id: 7, name: 'out.png' }))
+      .on('export_png', () => ({ byteLength: 42 }))
+    const { adapter, s, source } = await withSource(bridge)
+    const styled: StudioSettings = {
+      ...artwork,
+      foreground: '#112233',
+      background: '#f0e0d0',
+      colorMode: 'source',
+      contrast: -25,
+      invert: true,
+    }
+    const artifact = await adapter.preview(s, source, styled, context(2, 5), 'artwork')
+    artifact.dispose()
+    await adapter.export(s, source, 'png', styled, context(3, 6))
+    const styleKeys = {
+      foreground: '#112233',
+      background: '#f0e0d0',
+      colorMode: 'source',
+      contrast: -25,
+      invert: true,
+    }
+    expect(bridge.calls.find((call) => call.command === 'start_preview')?.args).toMatchObject({
+      settings: styleKeys,
+    })
+    expect(bridge.calls.find((call) => call.command === 'export_png')?.args).toMatchObject({
+      settings: styleKeys,
     })
   })
 

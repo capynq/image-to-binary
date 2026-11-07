@@ -1,8 +1,10 @@
 //! Preview and export settings, validated against the shared engine bounds.
 
 use image_to_binary_core::{
-    ContractError, RenderMode, Sampling, MAX_CELL_SIZE, MAX_FONT_SIZE, MIN_CELL_SIZE, MIN_FONT_SIZE,
+    ContractError, RenderMode, Sampling, MAX_CELL_SIZE, MAX_CONTRAST, MAX_FONT_SIZE, MIN_CELL_SIZE,
+    MIN_CONTRAST, MIN_FONT_SIZE,
 };
+use image_to_binary_processing::RenderStyle;
 
 use super::error::SessionError;
 
@@ -10,7 +12,9 @@ use super::error::SessionError;
 ///
 /// Invariants: the cell size is within `MIN_CELL_SIZE..=MAX_CELL_SIZE` and the font size
 /// within `MIN_FONT_SIZE..=MAX_FONT_SIZE`. Every `u8` threshold is valid. A mode other
-/// than `Binary` is only ever paired with `Sampling::Average`.
+/// than `Binary` is only ever paired with `Sampling::Average`. The style's contrast lies in
+/// `MIN_CONTRAST..=MAX_CONTRAST`. The style never changes the sampling, so it never changes the
+/// cache key of a sampled grid.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PreviewSettings {
     pub(super) cell_size: u8,
@@ -18,6 +22,7 @@ pub struct PreviewSettings {
     pub(super) threshold: u8,
     pub(super) sampling: Sampling,
     pub(super) mode: RenderMode,
+    pub(super) style: RenderStyle,
 }
 
 impl PreviewSettings {
@@ -52,6 +57,7 @@ impl PreviewSettings {
             threshold,
             sampling,
             mode: RenderMode::Binary,
+            style: RenderStyle::default(),
         })
     }
 
@@ -72,5 +78,24 @@ impl PreviewSettings {
             return Err(ContractError::InvalidSettings("render mode sampling").into());
         }
         Ok(Self { mode, ..self })
+    }
+
+    /// Returns the colour and tone style shared by preview and export.
+    #[must_use]
+    pub const fn style(&self) -> RenderStyle {
+        self.style
+    }
+
+    /// Returns these settings with `style` applied.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionError::Contract`] with `InvalidSettings` when the contrast lies outside
+    /// `MIN_CONTRAST..=MAX_CONTRAST`.
+    pub fn with_style(self, style: RenderStyle) -> Result<Self, SessionError> {
+        if !(MIN_CONTRAST..=MAX_CONTRAST).contains(&style.contrast) {
+            return Err(ContractError::InvalidSettings("contrast").into());
+        }
+        Ok(Self { style, ..self })
     }
 }

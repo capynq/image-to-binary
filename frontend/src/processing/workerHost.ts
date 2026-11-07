@@ -216,6 +216,7 @@ export function createWorkerHost(
       let stage: number
       if (request.type === 'preview') {
         const { cellSize, fontSize, threshold, sampling, mode, ramp } = request.parameters
+        const { foreground, background, colorMode, contrast, invert } = request.parameters
         stage = record.session.startPreview(
           generation,
           cellSize,
@@ -224,6 +225,11 @@ export function createWorkerHost(
           sampling,
           mode,
           ramp,
+          foreground,
+          background,
+          colorMode,
+          contrast,
+          invert,
         )
       } else {
         stage = record.session.startOriginalPreview(generation)
@@ -286,6 +292,7 @@ export function createWorkerHost(
     const { session } = record
     const generation = request.requestId
     const { cellSize, fontSize, threshold, sampling, mode, ramp } = request.parameters
+    const { foreground, background, colorMode, contrast, invert } = request.parameters
     const emitted = { sequence: 0, byteLength: 0 }
     const postChunks = (chunks: Uint8Array[]): void => {
       for (const chunk of chunks) {
@@ -322,6 +329,11 @@ export function createWorkerHost(
         sampling,
         mode,
         ramp,
+        foreground,
+        background,
+        colorMode,
+        contrast,
+        invert,
       )
       started = true
       while (stage !== engine.readyStage) {

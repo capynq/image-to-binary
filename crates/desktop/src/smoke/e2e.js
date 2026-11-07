@@ -173,6 +173,33 @@
     document.querySelector('input[type="radio"][value="binary"]').click()
     await waitFor(() => document.querySelector('input[name="ramp"]') === null, 'classic mode restored')
 
+    const styleBefore = document.querySelector('img.fixture-preview[alt="Binary artwork preview"]')?.getAttribute('src') ?? null
+    const foregroundField = await waitFor(() => document.querySelector('input[name="foreground"]'), 'foreground colour field')
+    setValue(foregroundField, '#ff8000')
+    setValue(document.querySelector('input[name="background"]'), '#102040')
+    await waitFor(
+      () => document.querySelector('input[name="background"]').value === '#102040' && foregroundField.value === '#ff8000',
+      'colours applied',
+    )
+    await clickEnabled('Render artwork')
+    const styledPreview = await waitFor(
+      () => {
+        const image = previewImage()
+        return image !== null && image.getAttribute('src') !== styleBefore ? image : null
+      },
+      'styled artwork preview',
+    )
+    out.style = {
+      foreground: foregroundField.value,
+      background: document.querySelector('input[name="background"]').value,
+      colorMode: document.querySelector('input[type="radio"][value="monochrome"]').checked ? 'monochrome' : 'other',
+      preview: pixelsOf(styledPreview),
+    }
+    await invoke('smoke_queue_save', { path: `${cfg.outDir}/style-mono.png` })
+    await clickEnabled(['Export PNG', 'Export again'])
+    await waitFor(() => status().startsWith('Saved '), 'styled export to the chosen file')
+    out.style.exportStatus = status()
+
     headerButton('Reset').click()
     await waitFor(() => document.querySelector('.metadata-list') === null, 'reset')
     out.reset = { metadataCleared: true, emptyCanvas: document.querySelector('.empty-canvas') !== null }

@@ -271,6 +271,11 @@ describe('browser processing adapter', () => {
         sampling: 'classic',
         mode: 'binary',
         ramp: DEFAULT_RAMP,
+        foreground: '#00ff00',
+        background: '#000000',
+        colorMode: 'monochrome',
+        contrast: 0,
+        invert: false,
       },
       {
         cellSize: 12,
@@ -279,6 +284,11 @@ describe('browser processing adapter', () => {
         sampling: 'average',
         mode: 'ascii',
         ramp: ' .#@',
+        foreground: '#00ff00',
+        background: '#000000',
+        colorMode: 'monochrome',
+        contrast: 0,
+        invert: false,
       },
       {
         cellSize: 12,
@@ -287,8 +297,48 @@ describe('browser processing adapter', () => {
         sampling: 'average',
         mode: 'block',
         ramp: DEFAULT_RAMP,
+        foreground: '#00ff00',
+        background: '#000000',
+        colorMode: 'monochrome',
+        contrast: 0,
+        invert: false,
       },
     ])
+  })
+
+  it('sends the same style snapshot to preview and export', async () => {
+    const { adapter, clients } = harness()
+    const session = adapter.createSession()
+    const { source } = await adapter.import(session, { kind: 'demo' }, context(1))
+    const styled: StudioSettings = {
+      ...DEFAULT_SETTINGS,
+      foreground: '#112233',
+      background: '#f0e0d0',
+      colorMode: 'source',
+      contrast: -25,
+      invert: true,
+    }
+    const artwork = await adapter.preview(session, source, styled, context(2))
+    artwork.dispose()
+    await expect(adapter.export(session, source, 'png', styled, context(3))).rejects.toThrow(
+      'export is not faked',
+    )
+    const styleOf = (parameters: unknown) => {
+      const { foreground, background, colorMode, contrast, invert } = parameters as Record<
+        string,
+        unknown
+      >
+      return { foreground, background, colorMode, contrast, invert }
+    }
+    const expected = {
+      foreground: '#112233',
+      background: '#f0e0d0',
+      colorMode: 'source',
+      contrast: -25,
+      invert: true,
+    }
+    expect(styleOf(clients[0]?.previewParameters.at(-1))).toEqual(expected)
+    expect(styleOf(clients[0]?.exportParameters.at(-1))).toEqual(expected)
   })
 
   it('refuses an invalid ramp before any client call, keeping the source usable', async () => {
@@ -315,12 +365,17 @@ describe('browser processing adapter', () => {
     const demo = await adapter.import(session, { kind: 'demo' }, context(1))
     const { file } = fileProbe('photo.png', [1, 2, 3])
     const imported = await adapter.import(session, file, context(2))
-    const invalid = {
+    const invalid: StudioSettings = {
       cellSize: 1,
       fontSize: 1,
       threshold: 999,
       mode: 'binary' as const,
       ramp: DEFAULT_RAMP,
+      foreground: '#00ff00',
+      background: '#000000',
+      colorMode: 'monochrome',
+      contrast: 0,
+      invert: false,
     }
     for (const [index, source] of [demo.source, imported.source].entries()) {
       const artifact = await adapter.preview(

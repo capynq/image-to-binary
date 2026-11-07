@@ -1,16 +1,25 @@
 //! Drift guards against the browser copies of the shared limits. CI runs the root workspace, so
 //! these tests fail when either side changes alone.
 
-use image_to_binary_core::MAX_RAMP_LENGTH;
+use image_to_binary_core::{
+    MAX_CELL_SIZE, MAX_CONTRAST, MAX_FONT_SIZE, MAX_RAMP_LENGTH, MAX_THRESHOLD, MIN_CELL_SIZE,
+    MIN_CONTRAST, MIN_FONT_SIZE, MIN_THRESHOLD,
+};
+use image_to_binary_processing::RenderStyle;
 
 use super::args::{
-    parse_ramp, DEFAULT_RAMP, RAMP_EMPTY_MESSAGE, RAMP_NOT_PRINTABLE_MESSAGE, RAMP_TOO_LONG_MESSAGE,
+    parse_ramp, preview_settings_styled, StyleArgs, TextArg, BACKGROUND_MESSAGE,
+    COLOR_MODE_MESSAGE, CONTRAST_INTEGER_MESSAGE, CONTRAST_RANGE_MESSAGE, DEFAULT_RAMP,
+    FOREGROUND_MESSAGE, INVERT_BOOLEAN_MESSAGE, RAMP_EMPTY_MESSAGE, RAMP_NOT_PRINTABLE_MESSAGE,
+    RAMP_TOO_LONG_MESSAGE,
 };
 use super::limits::{DEFAULT_PIXEL_BUDGET, MAX_ENCODED_BYTES, MAX_SOURCE_PIXELS};
 
 const PROTOCOL_TS: &str = include_str!("../../../../frontend/src/processing/protocol.ts");
+const BOUNDS_TS: &str = include_str!("../../../../frontend/src/processing/bounds.ts");
 const WORKER_HOST_TS: &str = include_str!("../../../../frontend/src/processing/workerHost.ts");
 const RAMP_VECTORS: &str = include_str!("ramp_vectors.tsv");
+const STYLE_VECTORS: &str = include_str!("style_vectors.tsv");
 
 /// Evaluates the right-hand side of `export const NAME = …` or `const NAME = …` in TypeScript
 /// source. Only integer literals with `_` separators and `*` products are accepted.
@@ -72,12 +81,172 @@ fn the_drift_guard_parses_the_declared_forms() {
     assert_eq!(ts_constant("  const B = 131_072", "B"), 131_072);
 }
 
+/// Evaluates `export const NAME = <integer>` in the bounds file, allowing a leading minus sign
+/// for the signed contrast bounds. Missing or non-integer declarations panic.
+fn ts_integer(source: &str, name: &str) -> i64 {
+    let prefix = format!("export const {name} = ");
+    let literal = source
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix(prefix.as_str()))
+        .unwrap_or_else(|| panic!("{name} is not declared in the browser bounds"));
+    literal
+        .replace('_', "")
+        .parse::<i64>()
+        .unwrap_or_else(|_| panic!("{name} is not a plain integer literal"))
+}
+
+/// Every numeric bound the controls read. Each frontend value must equal the Rust production
+/// constant, so a change to a bound in `core` fails here until the browser follows.
 #[test]
-fn the_browser_ramp_limit_matches_the_shared_limit() {
+fn the_browser_bounds_match_the_core_constants() {
+    let pins: [(&str, i64); 9] = [
+        ("MIN_CELL_SIZE", i64::from(MIN_CELL_SIZE)),
+        ("MAX_CELL_SIZE", i64::from(MAX_CELL_SIZE)),
+        ("MIN_FONT_SIZE", i64::from(MIN_FONT_SIZE)),
+        ("MAX_FONT_SIZE", i64::from(MAX_FONT_SIZE)),
+        ("MIN_THRESHOLD", i64::from(MIN_THRESHOLD)),
+        ("MAX_THRESHOLD", i64::from(MAX_THRESHOLD)),
+        ("MIN_CONTRAST", i64::from(MIN_CONTRAST)),
+        ("MAX_CONTRAST", i64::from(MAX_CONTRAST)),
+        ("MAX_RAMP_LENGTH", i64::try_from(MAX_RAMP_LENGTH).unwrap()),
+    ];
+    for (name, expected) in pins {
+        assert_eq!(ts_integer(BOUNDS_TS, name), expected, "{name}");
+    }
+}
+
+fn hex(channel: u8) -> String {
+    format!("{channel:02x}")
+}
+
+/// The browser defaults must reproduce the native default style, so the default output is the
+/// same in every shell.
+#[test]
+fn the_browser_default_colours_match_the_native_default_style() {
+    let style = RenderStyle::default();
+    let as_hex = |colour: image_to_binary_processing::Rgb| {
+        format!(
+            "#{}{}{}",
+            hex(colour.red),
+            hex(colour.green),
+            hex(colour.blue)
+        )
+    };
     assert_eq!(
-        ts_constant(PROTOCOL_TS, "MAX_RAMP_LENGTH"),
-        u64::try_from(MAX_RAMP_LENGTH).unwrap()
+        ts_single_quoted(PROTOCOL_TS, "DEFAULT_FOREGROUND"),
+        as_hex(style.foreground)
     );
+    assert_eq!(
+        ts_single_quoted(PROTOCOL_TS, "DEFAULT_BACKGROUND"),
+        as_hex(style.background)
+    );
+    assert_eq!(style.contrast, 0);
+    assert!(!style.invert);
+}
+
+/// Returns the right-hand side of the one `export const NAME = ...` declaration in `source`.
+/// A name declared zero or several times panics, so a pin cannot match a comment or a copy.
+fn ts_declaration<'a>(source: &'a str, name: &str) -> &'a str {
+    let prefix = format!("export const {name} = ");
+    let mut found = source
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| line.strip_prefix(prefix.as_str()));
+    let value = found
+        .next()
+        .unwrap_or_else(|| panic!("{name} is not declared in the browser source"));
+    assert!(found.next().is_none(), "{name} is declared more than once");
+    value
+}
+
+/// Returns the text of a single-quoted declaration, without its quotes.
+fn ts_single_quoted<'a>(source: &'a str, name: &str) -> &'a str {
+    ts_declaration(source, name)
+        .strip_prefix('\'')
+        .and_then(|rest| rest.strip_suffix('\''))
+        .unwrap_or_else(|| panic!("{name} must be a single-quoted string"))
+}
+
+/// Every message the browser and the native shell both show must be the same text, pinned by
+/// the exact declaration in the browser source.
+#[test]
+fn the_style_failure_messages_match_in_both_shells() {
+    assert_eq!(
+        ts_single_quoted(PROTOCOL_TS, "FOREGROUND_MESSAGE"),
+        FOREGROUND_MESSAGE
+    );
+    assert_eq!(
+        ts_single_quoted(PROTOCOL_TS, "BACKGROUND_MESSAGE"),
+        BACKGROUND_MESSAGE
+    );
+    assert_eq!(
+        ts_single_quoted(PROTOCOL_TS, "COLOR_MODE_MESSAGE"),
+        COLOR_MODE_MESSAGE
+    );
+    assert_eq!(
+        ts_single_quoted(PROTOCOL_TS, "CONTRAST_INTEGER_MESSAGE"),
+        CONTRAST_INTEGER_MESSAGE
+    );
+    assert_eq!(
+        ts_single_quoted(PROTOCOL_TS, "INVERT_BOOLEAN_MESSAGE"),
+        INVERT_BOOLEAN_MESSAGE
+    );
+    assert_eq!(
+        ts_declaration(PROTOCOL_TS, "CONTRAST_RANGE_MESSAGE"),
+        "`contrast must be between ${MIN_CONTRAST} and ${MAX_CONTRAST}`"
+    );
+    assert_eq!(
+        CONTRAST_RANGE_MESSAGE,
+        format!("contrast must be between {MIN_CONTRAST} and {MAX_CONTRAST}")
+    );
+}
+
+/// One row per colour or contrast value, read by both suites, so each rule has one table.
+#[test]
+fn the_native_style_validation_matches_the_shared_vectors() {
+    let mut rows = 0;
+    for line in STYLE_VECTORS
+        .lines()
+        .skip(1)
+        .filter(|line| !line.is_empty())
+    {
+        let mut columns = line.splitn(4, '\t');
+        let kind = columns.next().unwrap_or_default();
+        let name = columns.next().unwrap_or_default();
+        let expected = columns.next().unwrap_or_default();
+        let value = columns.next().unwrap_or_default();
+        let style = match kind {
+            "foreground" => StyleArgs {
+                foreground: TextArg::Text(value),
+                ..StyleArgs::default()
+            },
+            "background" => StyleArgs {
+                background: TextArg::Text(value),
+                ..StyleArgs::default()
+            },
+            "contrast" => StyleArgs {
+                contrast: Some(value.parse::<f64>().unwrap_or(f64::NAN)),
+                ..StyleArgs::default()
+            },
+            other => panic!("unknown vector kind {other}"),
+        };
+        let outcome = match preview_settings_styled(
+            5.0,
+            10.0,
+            128.0,
+            Some("classic"),
+            TextArg::Absent,
+            TextArg::Absent,
+            style,
+        ) {
+            Ok(_) => "ok".to_owned(),
+            Err(error) => error.message(),
+        };
+        assert_eq!(outcome, expected, "{kind} {name}");
+        rows += 1;
+    }
+    assert_eq!(rows, 35);
 }
 
 #[test]
@@ -94,9 +263,18 @@ fn the_browser_default_ramp_matches_the_shared_default() {
 /// side is the production constant, so this pin fails when either side changes alone.
 #[test]
 fn the_ramp_failure_messages_match_in_both_shells() {
-    assert!(PROTOCOL_TS.contains(&format!("'{RAMP_EMPTY_MESSAGE}'")));
-    assert!(PROTOCOL_TS.contains(&format!("'{RAMP_NOT_PRINTABLE_MESSAGE}'")));
-    assert!(PROTOCOL_TS.contains("`ramp must be at most ${MAX_RAMP_LENGTH} characters`"));
+    assert_eq!(
+        ts_single_quoted(PROTOCOL_TS, "RAMP_EMPTY_MESSAGE"),
+        RAMP_EMPTY_MESSAGE
+    );
+    assert_eq!(
+        ts_single_quoted(PROTOCOL_TS, "RAMP_NOT_PRINTABLE_MESSAGE"),
+        RAMP_NOT_PRINTABLE_MESSAGE
+    );
+    assert_eq!(
+        ts_declaration(PROTOCOL_TS, "RAMP_TOO_LONG_MESSAGE"),
+        "`ramp must be at most ${MAX_RAMP_LENGTH} characters`"
+    );
     assert_eq!(
         RAMP_TOO_LONG_MESSAGE,
         format!("ramp must be at most {MAX_RAMP_LENGTH} characters")

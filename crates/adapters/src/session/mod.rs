@@ -128,6 +128,7 @@ impl Live {
             threshold: settings.threshold,
             sampling: settings.sampling,
             mode: settings.mode,
+            style: settings.style,
             ..RenderOptions::default()
         };
         let plan = self.sampler.prepare(

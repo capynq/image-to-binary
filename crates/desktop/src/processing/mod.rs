@@ -17,7 +17,7 @@ mod jobs;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use image_to_binary_adapters::session::args;
-use image_to_binary_adapters::session::args::TextArg;
+use image_to_binary_adapters::session::args::{BoolArg, StyleArgs, TextArg};
 use image_to_binary_adapters::session::{PreviewSettings, Session};
 use image_to_binary_core::Generation;
 use serde::Deserialize;
@@ -57,7 +57,7 @@ pub(crate) fn generation_argument(value: Option<&Value>) -> Result<Generation, I
 }
 
 /// Converts the settings object with the shared contract, checking sampling first, then cell
-/// size, font size and threshold.
+/// size, font size and threshold, then mode, ramp and the render style.
 ///
 /// # Errors
 ///
@@ -65,15 +65,41 @@ pub(crate) fn generation_argument(value: Option<&Value>) -> Result<Generation, I
 pub(crate) fn settings_argument(value: Option<&Value>) -> Result<PreviewSettings, IpcError> {
     let field = |name: &str| value.and_then(|object| object.get(name));
     let sampling = field("sampling").and_then(Value::as_str);
-    args::preview_settings(
+    args::preview_settings_styled(
         js_number(field("cellSize")),
         js_number(field("fontSize")),
         js_number(field("threshold")),
         sampling,
         text_argument(field("mode")),
         text_argument(field("ramp")),
+        StyleArgs {
+            foreground: text_argument(field("foreground")),
+            background: text_argument(field("background")),
+            color_mode: text_argument(field("colorMode")),
+            contrast: optional_number(field("contrast")),
+            invert: bool_argument(field("invert")),
+        },
     )
     .map_err(IpcError::from)
+}
+
+/// Maps a raw optional number field: a missing or `null` value is absent, any other value is a
+/// JS-number view, so a non-number becomes `NaN` and is refused by the shared contract.
+fn optional_number(value: Option<&Value>) -> Option<f64> {
+    match value {
+        None | Some(Value::Null) => None,
+        Some(other) => Some(other.as_f64().unwrap_or(f64::NAN)),
+    }
+}
+
+/// Maps a raw optional boolean field: a missing or `null` value is absent, a boolean is a value,
+/// and any other JSON type is not a boolean.
+fn bool_argument(value: Option<&Value>) -> BoolArg {
+    match value {
+        None | Some(Value::Null) => BoolArg::Absent,
+        Some(Value::Bool(flag)) => BoolArg::Value(*flag),
+        Some(_) => BoolArg::NotBool,
+    }
 }
 
 /// Maps a raw optional text field onto the shared contract: a missing or `null` value is absent,
@@ -531,6 +557,64 @@ mod tests {
         assert_eq!(
             settings_argument(Some(&value)).unwrap_err().message(),
             "ascii and block modes require average sampling"
+        );
+    }
+
+    #[test]
+    fn style_fields_reach_the_shared_contract_over_ipc() {
+        let mut value = settings_json(json!(5), json!(10), json!(128), json!("classic"));
+        assert_eq!(
+            settings_argument(Some(&value)).unwrap().style(),
+            image_to_binary_processing::RenderStyle::default()
+        );
+        value["foreground"] = json!("#FF8000");
+        value["background"] = json!("#102030");
+        value["colorMode"] = json!("source");
+        value["contrast"] = json!(-40);
+        value["invert"] = json!(true);
+        let style = settings_argument(Some(&value)).unwrap().style();
+        assert_eq!(
+            style,
+            image_to_binary_processing::RenderStyle {
+                foreground: image_to_binary_processing::Rgb {
+                    red: 255,
+                    green: 128,
+                    blue: 0
+                },
+                background: image_to_binary_processing::Rgb {
+                    red: 16,
+                    green: 32,
+                    blue: 48
+                },
+                color: image_to_binary_processing::ColorMode::Source,
+                contrast: -40,
+                invert: true,
+            }
+        );
+        value["invert"] = json!(false);
+        assert!(!settings_argument(Some(&value)).unwrap().style().invert);
+        value["invert"] = json!("yes");
+        assert_eq!(
+            settings_argument(Some(&value)).unwrap_err().message(),
+            "invert must be a boolean"
+        );
+        value["invert"] = json!(true);
+        value["contrast"] = json!(101);
+        assert_eq!(
+            settings_argument(Some(&value)).unwrap_err().message(),
+            "contrast must be between -100 and 100"
+        );
+        value["contrast"] = json!(0);
+        value["foreground"] = json!("red");
+        assert_eq!(
+            settings_argument(Some(&value)).unwrap_err().message(),
+            "foreground must be a #RRGGBB colour"
+        );
+        value["foreground"] = json!("#00ff00");
+        value["colorMode"] = json!("Source");
+        assert_eq!(
+            settings_argument(Some(&value)).unwrap_err().message(),
+            "colorMode must be \"monochrome\" or \"source\""
         );
     }
 

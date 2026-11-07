@@ -1,3 +1,5 @@
+import { MAX_CONTRAST, MAX_RAMP_LENGTH, MIN_CONTRAST } from './bounds'
+
 /**
  * Wire protocol between the processing client and the module worker.
  *
@@ -11,12 +13,49 @@ export const MAX_RETAINED_SOURCES = 2
 export const MAX_SOURCE_NAME_LENGTH = 256
 export const MAX_PREVIEW_DIMENSION = 1600
 export const MAX_ENCODED_BYTES = 256 * 1024 * 1024
-/** Matches `MAX_RAMP_LENGTH` in `image_to_binary_core`; a contract test pins the value. */
-export const MAX_RAMP_LENGTH = 64
 /** Matches the default ASCII ramp of the shared argument contract, least ink first. */
 export const DEFAULT_RAMP = ' .:-=+*#%@'
+export const DEFAULT_FOREGROUND = '#00ff00'
+export const DEFAULT_BACKGROUND = '#000000'
 
 export type PreviewSampling = 'classic' | 'average'
+
+export type ColourRole = 'foreground' | 'background'
+
+/** `monochrome` paints cells in the foreground and background; `source` keeps the image colours. */
+export type ColorModeName = 'monochrome' | 'source'
+
+export const COLOR_MODE_NAMES: readonly ColorModeName[] = ['monochrome', 'source']
+
+export function isColorModeName(value: unknown): value is ColorModeName {
+  return COLOR_MODE_NAMES.some((name) => name === value)
+}
+
+export const FOREGROUND_MESSAGE = 'foreground must be a #RRGGBB colour'
+export const BACKGROUND_MESSAGE = 'background must be a #RRGGBB colour'
+export const COLOR_MODE_MESSAGE = 'colorMode must be "monochrome" or "source"'
+export const CONTRAST_INTEGER_MESSAGE = 'contrast must be an integer'
+export const CONTRAST_RANGE_MESSAGE = `contrast must be between ${MIN_CONTRAST} and ${MAX_CONTRAST}`
+export const INVERT_BOOLEAN_MESSAGE = 'invert must be a boolean'
+
+const HEX_COLOUR = /^#[0-9a-fA-F]{6}$/
+
+function isHexColour(text: string): boolean {
+  return HEX_COLOUR.test(text)
+}
+
+/** Returns the readable reason a colour is rejected for its role, or `null` when it is `#RRGGBB`. */
+export function validateColour(text: string, role: ColourRole): string | null {
+  if (isHexColour(text)) return null
+  return role === 'foreground' ? FOREGROUND_MESSAGE : BACKGROUND_MESSAGE
+}
+
+/** Returns the readable reason a contrast is rejected, or `null` for an integer within bounds. */
+export function validateContrast(value: number): string | null {
+  if (!Number.isInteger(value)) return CONTRAST_INTEGER_MESSAGE
+  if (value < MIN_CONTRAST || value > MAX_CONTRAST) return CONTRAST_RANGE_MESSAGE
+  return null
+}
 
 /** `binary` is the classic compatibility mode; `ascii` and `block` need average sampling. */
 export type RenderModeName = 'binary' | 'ascii' | 'block'
@@ -56,6 +95,14 @@ export interface PreviewParameters {
   readonly mode: RenderModeName
   /** Printable ASCII ramp; read only when `mode` is `ascii`. */
   readonly ramp: string
+  /** `#RRGGBB` cell colour used by monochrome output. */
+  readonly foreground: string
+  /** `#RRGGBB` backdrop colour used by monochrome output. */
+  readonly background: string
+  readonly colorMode: ColorModeName
+  /** Integer in [MIN_CONTRAST, MAX_CONTRAST]. */
+  readonly contrast: number
+  readonly invert: boolean
 }
 
 export interface RequestIdentity {
@@ -316,6 +363,10 @@ function hasIdentity(value: Record<string, unknown>): boolean {
   return isRequestId(value.requestId) && isCount(value.operationId)
 }
 
+function isContrast(value: unknown): value is number {
+  return typeof value === 'number' && validateContrast(value) === null
+}
+
 function isPreviewParameters(value: unknown): value is PreviewParameters {
   return (
     isRecord(value) &&
@@ -324,7 +375,14 @@ function isPreviewParameters(value: unknown): value is PreviewParameters {
     isCount(value.threshold) &&
     (value.sampling === 'classic' || value.sampling === 'average') &&
     isRenderModeName(value.mode) &&
-    typeof value.ramp === 'string'
+    typeof value.ramp === 'string' &&
+    typeof value.foreground === 'string' &&
+    isHexColour(value.foreground) &&
+    typeof value.background === 'string' &&
+    isHexColour(value.background) &&
+    isColorModeName(value.colorMode) &&
+    isContrast(value.contrast) &&
+    typeof value.invert === 'boolean'
   )
 }
 

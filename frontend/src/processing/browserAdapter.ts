@@ -4,7 +4,7 @@ import { createExportAccumulator } from './exportAccumulator'
 import type { ExportAccumulator, ExportAccumulatorOptions } from './exportAccumulator'
 import { startHeifDecode } from './heifDecodeJob'
 import type { DecodedRgba, HeifDecodeJob, HeifDecoderEndpoint } from './heifDecodeJob'
-import { samplingForMode, validateEncodedImport } from './protocol'
+import { validateEncodedImport } from './protocol'
 import { renderPreviewPng } from './previewRenderer'
 import type { PreviewRenderer } from './previewRenderer'
 import type {
@@ -21,7 +21,7 @@ import type {
   StudioMetadata,
   UrlApi,
 } from './types'
-import { validateSettings } from './types'
+import { previewParametersOf, validateSettings } from './types'
 import { ProcessingWorkerError } from './workerClient'
 import type { PreviewPixels, ProcessingClient, RgbaImport, SourceHandle } from './workerClient'
 
@@ -254,14 +254,7 @@ export function createAdapterWithAccumulator(
       validateSettings(settings)
       return clientOf(state).preview(
         record.handle,
-        {
-          cellSize: settings.cellSize,
-          fontSize: settings.fontSize,
-          threshold: settings.threshold,
-          sampling: samplingForMode(settings.mode),
-          mode: settings.mode,
-          ramp: settings.ramp,
-        },
+        previewParametersOf(settings),
         context.operationId,
         createArtifact,
       )
@@ -285,14 +278,7 @@ export function createAdapterWithAccumulator(
       try {
         return await clientOf(state).exportPng(
           record.handle,
-          {
-            cellSize: settings.cellSize,
-            fontSize: settings.fontSize,
-            threshold: settings.threshold,
-            sampling: samplingForMode(settings.mode),
-            mode: settings.mode,
-            ramp: settings.ramp,
-          },
+          previewParametersOf(settings),
           context.operationId,
           accumulator,
           (completion) => accumulator.finish(completion),

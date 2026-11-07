@@ -5,7 +5,7 @@ use std::error::Error;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Cursor;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use image::codecs::gif::GifEncoder;
@@ -16,8 +16,8 @@ use image_to_binary_adapters::session::{
 use image_to_binary_adapters::{ArtworkPngTask, PngTaskLimits};
 use image_to_binary_core::{ContractError, Dimensions, Generation, Ramp, RenderMode, Sampling};
 use image_to_binary_processing::{
-    decode, DecodeError, DecodeLimits, DecodedSource, RenderOptions, RenderedFrame, Renderer,
-    SampleGrid, Sampler,
+    decode, ColorMode, DecodeError, DecodeLimits, DecodedSource, RenderOptions, RenderStyle,
+    RenderedFrame, Renderer, Rgb, SampleGrid, Sampler,
 };
 use tiff::encoder::colortype::RGB8;
 use tiff::encoder::TiffEncoder;
@@ -513,7 +513,7 @@ fn mode_cases() -> Result<[ModeCase; 4], Box<dyn Error>> {
 
 /// Renders one mode through the processing renderer and the native PNG task directly, without
 /// the shared session, so the browser and desktop output is compared with independent bytes.
-fn mode_entry(case: &ModeCase) -> Result<(String, RenderedFrame), Box<dyn Error>> {
+fn mode_entry(case: &ModeCase) -> Result<(String, RenderedFrame, Vec<u8>), Box<dyn Error>> {
     let pixels = rgba(MODE_WIDTH, MODE_HEIGHT);
     let source = base64(&pixels);
     let dimensions = Dimensions::new(MODE_WIDTH, MODE_HEIGHT)?;
@@ -557,7 +557,7 @@ fn mode_entry(case: &ModeCase) -> Result<(String, RenderedFrame), Box<dyn Error>
         base64(preview.pixels()),
         base64(&png)
     );
-    Ok((entry, preview))
+    Ok((entry, preview, png))
 }
 
 /// Appends the per-mode references after `rejected`. Each mode must differ from every other,
@@ -567,7 +567,7 @@ fn mode_entries() -> Result<String, Box<dyn Error>> {
     let mut entries = Vec::new();
     let mut previews: Vec<RenderedFrame> = Vec::new();
     for case in &cases {
-        let (entry, preview) = mode_entry(case)?;
+        let (entry, preview, _) = mode_entry(case)?;
         entries.push(entry);
         previews.push(preview);
     }
@@ -586,12 +586,195 @@ fn mode_entries() -> Result<String, Box<dyn Error>> {
     Ok(entries.join(","))
 }
 
+/// One style reference: a deterministic source rendered with the classic binary path and a
+/// render style, through the processing renderer and the native PNG task.
+struct StyleCase {
+    name: &'static str,
+    style: RenderStyle,
+    threshold: u8,
+}
+
+const STYLE_FOREGROUND: Rgb = Rgb {
+    red: 255,
+    green: 128,
+    blue: 0,
+};
+const STYLE_BACKGROUND: Rgb = Rgb {
+    red: 16,
+    green: 32,
+    blue: 64,
+};
+
+fn style_cases() -> [StyleCase; 5] {
+    let defaults = RenderStyle::default();
+    [
+        StyleCase {
+            name: "mono_custom_colours",
+            style: RenderStyle {
+                foreground: STYLE_FOREGROUND,
+                background: STYLE_BACKGROUND,
+                ..defaults
+            },
+            threshold: MODE_THRESHOLD,
+        },
+        StyleCase {
+            name: "source_colour",
+            style: RenderStyle {
+                color: ColorMode::Source,
+                ..defaults
+            },
+            threshold: MODE_THRESHOLD,
+        },
+        StyleCase {
+            name: "contrast_raised",
+            style: RenderStyle {
+                contrast: 100,
+                ..defaults
+            },
+            threshold: 96,
+        },
+        StyleCase {
+            name: "invert",
+            style: RenderStyle {
+                invert: true,
+                ..defaults
+            },
+            threshold: MODE_THRESHOLD,
+        },
+        StyleCase {
+            name: "invert_threshold",
+            style: RenderStyle {
+                invert: true,
+                ..defaults
+            },
+            threshold: 64,
+        },
+    ]
+}
+
+fn colour_hex(colour: Rgb) -> String {
+    format!("#{:02x}{:02x}{:02x}", colour.red, colour.green, colour.blue)
+}
+
+/// Renders one style case directly, without the shared session, and returns its JSON entry and
+/// preview frame.
+fn style_entry(case: &StyleCase) -> Result<(String, RenderedFrame, Vec<u8>), Box<dyn Error>> {
+    let pixels = rgba(MODE_WIDTH, MODE_HEIGHT);
+    let source = base64(&pixels);
+    let dimensions = Dimensions::new(MODE_WIDTH, MODE_HEIGHT)?;
+    let decoded = DecodedSource::from_rgba(dimensions, pixels, DecodeLimits::default())?;
+    let mut sampler = Sampler::new(Arc::new(decoded));
+    let mut renderer = Renderer::new()?;
+    let grid = sampler.sample(MODE_CELL, Sampling::Classic)?;
+    let options = RenderOptions {
+        cell_size: MODE_CELL,
+        font_size: MODE_FONT,
+        threshold: case.threshold,
+        sampling: Sampling::Classic,
+        style: case.style,
+        ..RenderOptions::default()
+    };
+    let preview = renderer.render_preview(&grid, options)?;
+    let png = native_export(&grid, options)?;
+    let color_mode = match case.style.color {
+        ColorMode::Monochrome => "monochrome",
+        ColorMode::Source => "source",
+    };
+    let entry = format!(
+        r#"{{"name":"{}","foreground":"{}","background":"{}","colorMode":"{color_mode}","contrast":{},"invert":{},"threshold":{},"width":{MODE_WIDTH},"height":{MODE_HEIGHT},"cellSize":{MODE_CELL},"fontSize":{MODE_FONT},"sampling":"classic","source":"{source}","previewWidth":{},"previewHeight":{},"preview":"{}","export":"{}"}}"#,
+        case.name,
+        colour_hex(case.style.foreground),
+        colour_hex(case.style.background),
+        case.style.contrast,
+        case.style.invert,
+        case.threshold,
+        preview.width(),
+        preview.height(),
+        base64(preview.pixels()),
+        base64(&png)
+    );
+    Ok((entry, preview, png))
+}
+
+/// Appends the per-style references. Each must differ from the classic binary reference and from
+/// every other style, otherwise the style is not exercised.
+fn style_entries() -> Result<String, Box<dyn Error>> {
+    let (_, baseline, _) = mode_entry(&mode_cases()?[0])?;
+    let mut entries = Vec::new();
+    let mut previews = vec![baseline];
+    for case in &style_cases() {
+        let (entry, preview, _) = style_entry(case)?;
+        if previews
+            .iter()
+            .any(|earlier| earlier.pixels() == preview.pixels())
+        {
+            return Err(format!(
+                "{}: style output must differ from earlier outputs",
+                case.name
+            )
+            .into());
+        }
+        previews.push(preview);
+        entries.push(entry);
+    }
+    Ok(entries.join(","))
+}
+
+/// Writes every file `crates/desktop/src/smoke/e2e.rs` reads, from the same deterministic sources
+/// and native renders as the JSON reference, so the desktop smoke needs no hand-made fixtures.
+fn write_e2e_fixtures(dir: &Path, fixtures: &[Fixture]) -> Result<(), Box<dyn Error>> {
+    fs::create_dir_all(dir)?;
+    let write = |name: &str, bytes: &[u8]| -> Result<(), Box<dyn Error>> {
+        fs::write(dir.join(name), bytes)?;
+        Ok(())
+    };
+    let png = fixtures
+        .iter()
+        .find(|fixture| fixture.name == "png")
+        .ok_or("png fixture exists")?;
+    let (_, _, ui_pixels) = ui_preview(&png.bytes)?;
+    let (_, export) = preview_of(decode(&png.bytes, DecodeLimits::default())?)?;
+    write("png23x17.png", &png.bytes)?;
+    write("png23x17.export.png", &export)?;
+    write("png23x17.ui-preview.rgba", &ui_pixels)?;
+
+    let large = DynamicImage::ImageRgba8(
+        ImageBuffer::from_raw(LARGE_SIDE, LARGE_SIDE, large_rgba())
+            .ok_or("large pixels match the dimensions")?,
+    );
+    write("large1200.png", &encode(&large, ImageFormat::Png)?)?;
+    write("large1200.export.png", &large_export(Sampling::Classic)?)?;
+
+    let mode_pixels = DynamicImage::ImageRgba8(
+        ImageBuffer::from_raw(MODE_WIDTH, MODE_HEIGHT, rgba(MODE_WIDTH, MODE_HEIGHT))
+            .ok_or("mode pixels match the dimensions")?,
+    );
+    write("mode64x40.png", &encode(&mode_pixels, ImageFormat::Png)?)?;
+    let ascii = mode_cases()?
+        .into_iter()
+        .find(|case| case.name == "ascii_custom")
+        .ok_or("ascii_custom case exists")?;
+    let (_, preview, export) = mode_entry(&ascii)?;
+    write("mode64x40.ascii-custom.preview.rgba", preview.pixels())?;
+    write("mode64x40.ascii-custom.export.png", &export)?;
+
+    for case in &style_cases() {
+        let (_, preview, export) = style_entry(case)?;
+        write(
+            &format!("style64x40.{}.preview.rgba", case.name),
+            preview.pixels(),
+        )?;
+        write(&format!("style64x40.{}.export.png", case.name), &export)?;
+    }
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let arguments: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
     let path = arguments
         .first()
         .cloned()
-        .ok_or("usage: reference_fixtures <output.json> [<ui-preview.rgba>]")?;
+        .ok_or("usage: reference_fixtures <output.json> [<ui-preview.rgba> [<e2e-fixture-dir>]]")?;
     let mut json = String::from("{\"cases\":[");
     for (index, case) in CASES.iter().enumerate() {
         if index > 0 {
@@ -666,11 +849,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     json.push_str("],\"modes\":[");
     json.push_str(&mode_entries()?);
+    json.push_str("],\"styles\":[");
+    json.push_str(&style_entries()?);
     json.push_str("]}");
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     fs::write(&path, json)?;
+    if let Some(dir) = arguments.get(2) {
+        write_e2e_fixtures(dir, &fixtures)?;
+        eprintln!("desktop smoke fixtures written to {}", dir.display());
+    }
     if let Some(preview_path) = arguments.get(1) {
         let png = fixtures
             .iter()

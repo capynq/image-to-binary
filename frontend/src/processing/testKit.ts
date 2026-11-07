@@ -1,6 +1,6 @@
 import type { EngineFrame, EngineSession, ProcessingEngine } from './engine'
-import { DEFAULT_RAMP } from './protocol'
-import type { PreviewParameters, PreviewSampling, RenderModeName } from './protocol'
+import { DEFAULT_BACKGROUND, DEFAULT_FOREGROUND, DEFAULT_RAMP } from './protocol'
+import type { ColorModeName, PreviewParameters, PreviewSampling, RenderModeName } from './protocol'
 import { createProcessingClient } from './workerClient'
 import type { ClientEndpoint, ProcessingClient, RgbaImport } from './workerClient'
 import type { HeifDecoderEndpoint } from './heifDecodeJob'
@@ -16,6 +16,11 @@ export const PARAMS: PreviewParameters = {
   sampling: 'classic',
   mode: 'binary',
   ramp: DEFAULT_RAMP,
+  foreground: DEFAULT_FOREGROUND,
+  background: DEFAULT_BACKGROUND,
+  colorMode: 'monochrome',
+  contrast: 0,
+  invert: false,
 }
 
 export function rgba(name = 'test'): RgbaImport {
@@ -104,6 +109,11 @@ export class FakeSession implements EngineSession {
     sampling: PreviewSampling,
     mode: RenderModeName,
     ramp: string,
+    foreground: string,
+    background: string,
+    colorMode: ColorModeName,
+    contrast: number,
+    invert: boolean,
   ): number {
     this.engine.starts.push({
       kind: 'preview',
@@ -114,6 +124,11 @@ export class FakeSession implements EngineSession {
       sampling,
       mode,
       ramp,
+      foreground,
+      background,
+      colorMode,
+      contrast,
+      invert,
     })
     this.engine.log.push(`start:${generation}`)
     this.original = false
@@ -131,6 +146,11 @@ export class FakeSession implements EngineSession {
     sampling: PreviewSampling,
     mode: RenderModeName,
     ramp: string,
+    foreground: string,
+    background: string,
+    colorMode: ColorModeName,
+    contrast: number,
+    invert: boolean,
   ): number {
     this.engine.starts.push({
       kind: 'export',
@@ -141,6 +161,11 @@ export class FakeSession implements EngineSession {
       sampling,
       mode,
       ramp,
+      foreground,
+      background,
+      colorMode,
+      contrast,
+      invert,
     })
     this.engine.log.push(`export:${generation}`)
     this.original = false
@@ -255,6 +280,11 @@ export interface RecordedStart {
   readonly sampling: PreviewSampling
   readonly mode: RenderModeName
   readonly ramp: string
+  readonly foreground: string
+  readonly background: string
+  readonly colorMode: ColorModeName
+  readonly contrast: number
+  readonly invert: boolean
 }
 
 /** Deterministic engine double with the same stage protocol as the WASM session. */

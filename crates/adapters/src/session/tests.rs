@@ -176,6 +176,137 @@ fn threshold_changes_reuse_the_grid_and_glyph_cache() {
     assert_eq!(start(&mut session, 3, 64).unwrap(), Stage::Preview);
 }
 
+fn styled_settings(style: image_to_binary_processing::RenderStyle) -> PreviewSettings {
+    settings(5, 10, 128, Sampling::Classic)
+        .with_style(style)
+        .unwrap()
+}
+
+fn tone_style() -> image_to_binary_processing::RenderStyle {
+    image_to_binary_processing::RenderStyle {
+        foreground: image_to_binary_processing::Rgb {
+            red: 255,
+            green: 200,
+            blue: 0,
+        },
+        background: image_to_binary_processing::Rgb {
+            red: 10,
+            green: 0,
+            blue: 40,
+        },
+        color: image_to_binary_processing::ColorMode::Source,
+        contrast: 40,
+        invert: true,
+    }
+}
+
+#[test]
+fn style_changes_reuse_the_sampled_grid_and_match_the_direct_renderer() {
+    let mut session = new_session(41, 29);
+    assert_eq!(start(&mut session, 0, 128).unwrap(), Stage::Sampling);
+    let _plain = drive(&mut session, 0, MAX_SAFE);
+    let stats = |session: &Session| session.live.as_ref().unwrap().sampler.cache_stats();
+    let (computed, entries) = (stats(&session).computed(), stats(&session).entries());
+    assert_eq!(computed, 1);
+
+    let style = tone_style();
+    assert_eq!(
+        session.start_preview(g(1), styled_settings(style)).unwrap(),
+        Stage::Preview
+    );
+    let mut styled = drive(&mut session, 1, MAX_SAFE);
+    assert_eq!(stats(&session).computed(), computed);
+    assert_eq!(stats(&session).entries(), entries);
+
+    let mut sampler_direct = Sampler::new(Arc::new(decoded(41, 29)));
+    let mut renderer = Renderer::new().unwrap();
+    let grid = sampler_direct.sample(5, Sampling::Classic).unwrap();
+    let options = RenderOptions {
+        cell_size: 5,
+        font_size: 10,
+        threshold: 128,
+        sampling: Sampling::Classic,
+        style,
+        ..RenderOptions::default()
+    };
+    let expected = renderer.render_preview(&grid, options).unwrap();
+    assert_eq!(styled.take_pixels().unwrap(), expected.pixels());
+}
+
+/// Sampler and renderer counters: grids computed, grids retained, glyph masks rasterized and
+/// glyph masks retained.
+fn cache_counts(session: &Session) -> (u64, usize, u64, usize) {
+    let live = session.live.as_ref().unwrap();
+    let sampler = live.sampler.cache_stats();
+    let renderer = live.renderer.cache_stats();
+    (
+        sampler.computed(),
+        sampler.entries(),
+        renderer.rasterized(),
+        renderer.entries(),
+    )
+}
+
+#[test]
+fn style_changes_reuse_the_grid_and_glyph_masks_for_both_samplings() {
+    for sampling in [Sampling::Classic, Sampling::Average] {
+        let mut session = new_session(41, 29);
+        session
+            .start_preview(g(0), settings(5, 10, 128, sampling))
+            .unwrap();
+        drive(&mut session, 0, MAX_SAFE);
+        let before = cache_counts(&session);
+        assert_eq!(before.0, 1, "{sampling:?}: one grid is sampled");
+        assert!(
+            before.2 > 0 && before.3 > 0,
+            "{sampling:?}: glyph masks exist"
+        );
+
+        let restyled = settings(5, 10, 128, sampling)
+            .with_style(tone_style())
+            .unwrap();
+        assert_eq!(
+            session.start_preview(g(1), restyled).unwrap(),
+            Stage::Preview,
+            "{sampling:?}: a style-only change is a grid hit"
+        );
+        drive(&mut session, 1, MAX_SAFE);
+        assert_eq!(
+            cache_counts(&session),
+            before,
+            "{sampling:?}: no grid is sampled and no glyph mask is rasterized again"
+        );
+    }
+}
+
+#[test]
+fn the_default_style_keeps_the_classic_pixels() {
+    let mut session = new_session(41, 29);
+    session
+        .start_preview(g(0), settings(7, 14, 128, Sampling::Classic))
+        .unwrap();
+    let mut frame = drive(&mut session, 0, MAX_SAFE);
+    let expected = reference(41, 29, 7, 14, 128, Sampling::Classic);
+    assert_eq!(frame.take_pixels().unwrap(), expected.pixels());
+}
+
+#[test]
+fn an_invalid_style_is_refused_before_it_reaches_a_job() {
+    let session = new_session(41, 29);
+    let bad = image_to_binary_processing::RenderStyle {
+        contrast: 101,
+        ..image_to_binary_processing::RenderStyle::default()
+    };
+    assert_eq!(
+        settings(5, 10, 128, Sampling::Classic)
+            .with_style(bad)
+            .unwrap_err()
+            .code(),
+        ErrorCode::InvalidSettings
+    );
+    assert_eq!(session.stage().unwrap(), Stage::Idle);
+}
+
 #[test]
 fn cancel_is_terminal_and_a_newer_job_recovers() {
     let expected = reference(30, 30, 5, 10, 128, Sampling::Classic);
@@ -287,6 +418,7 @@ fn failed_starts_keep_the_current_job_and_the_proposed_generation() {
         threshold: 128,
         sampling: Sampling::Classic,
         mode: image_to_binary_core::RenderMode::Binary,
+        style: image_to_binary_processing::RenderStyle::default(),
     };
     let failed = session
         .live_mut()
@@ -431,6 +563,7 @@ fn invalid_starts_keep_an_accepted_original_job() {
         threshold: 128,
         sampling: Sampling::Classic,
         mode: image_to_binary_core::RenderMode::Binary,
+        style: image_to_binary_processing::RenderStyle::default(),
     };
     let failed = session
         .live_mut()

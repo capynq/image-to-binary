@@ -1,15 +1,24 @@
 import { useEffect, useId, useState } from 'react'
 import { RenderModeFields, rampProblem } from './RenderModeFields'
+import { RenderStyleFields, colourProblem } from './RenderStyleFields'
 import { ExportPanel } from './export/ExportPanel'
 import { exportFilename } from './export/downloadName'
 import type { ExportPhase } from './export/exportFocus'
 import { footerStatusLabel, useFooterAnnouncement } from './export/footerAnnouncement'
 import { useExportDownload } from './export/useExportDownload'
+import {
+  MAX_CELL_SIZE,
+  MAX_FONT_SIZE,
+  MAX_THRESHOLD,
+  MIN_CELL_SIZE,
+  MIN_FONT_SIZE,
+  MIN_THRESHOLD,
+} from './processing/bounds'
 import { defaultUrlApi } from './processing/demoAdapter'
 import type { NativeFiles } from './processing/nativeFiles'
 import type { ExportStatus } from './processing/types'
 import { validateRamp } from './processing/protocol'
-import type { RenderModeName } from './processing/protocol'
+import type { ColorModeName, ColourRole, RenderModeName } from './processing/protocol'
 import type { StudioController } from './state/controller'
 import { IMPORT_ACCEPT, IMPORT_GUIDANCE, formatBytes, useImportFlow } from './useImportFlow'
 import { useStudio } from './useStudio'
@@ -41,11 +50,28 @@ function exportPhaseOf(status: ExportStatus, hasDownload: boolean): ExportPhase 
   }
 }
 
-function exportBlockedBy(status: string, hasSource: boolean, rampBlocked: boolean): string | null {
+/** The draft that blocks preview and export; the ramp is named first when both are invalid. */
+type DraftBlocker = 'ramp' | 'colour'
+
+const DRAFT_BLOCK_EXPORT: Readonly<Record<DraftBlocker, string>> = {
+  ramp: 'Fix the ramp to enable PNG export.',
+  colour: 'Fix the colour to enable PNG export.',
+}
+
+const DRAFT_BLOCK_ARTWORK: Readonly<Record<DraftBlocker, string>> = {
+  ramp: 'Fix the ramp to show the artwork.',
+  colour: 'Fix the colour to show the artwork.',
+}
+
+function exportBlockedBy(
+  status: string,
+  hasSource: boolean,
+  blocker: DraftBlocker | null,
+): string | null {
   if (!hasSource) return 'Open or load an image to enable PNG export.'
   if (status === 'importing') return 'Wait for the image to finish importing.'
   if (status === 'processing') return 'Wait for the artwork preview to finish rendering.'
-  if (rampBlocked) return 'Fix the ramp to enable PNG export.'
+  if (blocker !== null) return DRAFT_BLOCK_EXPORT[blocker]
   return null
 }
 
@@ -62,6 +88,8 @@ export default function App({ controller, native }: AppProps) {
   const [theme, setTheme] = useState<Theme>(getInitialTheme)
   const [inspectorOpen, setInspectorOpen] = useState(true)
   const [rampDraft, setRampDraft] = useState(() => snapshot.settings.ramp)
+  const [foregroundDraft, setForegroundDraft] = useState(() => snapshot.settings.foreground)
+  const [backgroundDraft, setBackgroundDraft] = useState(() => snapshot.settings.background)
   const artworkReasonId = useId()
 
   useEffect(() => {
@@ -86,6 +114,14 @@ export default function App({ controller, native }: AppProps) {
   useEffect(() => {
     setRampDraft(settings.ramp)
   }, [settings.ramp])
+
+  useEffect(() => {
+    setForegroundDraft(settings.foreground)
+  }, [settings.foreground])
+
+  useEffect(() => {
+    setBackgroundDraft(settings.background)
+  }, [settings.background])
   const isOriginal = flow.view === 'original'
   const shown = isOriginal ? snapshot.original : snapshot.preview
   const viewName = isOriginal ? 'original image' : 'artwork'
@@ -109,8 +145,13 @@ export default function App({ controller, native }: AppProps) {
     download !== null || savedExport !== null,
   )
   const rampBlocked = rampProblem(settings.mode, rampDraft) !== null
-  const canExport = hasSource && !isBusy && !rampBlocked
-  const exportBlock = canExport ? null : exportBlockedBy(snapshot.status, hasSource, rampBlocked)
+  const colourBlocked =
+    colourProblem(foregroundDraft, 'foreground') !== null ||
+    colourProblem(backgroundDraft, 'background') !== null
+  const draftBlocker: DraftBlocker | null = rampBlocked ? 'ramp' : colourBlocked ? 'colour' : null
+  const draftBlocked = draftBlocker !== null
+  const canExport = hasSource && !isBusy && !draftBlocked
+  const exportBlock = canExport ? null : exportBlockedBy(snapshot.status, hasSource, draftBlocker)
   const thresholdApplies = settings.mode === 'binary'
 
   function updateSetting(key: 'cellSize' | 'fontSize' | 'threshold', value: string) {
@@ -129,8 +170,32 @@ export default function App({ controller, native }: AppProps) {
     }
   }
 
+  function updateColourDraft(role: ColourRole, draft: string) {
+    if (role === 'foreground') setForegroundDraft(draft)
+    else setBackgroundDraft(draft)
+  }
+
+  /** Only a valid colour reaches the controller; an invalid draft leaves the accepted colour in use. */
+  function updateColour(role: ColourRole, value: string) {
+    if (colourProblem(value, role) === null && value !== settings[role]) {
+      controller.updateSettings({ ...settings, [role]: value })
+    }
+  }
+
+  function updateColorMode(colorMode: ColorModeName) {
+    controller.updateSettings({ ...settings, colorMode })
+  }
+
+  function updateContrast(contrast: number) {
+    controller.updateSettings({ ...settings, contrast })
+  }
+
+  function updateInvert(invert: boolean) {
+    controller.updateSettings({ ...settings, invert })
+  }
+
   function renderArtwork() {
-    if (!rampBlocked) flow.renderArtwork()
+    if (!draftBlocked) flow.renderArtwork()
   }
 
   function startPngExport() {
@@ -210,17 +275,17 @@ export default function App({ controller, native }: AppProps) {
                   type="button"
                   className={isOriginal ? undefined : 'is-selected'}
                   aria-pressed={!isOriginal}
-                  disabled={!hasSource || rampBlocked}
-                  aria-describedby={rampBlocked ? artworkReasonId : undefined}
+                  disabled={!hasSource || draftBlocked}
+                  aria-describedby={draftBlocked ? artworkReasonId : undefined}
                   onClick={() => flow.selectView('artwork')}
                 >
                   Artwork
                 </button>
               </div>
             </div>
-            {rampBlocked && (
+            {draftBlocker !== null && (
               <p className="field-note" id={artworkReasonId}>
-                Fix the ramp to show the artwork.
+                {DRAFT_BLOCK_ARTWORK[draftBlocker]}
               </p>
             )}
             {isBusy && snapshot.status !== 'exporting' && (
@@ -295,7 +360,7 @@ export default function App({ controller, native }: AppProps) {
                     className="button button-secondary"
                     type="button"
                     onClick={renderArtwork}
-                    disabled={rampBlocked}
+                    disabled={draftBlocked}
                   >
                     Render artwork
                   </button>
@@ -337,8 +402,8 @@ export default function App({ controller, native }: AppProps) {
                 name="cellSize"
                 autoComplete="off"
                 type="range"
-                min="5"
-                max="30"
+                min={MIN_CELL_SIZE}
+                max={MAX_CELL_SIZE}
                 value={settings.cellSize}
                 onChange={(event) => updateSetting('cellSize', event.target.value)}
               />
@@ -350,8 +415,8 @@ export default function App({ controller, native }: AppProps) {
                 name="fontSize"
                 autoComplete="off"
                 type="range"
-                min="8"
-                max="30"
+                min={MIN_FONT_SIZE}
+                max={MAX_FONT_SIZE}
                 value={settings.fontSize}
                 onChange={(event) => updateSetting('fontSize', event.target.value)}
               />
@@ -369,8 +434,8 @@ export default function App({ controller, native }: AppProps) {
                 name="threshold"
                 autoComplete="off"
                 type="range"
-                min="0"
-                max="255"
+                min={MIN_THRESHOLD}
+                max={MAX_THRESHOLD}
                 value={settings.threshold}
                 disabled={!thresholdApplies}
                 aria-describedby="threshold-note"
@@ -381,11 +446,21 @@ export default function App({ controller, native }: AppProps) {
                   ? 'The threshold splits cells into 0 and 1 in classic binary mode.'
                   : 'The threshold has no effect in ASCII or block mode.'}
               </p>
+              <RenderStyleFields
+                settings={settings}
+                foregroundDraft={foregroundDraft}
+                backgroundDraft={backgroundDraft}
+                onColourChange={updateColour}
+                onColourDraftChange={updateColourDraft}
+                onColorModeChange={updateColorMode}
+                onContrastChange={updateContrast}
+                onInvertChange={updateInvert}
+              />
               <button
                 className="button button-primary button-wide"
                 type="button"
                 onClick={renderArtwork}
-                disabled={!hasSource || isBusy || rampBlocked}
+                disabled={!hasSource || isBusy || draftBlocked}
               >
                 {snapshot.status === 'processing' ? 'Rendering…' : 'Render artwork'}
               </button>

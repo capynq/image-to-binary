@@ -2,11 +2,11 @@
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { Root } from 'react-dom/client'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 import { countingUrlApi } from './export/exportTestSupport'
 import { createDemoProcessingAdapter } from './processing/demoAdapter'
-import { DEFAULT_RAMP } from './processing/protocol'
+import { DEFAULT_BACKGROUND, DEFAULT_RAMP } from './processing/protocol'
 import { createStudioController } from './state/controller'
 import type { StudioController } from './state/controller'
 import type { ProcessingAdapter } from './processing/types'
@@ -172,5 +172,98 @@ describe('studio render gates and requests', () => {
     await controller.startExport().catch(() => undefined)
     const requested = exportRequests.at(-1)?.[3]
     expect(requested).toMatchObject({ mode: 'ascii', ramp: ' .#@' })
+  })
+})
+
+function field(name: string): HTMLInputElement {
+  const found = container.querySelector<HTMLInputElement>(`input[name="${name}"]`)
+  if (found === null) throw new Error(`no field ${name}`)
+  return found
+}
+
+function setRaw(input: HTMLInputElement, value: string): void {
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+  setter?.call(input, value)
+  act(() => {
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  })
+}
+
+describe('studio render colour gates and style requests', () => {
+  it('blocks render, PNG export and the Artwork tab while a colour draft is invalid', async () => {
+    await controller.preview()
+    const before = controller.getSnapshot()
+    const update = vi.spyOn(controller, 'updateSettings')
+    setRaw(field('background'), '#12')
+    expect(button('Render artwork').disabled).toBe(true)
+    expect(button('Export PNG').disabled).toBe(true)
+    expect(container.textContent).toContain('Fix the colour to enable PNG export.')
+    const tab = button('Artwork')
+    expect(tab.disabled).toBe(true)
+    const reason = document.getElementById(tab.getAttribute('aria-describedby') ?? '')
+    expect(reason?.textContent).toBe('Fix the colour to show the artwork.')
+    expect(update).not.toHaveBeenCalled()
+    const after = controller.getSnapshot()
+    expect(after.settings.background).toBe(DEFAULT_BACKGROUND)
+    expect(after.preview).toBe(before.preview)
+    expect(after.generation).toBe(before.generation)
+    expect(after.status).toBe('ready')
+    expect(field('background').getAttribute('aria-invalid')).toBe('true')
+    expect(container.querySelector('.error-panel')).toBeNull()
+  })
+
+  it('recovers from an invalid colour draft by picking the accepted colour', () => {
+    setRaw(field('background'), '#12')
+    expect(button('Render artwork').disabled).toBe(true)
+    const picker = field('backgroundPicker')
+    act(() => {
+      picker.click()
+    })
+    expect(field('background').value).toBe(DEFAULT_BACKGROUND)
+    expect(field('background').getAttribute('aria-invalid')).toBe('false')
+    expect(button('Render artwork').disabled).toBe(false)
+    expect(button('Export PNG').disabled).toBe(false)
+    expect(button('Artwork').disabled).toBe(false)
+  })
+
+  it('applies a valid typed colour and lifts the gate', () => {
+    setRaw(field('foreground'), '#ffffff')
+    expect(controller.getSnapshot().settings.foreground).toBe('#ffffff')
+    expect(button('Render artwork').disabled).toBe(false)
+    expect(button('Export PNG').disabled).toBe(false)
+    expect(button('Artwork').disabled).toBe(false)
+  })
+
+  it('applies a picker colour immediately and keeps the hex field in step', () => {
+    setRaw(field('backgroundPicker'), '#202020')
+    expect(controller.getSnapshot().settings.background).toBe('#202020')
+    expect(field('background').value).toBe('#202020')
+  })
+
+  it('names the ramp first when the ramp and a colour are both invalid', () => {
+    act(() => radio('ascii').click())
+    typeInto(rampInput(), '')
+    setRaw(field('foreground'), 'green')
+    expect(container.textContent).toContain('Fix the ramp to enable PNG export.')
+    expect(container.textContent).not.toContain('Fix the colour to enable PNG export.')
+  })
+
+  it('updates colour mode, contrast and invert through the controller', () => {
+    act(() => {
+      const source = container.querySelector<HTMLInputElement>('input[value="source"]')
+      source?.click()
+    })
+    expect(controller.getSnapshot().settings.colorMode).toBe('source')
+    setRaw(field('contrast'), '-30')
+    expect(controller.getSnapshot().settings.contrast).toBe(-30)
+    act(() => field('invert').click())
+    expect(controller.getSnapshot().settings.invert).toBe(true)
+  })
+
+  it('sends the edited colour style with the export request', async () => {
+    setRaw(field('foreground'), '#112233')
+    await controller.startExport().catch(() => undefined)
+    const requested = exportRequests.at(-1)?.[3]
+    expect(requested).toMatchObject({ foreground: '#112233', background: DEFAULT_BACKGROUND })
   })
 })

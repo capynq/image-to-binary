@@ -115,6 +115,11 @@ describe('phase 3.1 acceptance contracts', () => {
       threshold: 0,
       mode: 'binary' as const,
       ramp: DEFAULT_RAMP,
+      foreground: '#00ff00',
+      background: '#000000',
+      colorMode: 'monochrome',
+      contrast: 0,
+      invert: false,
     })
     await controller.preview()
     expect(await (await controller.exportDemo('text')).text()).toBe('0000\n0000\n0000\n0000')
@@ -124,6 +129,11 @@ describe('phase 3.1 acceptance contracts', () => {
       threshold: 255,
       mode: 'binary' as const,
       ramp: DEFAULT_RAMP,
+      foreground: '#00ff00',
+      background: '#000000',
+      colorMode: 'monochrome',
+      contrast: 0,
+      invert: false,
     })
     await controller.preview()
     expect(await (await controller.exportDemo('text')).text()).toBe('1111\n1111\n1111\n1111')
@@ -180,18 +190,9 @@ describe('phase 3.1 acceptance contracts', () => {
   })
 
   it.each([
-    [
-      { cellSize: 4, fontSize: 16, threshold: 128, mode: 'binary' as const, ramp: DEFAULT_RAMP },
-      'Cell size',
-    ],
-    [
-      { cellSize: 12, fontSize: 7, threshold: 128, mode: 'binary' as const, ramp: DEFAULT_RAMP },
-      'Font size',
-    ],
-    [
-      { cellSize: 12, fontSize: 16, threshold: 256, mode: 'binary' as const, ramp: DEFAULT_RAMP },
-      'Threshold',
-    ],
+    [{ ...DEFAULT_SETTINGS, cellSize: 4 }, 'Cell size'],
+    [{ ...DEFAULT_SETTINGS, fontSize: 7 }, 'Font size'],
+    [{ ...DEFAULT_SETTINGS, threshold: 256 }, 'Threshold'],
   ] as const)('validates %s', (settings, message) => {
     const controller = createStudioController()
     expect(() => controller.updateSettings(settings)).toThrow(message)

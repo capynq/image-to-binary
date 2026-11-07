@@ -1681,9 +1681,9 @@ Proposed commit title: `feat: add color controls and cache invalidation`
 
 Completion checklist:
 
-- [ ] Color and tone fixtures pass.
-- [ ] Bounds are shared across UI and core.
-- [ ] Invalidation review complete.
+- [x] Color and tone fixtures pass.
+- [x] Bounds are shared across UI and core.
+- [x] Invalidation review complete.
 
 Parent 6.2 keeps the scope and checklist above and stays incomplete until
 6.2.1 and 6.2.2 are both committed. The split adds no scope.
@@ -1749,9 +1749,30 @@ Proposed commit title: `feat: expose tone and color controls`
 
 Completion checklist:
 
-- [ ] WASM and worker style parity pass.
-- [ ] UI and core bounds agree from one source.
-- [ ] Controls pass keyboard and error review.
+- [x] WASM and worker style parity pass.
+- [x] UI and core bounds agree from one source.
+- [x] Controls pass keyboard and error review.
+
+Validation: foreground and background colour, colour mode, contrast, and invert
+travel through the shared session arguments, the WASM binding, the worker
+protocol, both adapters, and desktop IPC, validated once in Rust. A shared table
+of 35 colour and contrast cases is read by both the Rust and frontend tests, and
+messages, default colours, and the cell, font, threshold, contrast, and ramp
+bounds in `bounds.ts` are pinned to the Rust production constants as exact
+declarations. Callers that send no style get unchanged output. Five styles
+(custom colours, source colour, raised contrast at threshold 96, invert, and
+invert with a threshold change) preview and export byte-identically to
+references rendered directly by the processing renderer and native PNG task, in
+the WASM session, in Chromium (exports of 9,986, 7,043, 4,372, 4,293, and 4,520
+bytes), and in the real desktop app's 48-check smoke run, whose fixtures are now
+written by `reference_fixtures`. A style-only change keeps the sampled grid and
+glyph masks for both Classic and Average sampling, shown by cache counters. The
+controls are labelled, give readable polite errors, reach 44 px, follow an exact
+keyboard order, and block Render, Export, and the Artwork tab while a draft is
+invalid. Root (286), WASM (95), desktop (125 per build), and frontend (521)
+tests pass, and mutations of the binding, IPC invert, a core bound, UI colour
+validation, cache reuse, the shared messages, and the hex rule are caught. A
+screen reader, Firefox, and WebKit were not used.
 
 ### 6.3 Add plaintext grid export and parity checks
 
