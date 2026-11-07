@@ -9,7 +9,9 @@ use std::sync::Arc;
 
 use image_to_binary_adapters::{ArtworkPngTask, PngTaskLimits};
 use image_to_binary_core::{Generation, Sampling};
-use image_to_binary_processing::{decode, DecodeLimits, RenderOptions, Renderer, SampleGrid, Sampler};
+use image_to_binary_processing::{
+    decode, DecodeLimits, RenderOptions, Renderer, SampleGrid, Sampler,
+};
 
 const UI_CELL: u8 = 12;
 const UI_FONT: u8 = 16;
@@ -18,7 +20,10 @@ const EXPORT_GENERATION: Generation = Generation::new(0);
 const EXPORT_LIMITS: PngTaskLimits =
     PngTaskLimits::new(256 * 1024 * 1024, 1024 * 1024, 256 * 1024 * 1024);
 
-fn native_export(grid: &Arc<SampleGrid>, options: RenderOptions) -> Result<Vec<u8>, Box<dyn Error>> {
+fn native_export(
+    grid: &Arc<SampleGrid>,
+    options: RenderOptions,
+) -> Result<Vec<u8>, Box<dyn Error>> {
     let mut task = ArtworkPngTask::new(
         Arc::clone(grid),
         Renderer::new()?,
@@ -77,7 +82,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         };
         let png = native_export(&grid, options)?;
         fs::write(out_dir.join(&png_name), &png)?;
-        eprintln!("{name}: {width}x{height} channels {channels}, export {} bytes", png.len());
+        eprintln!(
+            "{name}: {width}x{height} channels {channels}, export {} bytes",
+            png.len()
+        );
         entries.push(format!(
             "{{\"name\":\"{name}\",\"width\":{width},\"height\":{height},\"channels\":{channels},\"rgbaFile\":\"{rgba_name}\",\"pngFile\":\"{png_name}\",\"exportSettings\":{{\"cellSize\":{UI_CELL},\"fontSize\":{UI_FONT},\"threshold\":{UI_THRESHOLD},\"sampling\":\"classic\"}}}}"
         ));

@@ -56,7 +56,14 @@ enum Codec {
 }
 
 impl Codec {
-    const ALL: [Self; 6] = [Self::Jpeg, Self::Png, Self::WebP, Self::Bmp, Self::Tiff, Self::Gif];
+    const ALL: [Self; 6] = [
+        Self::Jpeg,
+        Self::Png,
+        Self::WebP,
+        Self::Bmp,
+        Self::Tiff,
+        Self::Gif,
+    ];
 
     const fn name(self) -> &'static str {
         match self {
@@ -269,7 +276,11 @@ fn tiff_limit_base() -> Result<Vec<u8>> {
     let mut pixels = Vec::new();
     for y in 0..16_u32 {
         for x in 0..24_u32 {
-            pixels.extend_from_slice(&[byte(x * 255 / 23), byte(y * 255 / 15), byte((x * 37 + y * 91) % 256)]);
+            pixels.extend_from_slice(&[
+                byte(x * 255 / 23),
+                byte(y * 255 / 15),
+                byte((x * 37 + y * 91) % 256),
+            ]);
         }
     }
     let mut output = Cursor::new(Vec::new());
@@ -318,7 +329,11 @@ fn truncated_sixteen_bit_source(pixels: &[u16]) -> Result<DecodedSource> {
         rgba.extend_from_slice(&[alt, alt, alt, 255]);
     }
     let dimensions = Dimensions::new(WIDTH, HEIGHT)?;
-    Ok(DecodedSource::from_rgba(dimensions, rgba, DecodeLimits::default())?)
+    Ok(DecodedSource::from_rgba(
+        dimensions,
+        rgba,
+        DecodeLimits::default(),
+    )?)
 }
 
 fn opaque_source(source: &DecodedSource) -> Result<DecodedSource> {
@@ -327,7 +342,11 @@ fn opaque_source(source: &DecodedSource) -> Result<DecodedSource> {
     for alpha in pixels.chunks_exact_mut(4) {
         alpha[3] = 255;
     }
-    Ok(DecodedSource::from_rgba(dimensions, pixels, DecodeLimits::default())?)
+    Ok(DecodedSource::from_rgba(
+        dimensions,
+        pixels,
+        DecodeLimits::default(),
+    )?)
 }
 
 fn browser_limits() -> Result<DecodeLimits> {
@@ -376,7 +395,9 @@ fn export_png(source: DecodedSource) -> Result<Vec<u8>> {
 fn classify(result: &std::result::Result<DecodedSource, DecodeError>) -> &'static str {
     match result {
         Ok(_) => "preview",
-        Err(DecodeError::Contract(ContractError::ResourceLimitExceeded)) => "resource_limit_exceeded",
+        Err(DecodeError::Contract(ContractError::ResourceLimitExceeded)) => {
+            "resource_limit_exceeded"
+        }
         Err(DecodeError::Image(ImageError::Decoding(_))) => "decoding_error",
         Err(DecodeError::Image(ImageError::IoError(_))) => "io_error",
         Err(_) => "other_error",
@@ -392,9 +413,8 @@ fn format_entry(
 ) -> Result<Entry> {
     let decoded = decode(&bytes, DecodeLimits::default());
     let outcome = classify(&decoded);
-    let source = match decoded {
-        Ok(source) => source,
-        Err(_) => return Err(format!("{id}: native decode failed ({outcome})").into()),
+    let Ok(source) = decoded else {
+        return Err(format!("{id}: native decode failed ({outcome})").into());
     };
     let dimensions = source.metadata().dimensions();
     let (width, height) = (dimensions.width(), dimensions.height());
@@ -515,8 +535,10 @@ fn with_gif_dimensions(bytes: &[u8], width: u32, height: u32) -> Result<Vec<u8>>
 
 fn with_tiff_dimensions(bytes: &[u8], width: u32, height: u32) -> Vec<u8> {
     let mut patched = bytes.to_vec();
-    let ifd = usize::try_from(u32::from_le_bytes(bytes[4..8].try_into().expect("four bytes")))
-        .expect("offset fits");
+    let ifd = usize::try_from(u32::from_le_bytes(
+        bytes[4..8].try_into().expect("four bytes"),
+    ))
+    .expect("offset fits");
     let count = usize::from(u16::from_le_bytes(
         bytes[ifd..ifd + 2].try_into().expect("two bytes"),
     ));
@@ -564,11 +586,18 @@ fn encode_apng(first: &[u8], second: &[u8]) -> Result<Vec<u8>> {
 
 fn lossless_chunk(rgba: &[u8]) -> Result<Vec<u8>> {
     let mut output = Cursor::new(Vec::new());
-    WebPEncoder::new_lossless(&mut output).write_image(rgba, WIDTH, HEIGHT, ExtendedColorType::Rgba8)?;
+    WebPEncoder::new_lossless(&mut output).write_image(
+        rgba,
+        WIDTH,
+        HEIGHT,
+        ExtendedColorType::Rgba8,
+    )?;
     let bytes = output.into_inner();
     let mut offset = 12;
     while offset + 8 <= bytes.len() {
-        let size = usize::try_from(u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into()?))?;
+        let size = usize::try_from(u32::from_le_bytes(
+            bytes[offset + 4..offset + 8].try_into()?,
+        ))?;
         let padded = size + (size & 1);
         if &bytes[offset..offset + 4] == b"VP8L" {
             return Ok(bytes[offset..offset + 8 + padded].to_vec());
@@ -578,7 +607,7 @@ fn lossless_chunk(rgba: &[u8]) -> Result<Vec<u8>> {
     Err("the lossless WebP encoder wrote no VP8L chunk".into())
 }
 
-fn riff_chunk(fourcc: &[u8; 4], payload: &[u8]) -> Result<Vec<u8>> {
+fn riff_chunk(fourcc: [u8; 4], payload: &[u8]) -> Result<Vec<u8>> {
     let mut chunk = fourcc.to_vec();
     chunk.extend_from_slice(&u32::try_from(payload.len())?.to_le_bytes());
     chunk.extend_from_slice(payload);
@@ -599,8 +628,8 @@ fn animated_webp(frames: &[Vec<u8>], blend: u8) -> Result<Vec<u8>> {
     canvas.extend_from_slice(&u24(WIDTH - 1));
     canvas.extend_from_slice(&u24(HEIGHT - 1));
     let mut body = b"WEBP".to_vec();
-    body.extend(riff_chunk(b"VP8X", &canvas)?);
-    body.extend(riff_chunk(b"ANIM", &[0; 6])?);
+    body.extend(riff_chunk(*b"VP8X", &canvas)?);
+    body.extend(riff_chunk(*b"ANIM", &[0; 6])?);
     for frame in frames {
         let mut anmf = Vec::new();
         anmf.extend_from_slice(&u24(0));
@@ -610,7 +639,7 @@ fn animated_webp(frames: &[Vec<u8>], blend: u8) -> Result<Vec<u8>> {
         anmf.extend_from_slice(&u24(100));
         anmf.push(blend);
         anmf.extend_from_slice(frame);
-        body.extend(riff_chunk(b"ANMF", &anmf)?);
+        body.extend(riff_chunk(*b"ANMF", &anmf)?);
     }
     let mut output = b"RIFF".to_vec();
     output.extend_from_slice(&u32::try_from(body.len())?.to_le_bytes());
@@ -618,6 +647,7 @@ fn animated_webp(frames: &[Vec<u8>], blend: u8) -> Result<Vec<u8>> {
     Ok(output)
 }
 
+#[allow(clippy::too_many_lines)]
 fn main() -> Result<()> {
     let out = PathBuf::from(
         std::env::args_os()
@@ -700,7 +730,10 @@ fn main() -> Result<()> {
         "multi_page",
         Codec::Tiff,
         tiff_pages,
-        Some(("second page exported", decode(&second_page, DecodeLimits::default())?)),
+        Some((
+            "second page exported",
+            decode(&second_page, DecodeLimits::default())?,
+        )),
     )?);
 
     let rgba_first = rgba_of(ExtendedColorType::Rgb8, &rgb)?;
@@ -712,12 +745,19 @@ fn main() -> Result<()> {
         "multi_frame",
         Codec::Gif,
         gif_frames,
-        Some(("second frame exported", decode(&gif_second, DecodeLimits::default())?)),
+        Some((
+            "second frame exported",
+            decode(&gif_second, DecodeLimits::default())?,
+        )),
     )?);
 
     let frame_one = rgba_of(ExtendedColorType::Rgb8, &rgb)?;
     let frame_two = rgba_of(ExtendedColorType::Rgb8, &inverted)?;
-    let second_source = DecodedSource::from_rgba(Dimensions::new(WIDTH, HEIGHT)?, frame_two.clone(), DecodeLimits::default())?;
+    let second_source = DecodedSource::from_rgba(
+        Dimensions::new(WIDTH, HEIGHT)?,
+        frame_two.clone(),
+        DecodeLimits::default(),
+    )?;
     entries.push(format_entry(
         "png-apng-first-frame".to_owned(),
         "multi_frame",
@@ -727,7 +767,11 @@ fn main() -> Result<()> {
     )?);
     let still_one = lossless_chunk(&frame_one)?;
     let still_two = lossless_chunk(&frame_two)?;
-    let second_source = DecodedSource::from_rgba(Dimensions::new(WIDTH, HEIGHT)?, frame_two.clone(), DecodeLimits::default())?;
+    let second_source = DecodedSource::from_rgba(
+        Dimensions::new(WIDTH, HEIGHT)?,
+        frame_two.clone(),
+        DecodeLimits::default(),
+    )?;
     entries.push(format_entry(
         "webp-animated-no-blend".to_owned(),
         "multi_frame",
@@ -735,7 +779,11 @@ fn main() -> Result<()> {
         animated_webp(&[still_one.clone(), still_two.clone()], 0x02)?,
         Some(("second frame exported", second_source)),
     )?);
-    let second_source = DecodedSource::from_rgba(Dimensions::new(WIDTH, HEIGHT)?, frame_two, DecodeLimits::default())?;
+    let second_source = DecodedSource::from_rgba(
+        Dimensions::new(WIDTH, HEIGHT)?,
+        frame_two,
+        DecodeLimits::default(),
+    )?;
     entries.push(format_entry(
         "webp-animated-alpha-blend".to_owned(),
         "multi_frame",
@@ -750,14 +798,20 @@ fn main() -> Result<()> {
         "high_bit_depth",
         Codec::Png,
         png16(&sixteen)?,
-        Some(("16-bit high byte only", truncated_sixteen_bit_source(&sixteen)?)),
+        Some((
+            "16-bit high byte only",
+            truncated_sixteen_bit_source(&sixteen)?,
+        )),
     )?);
     entries.push(format_entry(
         "tiff-16bit".to_owned(),
         "high_bit_depth",
         Codec::Tiff,
         tiff16(&sixteen)?,
-        Some(("16-bit high byte only", truncated_sixteen_bit_source(&sixteen)?)),
+        Some((
+            "16-bit high byte only",
+            truncated_sixteen_bit_source(&sixteen)?,
+        )),
     )?);
 
     for codec in Codec::ALL {
