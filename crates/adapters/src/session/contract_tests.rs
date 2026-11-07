@@ -7,11 +7,13 @@ use image_to_binary_core::{
 };
 use image_to_binary_processing::RenderStyle;
 
+use super::job::OutputKind;
+
 use super::args::{
-    parse_ramp, preview_settings_styled, StyleArgs, TextArg, BACKGROUND_MESSAGE,
+    output_kind, parse_ramp, preview_settings_styled, StyleArgs, TextArg, BACKGROUND_MESSAGE,
     COLOR_MODE_MESSAGE, CONTRAST_INTEGER_MESSAGE, CONTRAST_RANGE_MESSAGE, DEFAULT_RAMP,
-    FOREGROUND_MESSAGE, INVERT_BOOLEAN_MESSAGE, RAMP_EMPTY_MESSAGE, RAMP_NOT_PRINTABLE_MESSAGE,
-    RAMP_TOO_LONG_MESSAGE,
+    FOREGROUND_MESSAGE, INVERT_BOOLEAN_MESSAGE, OUTPUT_KIND_MESSAGE, RAMP_EMPTY_MESSAGE,
+    RAMP_NOT_PRINTABLE_MESSAGE, RAMP_TOO_LONG_MESSAGE,
 };
 use super::limits::{DEFAULT_PIXEL_BUDGET, MAX_ENCODED_BYTES, MAX_SOURCE_PIXELS};
 
@@ -330,4 +332,25 @@ fn the_native_ramp_validation_matches_the_shared_vectors() {
         };
         assert_eq!(outcome, vector.expected, "{}", vector.name);
     }
+}
+
+/// The output-kind message and names are pinned by exact browser declarations, and the
+/// native parser accepts exactly the names the browser lists.
+#[test]
+fn the_output_kind_message_and_names_match_the_browser() {
+    assert_eq!(
+        ts_single_quoted(PROTOCOL_TS, "OUTPUT_KIND_MESSAGE"),
+        OUTPUT_KIND_MESSAGE
+    );
+    assert!(PROTOCOL_TS.lines().map(str::trim).any(|line| line
+        == "export const OUTPUT_KIND_NAMES: readonly OutputKindName[] = ['png', 'text']"));
+    assert_eq!(output_kind(TextArg::Text("png")).unwrap(), OutputKind::Png);
+    assert_eq!(
+        output_kind(TextArg::Text("text")).unwrap(),
+        OutputKind::Text
+    );
+    assert_eq!(
+        output_kind(TextArg::Text("svg")).unwrap_err().message(),
+        OUTPUT_KIND_MESSAGE
+    );
 }

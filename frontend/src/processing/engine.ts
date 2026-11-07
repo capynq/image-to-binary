@@ -1,4 +1,4 @@
-import type { ColorModeName, PreviewSampling, RenderModeName } from './protocol'
+import type { ColorModeName, OutputKindName, PreviewSampling, RenderModeName } from './protocol'
 
 export type EngineStage = number
 
@@ -38,7 +38,10 @@ export interface EngineSession {
   ): EngineStage
   /** Starts the bounded original-image preview job; shares advance, cancel and finish. */
   startOriginalPreview(generation: number): EngineStage
-  /** Starts a PNG export that samples the same grid as a preview with the same settings. */
+  /**
+   * Starts an export of `outputKind` that samples the same grid as a preview with the same
+   * settings; `png` and `text` are the only kinds.
+   */
   startExport(
     generation: number,
     cellSize: number,
@@ -52,6 +55,7 @@ export interface EngineSession {
     colorMode: ColorModeName,
     contrast: number,
     invert: boolean,
+    outputKind: OutputKindName,
   ): EngineStage
   advance(generation: number, pixelBudget: number): EngineStage
   /** Returns encoded chunks completed since the last drain; each array is JS-owned. */

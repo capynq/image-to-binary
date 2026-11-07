@@ -85,6 +85,7 @@ function makeArtifact(state: Harness): ExportArtifact {
   }
   const artifact: ExportArtifact = {
     kind: 'blob',
+    format: 'png',
     blob: new Blob([Uint8Array.of(1, 2, 3, 4, 5)], { type: 'image/png' }),
     byteLength: 5,
     dispose: () => {
@@ -272,5 +273,37 @@ describe('controller PNG export lifecycle', () => {
     await expect(state.controller.startExport()).rejects.toThrow('Import an image')
     expect(state.controller.getSnapshot()).toBe(before)
     expect(state.gates).toHaveLength(0)
+  })
+})
+
+describe('controller export format', () => {
+  it('starts the adapter with the chosen text format and keeps the text artifact ready', async () => {
+    const state = await readyHarness()
+    const running = state.controller.startExport('text')
+    expect(lastGate(state).format).toBe('text')
+    const artifact: ExportArtifact = {
+      kind: 'blob',
+      format: 'text',
+      blob: new Blob([Uint8Array.of(0x41, 0x0a)], { type: 'text/plain;charset=utf-8' }),
+      byteLength: 2,
+      dispose: () => undefined,
+    }
+    lastGate(state).resolve(artifact)
+    await running
+    expect(state.controller.readyExport()).toBe(artifact)
+    expect(state.controller.getSnapshot().export).toEqual({
+      status: 'ready',
+      progress: 1,
+      byteLength: 2,
+      error: null,
+    })
+  })
+
+  it('defaults to PNG when no format is given', async () => {
+    const state = await readyHarness()
+    const running = state.controller.startExport()
+    expect(lastGate(state).format).toBe('png')
+    lastGate(state).resolve(makeArtifact(state))
+    await running
   })
 })

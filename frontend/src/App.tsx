@@ -3,6 +3,7 @@ import { RenderModeFields, rampProblem } from './RenderModeFields'
 import { RenderStyleFields, colourProblem } from './RenderStyleFields'
 import { ExportPanel } from './export/ExportPanel'
 import { exportFilename } from './export/downloadName'
+import { EXPORT_FORMAT_WORDS } from './export/exportFormats'
 import type { ExportPhase } from './export/exportFocus'
 import { footerStatusLabel, useFooterAnnouncement } from './export/footerAnnouncement'
 import { useExportDownload } from './export/useExportDownload'
@@ -16,7 +17,7 @@ import {
 } from './processing/bounds'
 import { defaultUrlApi } from './processing/demoAdapter'
 import type { NativeFiles } from './processing/nativeFiles'
-import type { ExportStatus } from './processing/types'
+import type { ExportFormat, ExportStatus } from './processing/types'
 import { validateRamp } from './processing/protocol'
 import type { ColorModeName, ColourRole, RenderModeName } from './processing/protocol'
 import type { StudioController } from './state/controller'
@@ -53,9 +54,9 @@ function exportPhaseOf(status: ExportStatus, hasDownload: boolean): ExportPhase 
 /** The draft that blocks preview and export; the ramp is named first when both are invalid. */
 type DraftBlocker = 'ramp' | 'colour'
 
-const DRAFT_BLOCK_EXPORT: Readonly<Record<DraftBlocker, string>> = {
-  ramp: 'Fix the ramp to enable PNG export.',
-  colour: 'Fix the colour to enable PNG export.',
+const DRAFT_BLOCK_NAME: Readonly<Record<DraftBlocker, string>> = {
+  ramp: 'ramp',
+  colour: 'colour',
 }
 
 const DRAFT_BLOCK_ARTWORK: Readonly<Record<DraftBlocker, string>> = {
@@ -67,11 +68,13 @@ function exportBlockedBy(
   status: string,
   hasSource: boolean,
   blocker: DraftBlocker | null,
+  format: ExportFormat,
 ): string | null {
-  if (!hasSource) return 'Open or load an image to enable PNG export.'
+  const name = EXPORT_FORMAT_WORDS[format].name
+  if (!hasSource) return `Open or load an image to enable ${name} export.`
   if (status === 'importing') return 'Wait for the image to finish importing.'
   if (status === 'processing') return 'Wait for the artwork preview to finish rendering.'
-  if (blocker !== null) return DRAFT_BLOCK_EXPORT[blocker]
+  if (blocker !== null) return `Fix the ${DRAFT_BLOCK_NAME[blocker]} to enable ${name} export.`
   return null
 }
 
@@ -90,6 +93,8 @@ export default function App({ controller, native }: AppProps) {
   const [rampDraft, setRampDraft] = useState(() => snapshot.settings.ramp)
   const [foregroundDraft, setForegroundDraft] = useState(() => snapshot.settings.foreground)
   const [backgroundDraft, setBackgroundDraft] = useState(() => snapshot.settings.background)
+  const [exportFormat, setExportFormat] = useState<ExportFormat>('png')
+  const [runFormat, setRunFormat] = useState<ExportFormat>('png')
   const artworkReasonId = useId()
 
   useEffect(() => {
@@ -137,7 +142,10 @@ export default function App({ controller, native }: AppProps) {
   const readyExport = snapshot.export.status === 'ready' ? controller.readyExport() : null
   const exportArtifact = readyExport?.kind === 'blob' ? readyExport : null
   const savedExport = readyExport?.kind === 'saved' ? readyExport : null
-  const downloadName = exportFilename(snapshot.metadata?.name ?? '')
+  const downloadName = exportFilename(
+    snapshot.metadata?.name ?? '',
+    exportArtifact?.format ?? runFormat,
+  )
   const download = useExportDownload(exportArtifact, downloadName, DOWNLOAD_URL_API)
   const footerAnnouncement = useFooterAnnouncement(snapshot.status, snapshot.export.status)
   const exportPhase = exportPhaseOf(
@@ -151,7 +159,9 @@ export default function App({ controller, native }: AppProps) {
   const draftBlocker: DraftBlocker | null = rampBlocked ? 'ramp' : colourBlocked ? 'colour' : null
   const draftBlocked = draftBlocker !== null
   const canExport = hasSource && !isBusy && !draftBlocked
-  const exportBlock = canExport ? null : exportBlockedBy(snapshot.status, hasSource, draftBlocker)
+  const exportBlock = canExport
+    ? null
+    : exportBlockedBy(snapshot.status, hasSource, draftBlocker, exportFormat)
   const thresholdApplies = settings.mode === 'binary'
 
   function updateSetting(key: 'cellSize' | 'fontSize' | 'threshold', value: string) {
@@ -198,9 +208,10 @@ export default function App({ controller, native }: AppProps) {
     if (!draftBlocked) flow.renderArtwork()
   }
 
-  function startPngExport() {
+  function startExport() {
     if (!canExport) return
-    controller.startExport().catch(() => undefined)
+    setRunFormat(exportFormat)
+    controller.startExport(exportFormat).catch(() => undefined)
   }
 
   return (
@@ -521,25 +532,12 @@ export default function App({ controller, native }: AppProps) {
               error={snapshot.export.error}
               download={download}
               savedName={savedExport?.name ?? null}
-              onExport={startPngExport}
+              format={exportFormat}
+              onFormatChange={setExportFormat}
+              shownFormat={runFormat}
+              onExport={startExport}
               onCancel={flow.cancel}
             />
-            <section className="control-section" aria-labelledby="text-export-heading">
-              <div className="section-heading">
-                <h2 id="text-export-heading">Text export</h2>
-              </div>
-              <p className="section-help" id="text-export-help">
-                UTF-8 text export arrives in a later phase.
-              </p>
-              <button
-                className="button button-secondary button-wide"
-                type="button"
-                aria-describedby="text-export-help"
-                disabled
-              >
-                Export text
-              </button>
-            </section>
           </div>
         </aside>
       </main>

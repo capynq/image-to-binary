@@ -175,6 +175,7 @@ fn start_job(
     mode: &JsValue,
     ramp: &JsValue,
     style: &StyleInputs<'_>,
+    output_kind: &JsValue,
 ) -> Result<Stage, BindingError> {
     let generation = generation_of(session, generation)?;
     let sampling = sampling.as_string();
@@ -193,7 +194,11 @@ fn start_job(
     .map_err(BindingError::from)?;
     match kind {
         JobKind::Preview => session.start_preview(generation, settings),
-        JobKind::Export => session.start_export(generation, settings),
+        JobKind::Export => {
+            let output_kind = OwnedText::of(output_kind);
+            let output = args::output_kind(output_kind.arg()).map_err(BindingError::from)?;
+            session.start_export_as(generation, settings, output)
+        }
     }
     .map_err(BindingError::from)
 }
@@ -423,6 +428,7 @@ impl ImageSession {
                 contrast,
                 invert,
             },
+            &JsValue::UNDEFINED,
         ))
         .map(JobStage::from)
     }
@@ -567,6 +573,8 @@ impl ImageSession {
         color_mode: &JsValue,
         #[wasm_bindgen(unchecked_param_type = "number | undefined")] contrast: &JsValue,
         #[wasm_bindgen(unchecked_param_type = "boolean | undefined")] invert: &JsValue,
+        #[wasm_bindgen(unchecked_param_type = "\"png\" | \"text\" | undefined")]
+        output_kind: &JsValue,
     ) -> Result<JobStage, JsValue> {
         lift(start_job(
             &mut self.inner,
@@ -585,6 +593,7 @@ impl ImageSession {
                 contrast,
                 invert,
             },
+            output_kind,
         ))
         .map(JobStage::from)
     }

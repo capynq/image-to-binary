@@ -39,6 +39,7 @@ function gatedController() {
 function artifactWith(log: { disposals: number }): ExportArtifact {
   return {
     kind: 'blob',
+    format: 'png',
     blob: new Blob([Uint8Array.of(7)], { type: 'image/png' }),
     byteLength: 1,
     dispose: () => {

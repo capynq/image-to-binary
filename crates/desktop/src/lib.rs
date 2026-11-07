@@ -55,7 +55,7 @@ pub fn run() -> ExitCode {
         ipc::import_source,
         ipc::import_demo,
         ipc::start_preview,
-        ipc::export_png,
+        ipc::export_file,
         ipc::cancel,
         ipc::reset,
         ipc::echo_binary,
@@ -75,7 +75,7 @@ pub fn run() -> ExitCode {
         ipc::import_source,
         ipc::import_demo,
         ipc::start_preview,
-        ipc::export_png,
+        ipc::export_file,
         ipc::cancel,
         ipc::reset,
     ]);

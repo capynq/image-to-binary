@@ -77,3 +77,24 @@ describe('exportFilename', () => {
     expect(emoji).not.toContain('\uFFFD')
   })
 })
+
+describe('exportFilename for text exports', () => {
+  it('keeps PNG as the default format and yields the same names as before', () => {
+    expect(exportFilename('photo.png', 'png')).toBe('photo-binary.png')
+    expect(exportFilename('photo.png')).toBe(exportFilename('photo.png', 'png'))
+  })
+
+  it('names a text export <stem>-binary.txt with the same stem rules as PNG', () => {
+    expect(exportFilename('photo.png', 'text')).toBe('photo-binary.txt')
+    expect(exportFilename('my.photo.v2.jpeg', 'text')).toBe('my.photo.v2-binary.txt')
+    expect(exportFilename('archive', 'text')).toBe('archive-binary.txt')
+    expect(exportFilename('', 'text')).toBe('image-binary.txt')
+  })
+
+  it('guards Windows device names and bounds the stem for text too', () => {
+    expect(exportFilename('nul.backup', 'text')).toBe('_nul-binary.txt')
+    const long = exportFilename(`${'é'.repeat(200)}.png`, 'text')
+    expect(long.endsWith('-binary.txt')).toBe(true)
+    expect(encoder.encode(long.slice(0, -'-binary.txt'.length)).byteLength).toBeLessThanOrEqual(160)
+  })
+})

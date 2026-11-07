@@ -58,7 +58,7 @@ function wrapperAdapter(
       if (options.beforeExport !== undefined) {
         await options.beforeExport(operation)
         const blob = new Blob(['accepted stale output'], { type: 'text/plain' })
-        return { kind: 'blob', blob, byteLength: blob.size, dispose: () => undefined }
+        return { kind: 'blob', format, blob, byteLength: blob.size, dispose: () => undefined }
       }
       return base.export(session, source, format, settings, operation)
     },
@@ -122,7 +122,7 @@ describe('phase 3.1 acceptance contracts', () => {
       invert: false,
     })
     await controller.preview()
-    expect(await (await controller.exportDemo('text')).text()).toBe('0000\n0000\n0000\n0000')
+    expect(await (await controller.exportDemo('text')).text()).toBe('0000\n0000\n0000\n0000\n')
     controller.updateSettings({
       cellSize: 12,
       fontSize: 16,
@@ -136,7 +136,7 @@ describe('phase 3.1 acceptance contracts', () => {
       invert: false,
     })
     await controller.preview()
-    expect(await (await controller.exportDemo('text')).text()).toBe('1111\n1111\n1111\n1111')
+    expect(await (await controller.exportDemo('text')).text()).toBe('1111\n1111\n1111\n1111\n')
   })
 
   it('does not revive the oldest cancelled preview after many newer operations', async () => {
@@ -244,6 +244,6 @@ describe('phase 3.1 acceptance contracts', () => {
     expect(controller.getSnapshot().preview).toEqual(previous)
     expect(controller.getSnapshot().error).toContain('Previous image remains available.')
     const exported = await controller.exportDemo('text')
-    expect(await exported.text()).toBe('1010\n0101\n1010\n0101')
+    expect(await exported.text()).toBe('1010\n0101\n1010\n0101\n')
   })
 })

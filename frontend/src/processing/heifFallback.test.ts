@@ -1,3 +1,4 @@
+import type { OutputKindName } from './protocol'
 import { describe, expect, it } from 'vitest'
 import { createBrowserProcessingAdapter } from './browserAdapter'
 import { createStudioController } from '../state/controller'
@@ -84,9 +85,10 @@ class FakeClient implements ProcessingClient {
     return Promise.reject(new Error('preview is not faked in this suite'))
   }
 
-  exportPng<T extends Releasable>(
+  exportFile<T extends Releasable>(
     _source: SourceHandle,
     _parameters: PreviewParameters,
+    _outputKind: OutputKindName,
     _operationId: number,
     _sink: ExportSink,
     _finalize: (completion: ExportCompletion) => T,

@@ -46,8 +46,8 @@ export interface StudioController {
    * Listeners run after each snapshot is complete, so a listener may call back into the
    * controller; such a call is judged against the snapshot that was just committed.
    */
-  startExport(): Promise<void>
-  /** The ready PNG export, or null. Kept out of snapshots; the download phase reads it. */
+  startExport(format?: ExportFormat): Promise<void>
+  /** The ready export, or null. Kept out of snapshots; the download phase reads it. */
   readyExport(): ExportArtifact | null
   reset(): void
   cancel(): void
@@ -310,7 +310,7 @@ export function createStudioController(options: StudioControllerOptions = {}): S
     )
   }
 
-  const startExport = async (): Promise<void> => {
+  const startExport = async (format: ExportFormat = 'png'): Promise<void> => {
     if (disposed) {
       throw new Error('Studio controller is disposed.')
     }
@@ -330,7 +330,7 @@ export function createStudioController(options: StudioControllerOptions = {}): S
       artifact = await adapter.export(
         session,
         owned.source,
-        'png',
+        format,
         settings,
         operation,
         (fraction) => {

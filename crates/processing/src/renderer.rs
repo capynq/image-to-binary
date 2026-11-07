@@ -2400,6 +2400,41 @@ mod tests {
     }
 
     #[test]
+    fn text_lines_match_the_png_grid_dimensions() {
+        for (columns, rows, sampling, mode) in [
+            (37, 23, Sampling::Classic, RenderMode::Binary),
+            (6, 7, Sampling::Average, RenderMode::Block),
+            (
+                9,
+                4,
+                Sampling::Average,
+                RenderMode::Ascii(Ramp::DEFAULT_ASCII),
+            ),
+        ] {
+            let grid = text_grid(columns, rows, sampling, |x, y| {
+                u8::try_from((x * 41 + y * 13) % 256).unwrap()
+            });
+            let options = text_options(sampling, mode);
+            let renderer = Renderer::new().unwrap();
+            let (frame_width, frame_height) = renderer.frame_dimensions(&grid, options).unwrap();
+            let text = String::from_utf8(text_of(&grid, options)).unwrap();
+            let lines: Vec<&str> = text.split_inclusive('\n').collect();
+            assert_eq!(lines.len(), usize::try_from(grid.height()).unwrap());
+            for line in &lines {
+                assert_eq!(
+                    line.trim_end_matches('\n').chars().count(),
+                    usize::try_from(grid.width()).unwrap()
+                );
+            }
+            assert!(frame_width > 0 && frame_width % grid.width() == 0);
+            if sampling == Sampling::Classic {
+                assert_eq!(frame_width, grid.width() * u32::from(options.cell_size));
+                assert_eq!(frame_height, grid.height() * u32::from(options.cell_size));
+            }
+        }
+    }
+
+    #[test]
     fn text_rows_reject_the_same_ranges_as_render_rows() {
         let grid = text_grid(3, 4, Sampling::Average, |_, _| 128);
         let options = text_options(Sampling::Average, RenderMode::Block);

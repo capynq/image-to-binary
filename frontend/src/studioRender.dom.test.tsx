@@ -4,6 +4,7 @@ import { createRoot } from 'react-dom/client'
 import type { Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
+import { exportFilename } from './export/downloadName'
 import { countingUrlApi } from './export/exportTestSupport'
 import { createDemoProcessingAdapter } from './processing/demoAdapter'
 import { DEFAULT_BACKGROUND, DEFAULT_RAMP } from './processing/protocol'
@@ -265,5 +266,143 @@ describe('studio render colour gates and style requests', () => {
     await controller.startExport().catch(() => undefined)
     const requested = exportRequests.at(-1)?.[3]
     expect(requested).toMatchObject({ foreground: '#112233', background: DEFAULT_BACKGROUND })
+  })
+})
+
+describe('studio text export', () => {
+  const originalCreate = URL.createObjectURL
+  const originalRevoke = URL.revokeObjectURL
+
+  beforeEach(() => {
+    Object.assign(URL, {
+      createObjectURL: () => 'blob:studio-text',
+      revokeObjectURL: () => undefined,
+    })
+  })
+
+  afterEach(() => {
+    Object.assign(URL, { createObjectURL: originalCreate, revokeObjectURL: originalRevoke })
+  })
+
+  function anchor(label: string): HTMLAnchorElement {
+    const found = [...container.querySelectorAll<HTMLAnchorElement>('a')].find(
+      (candidate) => candidate.textContent?.trim() === label,
+    )
+    if (found === undefined) throw new Error(`no link ${label}`)
+    return found
+  }
+
+  async function settleExport(): Promise<void> {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    })
+  }
+
+  it('exports text through the controller with its format and offers a .txt download', async () => {
+    act(() => radio('text').click())
+    expect(button('Export text').disabled).toBe(false)
+    act(() => button('Export text').click())
+    await settleExport()
+    expect(exportRequests.at(-1)?.[2]).toBe('text')
+    const name = controller.getSnapshot().metadata?.name ?? ''
+    expect(anchor('Download text').getAttribute('download')).toBe(exportFilename(name, 'text'))
+    expect(container.querySelector('.export-status')?.textContent).toMatch(/^Text export ready, /)
+  })
+
+  it('requests PNG again once the format is switched back, and never as text', async () => {
+    act(() => radio('text').click())
+    act(() => radio('png').click())
+    act(() => button('Export PNG').click())
+    await settleExport()
+    expect(exportRequests.at(-1)?.[2]).toBe('png')
+    expect(container.querySelector('.export-status')?.textContent).toMatch(/^PNG export failed/)
+  })
+
+  it('blocks text export and names it while the ramp is invalid, as PNG export is', () => {
+    act(() => radio('text').click())
+    act(() => radio('ascii').click())
+    typeInto(rampInput(), '')
+    expect(button('Export text').disabled).toBe(true)
+    expect(container.textContent).toContain('Fix the ramp to enable text export.')
+    typeInto(rampInput(), '#')
+    expect(button('Export text').disabled).toBe(false)
+  })
+})
+
+describe('studio download name follows the artifact format', () => {
+  const originalCreate = URL.createObjectURL
+  const originalRevoke = URL.revokeObjectURL
+  const PNG_BYTES = Uint8Array.of(137, 80, 78, 71, 13, 10, 26, 10)
+  let blobs: Blob[] = []
+
+  beforeEach(async () => {
+    blobs = []
+    Object.assign(URL, {
+      createObjectURL: (object: Blob) => {
+        blobs.push(object)
+        return 'blob:studio-format'
+      },
+      revokeObjectURL: () => undefined,
+    })
+    controller.dispose()
+    const demo = createDemoProcessingAdapter({ urlApi: countingUrlApi() })
+    controller = createStudioController({
+      adapter: {
+        ...demo,
+        export: async (...args) => {
+          if (args[2] !== 'png') return demo.export(...args)
+          return {
+            kind: 'blob',
+            format: 'png',
+            blob: new Blob([PNG_BYTES], { type: 'image/png' }),
+            byteLength: PNG_BYTES.byteLength,
+            dispose: () => undefined,
+          }
+        },
+      },
+    })
+    await controller.loadDemo()
+    act(() => root?.render(<App controller={controller} native={null} />))
+  })
+
+  afterEach(() => {
+    Object.assign(URL, { createObjectURL: originalCreate, revokeObjectURL: originalRevoke })
+  })
+
+  function anchor(label: string): HTMLAnchorElement {
+    const found = [...container.querySelectorAll<HTMLAnchorElement>('a')].find(
+      (candidate) => candidate.textContent?.trim() === label,
+    )
+    if (found === undefined) throw new Error(`no link ${label}`)
+    return found
+  }
+
+  async function settleExport(): Promise<void> {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    })
+  }
+
+  it('keeps the PNG name and type after the format radio moves to text', async () => {
+    act(() => button('Export PNG').click())
+    await settleExport()
+    const name = exportFilename(controller.getSnapshot().metadata?.name ?? '', 'png')
+    expect(name).toMatch(/-binary\.png$/)
+    expect(anchor('Download PNG').getAttribute('download')).toBe(name)
+    act(() => radio('text').click())
+    expect(anchor('Download PNG').getAttribute('download')).toBe(name)
+    expect(blobs.at(-1)?.type).toBe('image/png')
+  })
+
+  it('keeps the text name and type after the format radio moves back to PNG', async () => {
+    act(() => radio('text').click())
+    act(() => button('Export text').click())
+    await settleExport()
+    const name = exportFilename(controller.getSnapshot().metadata?.name ?? '', 'text')
+    expect(name).toMatch(/-binary\.txt$/)
+    expect(anchor('Download text').getAttribute('download')).toBe(name)
+    act(() => radio('png').click())
+    expect(anchor('Download text').getAttribute('download')).toBe(name)
+    expect(blobs.at(-1)?.type).toBe('text/plain;charset=utf-8')
   })
 })

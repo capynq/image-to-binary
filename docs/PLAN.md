@@ -1794,9 +1794,9 @@ Proposed commit title: `feat: export deterministic text grids`
 
 Completion checklist:
 
-- [ ] Text contract documented.
-- [ ] Cross-adapter parity passes.
-- [ ] Long-output memory behavior reviewed.
+- [x] Text contract documented.
+- [x] Cross-adapter parity passes.
+- [x] Long-output memory behavior reviewed.
 
 Parent 6.3 keeps the scope and checklist above and stays incomplete until
 6.3.1 and 6.3.2 are both committed. The split adds no scope.
@@ -1864,9 +1864,31 @@ Proposed commit title: `feat: export deterministic text grids`
 
 Completion checklist:
 
-- [ ] WASM and worker text parity pass.
-- [ ] Browser and native text are byte-identical on shared fixtures.
-- [ ] Real-browser text download passes.
+- [x] WASM and worker text parity pass.
+- [x] Browser and native text are byte-identical on shared fixtures.
+- [x] Real-browser text download passes.
+
+Validation: a PNG or text output kind travels through the shared session, the
+WASM binding, the worker protocol, both adapters, and desktop IPC, whose export
+command is now `export_file`; one Rust rule validates it and one frontend guard
+mirrors it. The export panel offers a format radio group with one Export button;
+a finished export keeps its own format, name, and type when the choice changes,
+and the invalid-draft gate, cancel, and announcements match PNG. Text bytes are
+collected as byte parts and never decoded, saved natively through the atomic
+sink, and downloaded as `text/plain;charset=utf-8`. Six references rendered by
+`ArtworkTextTask` and cross-checked with `text_rows` (classic, default and
+custom ASCII ramps, multi-byte block, inverted with colours, which matches the
+uncoloured text, and raised contrast) match byte for byte in the WASM session at
+1-byte and unbounded budgets, in Chromium downloads, and in the real desktop
+app's 52-check smoke run; every path follows the text contract, and the session
+equals the direct text rows at budgets 1, 7, and 4,096. Earlier reference fields
+are unchanged. For a 50 MP source at cell 5, block text is about 6.0 MB: the
+browser peaks near 22 MB (a 10 MB grid, the byte parts, and the final Blob
+copy), while native streams chunks and peaks near 11 MB; both are estimates from
+the code, far below the 256 MiB encoded ceiling, whose text error is tested.
+Root (292), WASM (104), desktop (132 per build), and frontend (562) tests pass,
+and mutations of the output kind, per-chunk decoding, the native filter and
+task, the gate, the trailing LF, CRLF writes, and the download name are caught.
 
 ### 7.1 Implement visual primitives
 

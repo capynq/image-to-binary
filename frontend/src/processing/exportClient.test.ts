@@ -81,7 +81,7 @@ describe('export client stream', () => {
     const { endpoint, client } = controlledClient()
     const source = await importViaEndpoint(client, endpoint, 1, 1)
     const sink = recordingSink()
-    const pending = client.exportPng(source, PARAMS, 2, sink, finalize)
+    const pending = client.exportFile(source, PARAMS, 'png', 2, sink, finalize)
     await until(() => endpoint.requests('export').length === 1, 'export request')
     const { requestId } = latest(endpoint, 'export')
 
@@ -111,7 +111,7 @@ describe('export client stream', () => {
     const { endpoint, client } = controlledClient()
     const source = await importViaEndpoint(client, endpoint, 1, 1)
     const sink = recordingSink()
-    const pending = client.exportPng(source, PARAMS, 2, sink, finalize)
+    const pending = client.exportFile(source, PARAMS, 'png', 2, sink, finalize)
     await until(() => endpoint.requests('export').length === 1, 'export request')
     emitChunk(endpoint, Number(latest(endpoint, 'export').requestId), 2, 1, [9])
 
@@ -125,7 +125,7 @@ describe('export client stream', () => {
     const { endpoint, client } = controlledClient()
     const source = await importViaEndpoint(client, endpoint, 1, 1)
     const sink = recordingSink()
-    const pending = client.exportPng(source, PARAMS, 2, sink, finalize)
+    const pending = client.exportFile(source, PARAMS, 'png', 2, sink, finalize)
     await until(() => endpoint.requests('export').length === 1, 'export request')
     const requestId = Number(latest(endpoint, 'export').requestId)
 
@@ -155,7 +155,7 @@ describe('export client stream', () => {
     const { endpoint, client } = controlledClient()
     const source = await importViaEndpoint(client, endpoint, 1, 1)
     const sink = recordingSink()
-    const pending = client.exportPng(source, PARAMS, 2, sink, finalize)
+    const pending = client.exportFile(source, PARAMS, 'png', 2, sink, finalize)
     await until(() => endpoint.requests('export').length === 1, 'export request')
     const requestId = Number(latest(endpoint, 'export').requestId)
 
@@ -189,7 +189,7 @@ describe('export client stream', () => {
       },
       progress: () => undefined,
     }
-    const pending = client.exportPng(source, PARAMS, 2, sink, finalize)
+    const pending = client.exportFile(source, PARAMS, 'png', 2, sink, finalize)
     await until(() => endpoint.requests('export').length === 1, 'export request')
     const requestId = Number(latest(endpoint, 'export').requestId)
 
@@ -208,7 +208,7 @@ describe('export client stream', () => {
     const { endpoint, client } = controlledClient()
     const source = await importViaEndpoint(client, endpoint, 1, 1)
     let finalized = 0
-    const pending = client.exportPng(source, PARAMS, 2, recordingSink(), (completion) => {
+    const pending = client.exportFile(source, PARAMS, 'png', 2, recordingSink(), (completion) => {
       finalized += 1
       return finalize(completion)
     })
@@ -242,7 +242,7 @@ describe('export client stream', () => {
   it('a newer preview supersedes a running export, which rejects before the worker unwinds', async () => {
     const { endpoint, client } = controlledClient()
     const source = await importViaEndpoint(client, endpoint, 1, 1)
-    const exportPending = client.exportPng(source, PARAMS, 2, recordingSink(), finalize)
+    const exportPending = client.exportFile(source, PARAMS, 'png', 2, recordingSink(), finalize)
     await until(() => endpoint.requests('export').length === 1, 'export request')
     const exportId = Number(latest(endpoint, 'export').requestId)
 
@@ -271,7 +271,7 @@ describe('export client stream', () => {
     await until(() => endpoint.requests('preview').length === 1, 'active preview')
     const activeId = Number(latest(endpoint, 'preview').requestId)
 
-    const pendingExport = client.exportPng(source, PARAMS, 3, recordingSink(), finalize)
+    const pendingExport = client.exportFile(source, PARAMS, 'png', 3, recordingSink(), finalize)
     const newerPreview = client.preview(source, PARAMS, 4, previewFinalize)
     expect((await settle(pendingExport)).ok).toBe(false)
     expect(endpoint.requests('export')).toHaveLength(0)
@@ -295,7 +295,7 @@ describe('export client stream', () => {
     const { endpoint, client } = controlledClient()
     const source = await importViaEndpoint(client, endpoint, 1, 1)
     let finalized = 0
-    const pending = client.exportPng(source, PARAMS, 2, recordingSink(), (completion) => {
+    const pending = client.exportFile(source, PARAMS, 'png', 2, recordingSink(), (completion) => {
       finalized += 1
       return finalize(completion)
     })

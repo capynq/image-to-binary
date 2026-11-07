@@ -1,8 +1,10 @@
 import { useEffect, useId, useRef, useState } from 'react'
+import type { ExportFormat } from '../processing/types'
 import { formatBytes } from '../useImportFlow'
 import { announceExportPhase } from './exportAnnouncement'
 import type { AnnouncedExport } from './exportAnnouncement'
 import type { DownloadLink } from './downloadOwner'
+import { EXPORT_FORMAT_WORDS, EXPORT_FORMATS } from './exportFormats'
 import { exportFocusTarget, shouldMoveExportFocus } from './exportFocus'
 import type { ExportFocusTarget, ExportPhase } from './exportFocus'
 
@@ -17,6 +19,11 @@ export interface ExportPanelProps {
   readonly download: DownloadLink | null
   /** Name of a native export already written to the chosen file; replaces the download link. */
   readonly savedName?: string | null
+  /** The format the next export produces. The format control is shown only when this is set. */
+  readonly format?: ExportFormat
+  readonly onFormatChange?: (format: ExportFormat) => void
+  /** The format of the export on screen, such as the running or downloaded one; defaults to `format`. */
+  readonly shownFormat?: ExportFormat
   readonly onExport: () => void
   readonly onCancel: () => void
 }
@@ -26,16 +33,23 @@ export interface ExportPanelProps {
  * (with Export again), or Retry. Focus follows `exportFocusTarget` when the control it was on is
  * replaced, so keyboard users are never left on `body`. This panel's live region is the only
  * announcer of the export lifecycle.
+ *
+ * The format control is a radio group, not a second export button: one primary control, one
+ * focus path and one announcement path stay for every format. It is hidden while an export runs,
+ * so the format of a running export cannot change under it.
  */
 export function ExportPanel(props: ExportPanelProps) {
   const { phase, canExport, disabledReason, progress, byteLength, error } = props
   const savedName = props.savedName ?? null
+  const choice: ExportFormat = props.format ?? 'png'
+  const shown: ExportFormat = props.shownFormat ?? choice
   const [announced, setAnnounced] = useState<AnnouncedExport>(() => ({
     phase,
-    text: announceExportPhase(null, phase, byteLength, error, savedName),
+    text: announceExportPhase(null, phase, byteLength, error, savedName, shown),
   }))
   const headingId = useId()
   const reasonId = useId()
+  const formatGroupId = useId()
   const progressId = useId()
   const panelRef = useRef<HTMLElement>(null)
   const headingRef = useRef<HTMLHeadingElement>(null)
@@ -70,12 +84,19 @@ export function ExportPanel(props: ExportPanelProps) {
 
   let live = announced
   if (announced.phase !== phase) {
-    live = { phase, text: announceExportPhase(announced, phase, byteLength, error, savedName) }
+    live = {
+      phase,
+      text: announceExportPhase(announced, phase, byteLength, error, savedName, shown),
+    }
     setAnnounced(live)
   }
 
   const percent = Math.round(Math.min(1, Math.max(0, progress)) * 100)
   const download = phase === 'ready' ? props.download : null
+  const shownWords = EXPORT_FORMAT_WORDS[shown]
+  const choiceWords = EXPORT_FORMAT_WORDS[choice]
+  const formatChoice = props.onFormatChange
+  const showsFormatChoice = phase !== 'running' && phase !== 'preparing'
 
   return (
     <section className="control-section export-section" aria-labelledby={headingId} ref={panelRef}>
@@ -84,9 +105,27 @@ export function ExportPanel(props: ExportPanelProps) {
           Export
         </h2>
       </div>
-      <p className="section-help">
-        PNG uses the current rendering settings and stays on this device.
-      </p>
+      <p className="section-help">{choiceWords.help}</p>
+
+      {formatChoice !== undefined && showsFormatChoice && (
+        <fieldset className="mode-fieldset format-fieldset">
+          <legend className="field-label-legend">Format</legend>
+          <div className="mode-options format-options">
+            {EXPORT_FORMATS.map((value) => (
+              <label key={value} className={`mode-option ${choice === value ? 'is-selected' : ''}`}>
+                <input
+                  type="radio"
+                  name={formatGroupId}
+                  value={value}
+                  checked={choice === value}
+                  onChange={() => formatChoice(value)}
+                />
+                <span>{EXPORT_FORMAT_WORDS[value].choice}</span>
+              </label>
+            ))}
+          </div>
+        </fieldset>
+      )}
 
       {phase === 'idle' && (
         <div className="export-actions">
@@ -98,7 +137,7 @@ export function ExportPanel(props: ExportPanelProps) {
             aria-describedby={disabledReason === null ? undefined : reasonId}
             onClick={props.onExport}
           >
-            Export PNG
+            Export {choiceWords.name}
           </button>
           {disabledReason !== null && (
             <p className="section-help export-reason" id={reasonId}>
@@ -112,7 +151,7 @@ export function ExportPanel(props: ExportPanelProps) {
         <div className="export-actions">
           <div className="export-progress-head">
             <label htmlFor={progressId}>
-              {phase === 'running' ? 'Rendering PNG' : 'Preparing download'}
+              {phase === 'running' ? `Rendering ${shownWords.name}` : 'Preparing download'}
             </label>
             <span className="export-percent">{phase === 'preparing' ? 100 : percent}%</span>
           </div>
@@ -142,7 +181,9 @@ export function ExportPanel(props: ExportPanelProps) {
               Saved {savedName}, {formatBytes(byteLength ?? 0)}.
             </p>
           ) : (
-            <p className="section-help">Encoded PNG: {formatBytes(byteLength ?? 0)}</p>
+            <p className="section-help">
+              Encoded {shownWords.name}: {formatBytes(byteLength ?? 0)}
+            </p>
           )}
           {download !== null && (
             <a
@@ -151,7 +192,7 @@ export function ExportPanel(props: ExportPanelProps) {
               href={download.url}
               download={download.filename}
             >
-              Download PNG
+              Download {shownWords.name}
             </a>
           )}
           <button
@@ -168,7 +209,7 @@ export function ExportPanel(props: ExportPanelProps) {
 
       {phase === 'failed' && (
         <div className="error-panel export-error">
-          <p className="error-text">{error ?? 'The PNG export failed.'}</p>
+          <p className="error-text">{error ?? `The ${shownWords.name} export failed.`}</p>
           <button
             ref={retryRef}
             className="button button-secondary button-wide"
@@ -176,7 +217,7 @@ export function ExportPanel(props: ExportPanelProps) {
             disabled={!canExport}
             onClick={props.onExport}
           >
-            Retry PNG export
+            Retry {choiceWords.name} export
           </button>
         </div>
       )}

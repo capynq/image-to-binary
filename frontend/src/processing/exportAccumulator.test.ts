@@ -53,3 +53,47 @@ describe('export accumulator', () => {
     expect(fractions).toEqual([0.25, 1])
   })
 })
+
+describe('export accumulator formats', () => {
+  it('builds a text/plain UTF-8 Blob for the text format and records the format', async () => {
+    const accumulator = createExportAccumulator({ format: 'text' })
+    accumulator.accept(bytes(0x41, 0x0a))
+    const artifact = accumulator.finish({ chunkCount: 1, byteLength: 2 })
+    expect(artifact.kind).toBe('blob')
+    expect(artifact.format).toBe('text')
+    expect(artifact.blob.type).toBe('text/plain;charset=utf-8')
+    expect(new Uint8Array(await artifact.blob.arrayBuffer())).toEqual(Uint8Array.of(0x41, 0x0a))
+  })
+
+  it('defaults to the PNG format and image/png type', () => {
+    const artifact = createExportAccumulator().finish({ chunkCount: 0, byteLength: 0 })
+    expect(artifact.format).toBe('png')
+    expect(artifact.blob.type).toBe('image/png')
+  })
+
+  it('keeps a three-byte block character intact when its bytes are split across chunks', async () => {
+    const block = '█'
+    const encoded = [...new TextEncoder().encode(block)]
+    expect(encoded).toEqual([0xe2, 0x96, 0x88])
+    for (const split of [
+      [[0xe2], [0x96, 0x88]],
+      [[0xe2, 0x96], [0x88]],
+      [[0xe2], [0x96], [0x88]],
+    ]) {
+      const accumulator = createExportAccumulator({ format: 'text' })
+      for (const part of split) accumulator.accept(bytes(...part))
+      const artifact = accumulator.finish({ chunkCount: split.length, byteLength: 3 })
+      expect(new Uint8Array(await artifact.blob.arrayBuffer())).toEqual(Uint8Array.from(encoded))
+      expect(await artifact.blob.text()).toBe(block)
+    }
+  })
+
+  it('preserves a multi-line block grid byte for byte across one-byte chunks', async () => {
+    const text = '█ ░\n  ▒▒\n'
+    const encoded = new TextEncoder().encode(text)
+    const accumulator = createExportAccumulator({ format: 'text' })
+    for (const byte of encoded) accumulator.accept(bytes(byte))
+    const artifact = accumulator.finish({ chunkCount: encoded.length, byteLength: encoded.length })
+    expect(new Uint8Array(await artifact.blob.arrayBuffer())).toEqual(encoded)
+  })
+})

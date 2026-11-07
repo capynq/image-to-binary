@@ -420,10 +420,11 @@ fn failed_starts_keep_the_current_job_and_the_proposed_generation() {
         mode: image_to_binary_core::RenderMode::Binary,
         style: image_to_binary_processing::RenderStyle::default(),
     };
-    let failed = session
-        .live_mut()
-        .unwrap()
-        .start(g(6), invalid, JobKind::Preview);
+    let failed =
+        session
+            .live_mut()
+            .unwrap()
+            .start(g(6), invalid, JobKind::Preview, OutputKind::Png);
     assert_eq!(code(failed), ErrorCode::InvalidSettings);
     assert_eq!(session.live.as_ref().unwrap().newest, Some(5));
     assert_eq!(session.stage().unwrap(), Stage::Sampling);
@@ -565,10 +566,11 @@ fn invalid_starts_keep_an_accepted_original_job() {
         mode: image_to_binary_core::RenderMode::Binary,
         style: image_to_binary_processing::RenderStyle::default(),
     };
-    let failed = session
-        .live_mut()
-        .unwrap()
-        .start(g(6), invalid, JobKind::Preview);
+    let failed =
+        session
+            .live_mut()
+            .unwrap()
+            .start(g(6), invalid, JobKind::Preview, OutputKind::Png);
     assert_eq!(code(failed), ErrorCode::InvalidSettings);
     assert_eq!(session.live.as_ref().unwrap().newest, Some(5));
     assert_eq!(session.stage().unwrap(), Stage::Preview);
@@ -681,7 +683,7 @@ fn export_bytes(session: &mut Session, generation: u64, budget: u64) -> Vec<u8> 
 
 fn encoding_row_pixels(session: &Session) -> u64 {
     match &session.live.as_ref().unwrap().job.as_ref().unwrap().phase {
-        Phase::Encoding(task) => task.pixels_per_grid_row(),
+        Phase::Encoding(task) => task.grid_row_units(),
         other => panic!("expected an encoding export, found {other:?}"),
     }
 }
@@ -966,4 +968,87 @@ fn wrong_kind_calls_report_no_job_even_when_the_job_failed() {
         start_export(&mut export, 1, Sampling::Classic).unwrap(),
         Stage::Sampling
     );
+}
+
+#[test]
+fn text_exports_follow_the_contract_for_every_budget() {
+    let mut reference: Option<Vec<u8>> = None;
+    for budget in [1, 7, 4_096, 1 << 20] {
+        let mut session = new_session(37, 23);
+        session
+            .start_export_as(
+                g(0),
+                settings(5, 10, 128, Sampling::Classic),
+                OutputKind::Text,
+            )
+            .unwrap();
+        let bytes = export_bytes(&mut session, 0, budget);
+        assert!(!bytes.starts_with(&[0xEF, 0xBB, 0xBF]), "no BOM");
+        assert!(!bytes.contains(&b'\r'), "LF only");
+        assert_eq!(bytes.last(), Some(&b'\n'), "trailing LF");
+        let text = std::str::from_utf8(&bytes).unwrap();
+        let lines: Vec<&str> = text.split_inclusive('\n').collect();
+        let width = lines[0].len() - 1;
+        assert!(width > 0 && !lines.is_empty());
+        for line in &lines {
+            assert!(line.ends_with('\n'));
+            assert_eq!(line.len() - 1, width, "every line has the same width");
+        }
+        match &reference {
+            None => reference = Some(bytes),
+            Some(first) => assert_eq!(&bytes, first, "budget {budget} changed the bytes"),
+        }
+    }
+}
+
+#[test]
+fn text_export_equals_the_direct_text_rows_for_budgets_one_seven_and_4096() {
+    let options = RenderOptions {
+        cell_size: 5,
+        font_size: 10,
+        threshold: 128,
+        sampling: Sampling::Classic,
+        ..RenderOptions::default()
+    };
+    let mut sampler = Sampler::new(Arc::new(decoded(37, 23)));
+    let grid = sampler.sample(5, Sampling::Classic).unwrap();
+    let direct = Renderer::new()
+        .unwrap()
+        .text_rows(&grid, options, 0, grid.height())
+        .unwrap();
+    for budget in [1, 7, 4_096] {
+        let mut session = new_session(37, 23);
+        session
+            .start_export_as(
+                g(0),
+                settings(5, 10, 128, Sampling::Classic),
+                OutputKind::Text,
+            )
+            .unwrap();
+        assert_eq!(
+            export_bytes(&mut session, 0, budget),
+            direct,
+            "budget {budget}"
+        );
+    }
+}
+
+#[test]
+fn a_text_export_is_not_a_png_and_png_stays_the_default() {
+    let mut session = new_session(16, 16);
+    session
+        .start_export(g(0), settings(5, 10, 128, Sampling::Classic))
+        .unwrap();
+    let png = export_bytes(&mut session, 0, 1 << 20);
+    assert!(png.starts_with(&[0x89, b'P', b'N', b'G']));
+    let mut session = new_session(16, 16);
+    session
+        .start_export_as(
+            g(0),
+            settings(5, 10, 128, Sampling::Classic),
+            OutputKind::Text,
+        )
+        .unwrap();
+    let text = export_bytes(&mut session, 0, 1 << 20);
+    assert!(!text.starts_with(&[0x89, b'P', b'N', b'G']));
 }

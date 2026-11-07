@@ -9,6 +9,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use image_to_binary_adapters::session::OutputKind;
 use tauri::AppHandle;
 
 use super::sink::suggested_file_name;
@@ -20,6 +21,30 @@ use crate::error::{ErrorCode, IpcError};
 pub(crate) const IMAGE_EXTENSIONS: &[&str] =
     &["bmp", "gif", "jpeg", "jpg", "png", "tif", "tiff", "webp"];
 const PNG_EXTENSIONS: &[&str] = &["png"];
+const TEXT_EXTENSIONS: &[&str] = &["txt"];
+
+/// The label and extensions a save dialog offers for one output kind. The first extension is
+/// the one a default name gets.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SaveFilter {
+    pub(crate) label: &'static str,
+    pub(crate) extensions: &'static [&'static str],
+}
+
+/// Returns the save filter of `output`: `PNG image` with `png` for PNG, `Text` with `txt` for text.
+#[must_use]
+pub(crate) fn save_filter(output: OutputKind) -> SaveFilter {
+    match output {
+        OutputKind::Png => SaveFilter {
+            label: "PNG image",
+            extensions: PNG_EXTENSIONS,
+        },
+        OutputKind::Text => SaveFilter {
+            label: "Text",
+            extensions: TEXT_EXTENSIONS,
+        },
+    }
+}
 
 /// The user's choice: `Ok(None)` means the dialog was cancelled, which is not an error.
 pub(crate) type Selection = Result<Option<PathBuf>, IpcError>;
@@ -29,7 +54,7 @@ type Done = Box<dyn FnOnce(Selection) + Send>;
 /// or drop it unanswered when the dialog cannot be shown.
 pub(crate) trait Picker: Send + Sync + 'static {
     fn choose_image(&self, done: Done);
-    fn choose_destination(&self, suggested_name: &str, done: Done);
+    fn choose_destination(&self, suggested_name: &str, filter: SaveFilter, done: Done);
 }
 
 /// Dialogs backed by `rfd`, reached only through Rust.
@@ -61,12 +86,12 @@ impl Picker for NativePicker {
         );
     }
 
-    fn choose_destination(&self, suggested_name: &str, done: Done) {
+    fn choose_destination(&self, suggested_name: &str, filter: SaveFilter, done: Done) {
         let name = suggested_name.to_owned();
         self.dispatch(
             move || {
                 rfd::FileDialog::new()
-                    .add_filter("PNG image", PNG_EXTENSIONS)
+                    .add_filter(filter.label, filter.extensions)
                     .set_file_name(name)
                     .save_file()
             },
@@ -134,8 +159,26 @@ pub(crate) async fn pick_source<P: Picker>(
     }
 }
 
+/// Returns the default name for `output`. A hint that already ends in the output's extension is
+/// kept; any other hint keeps its stem and takes that extension, and no hint gives `image.<ext>`.
+fn destination_name(hint: Option<&str>, output: OutputKind) -> String {
+    let extension = save_filter(output).extensions[0];
+    let name = suggested_file_name(hint);
+    if let Some((_, found)) = name.rsplit_once('.') {
+        if found.eq_ignore_ascii_case(extension) {
+            return name;
+        }
+    }
+    let stem = match name.rsplit_once('.') {
+        Some((stem, _)) if !stem.is_empty() => stem,
+        _ => name.as_str(),
+    };
+    format!("{stem}.{extension}")
+}
+
 /// Shows the save dialog with a sanitised suggested name and returns a handle for the chosen
 /// destination, or `None` when cancelled. The hint is treated as a name only, never as a path.
+/// The filter and the default extension follow `output`.
 ///
 /// # Errors
 ///
@@ -145,10 +188,16 @@ pub(crate) async fn pick_destination<P: Picker>(
     picker: &P,
     table: Arc<FileTable>,
     hint: Option<&str>,
+    output: OutputKind,
 ) -> Result<Option<SinkRef>, IpcError> {
     let lease = table.begin_dialog()?;
-    let name = suggested_file_name(hint);
-    match await_selection(move |done| picker.choose_destination(&name, hold(lease, done))).await? {
+    let name = destination_name(hint, output);
+    let filter = save_filter(output);
+    match await_selection(move |done| {
+        picker.choose_destination(&name, filter, hold(lease, done));
+    })
+    .await?
+    {
         None => Ok(None),
         Some(path) => sink_ref(&table, path).map(Some),
     }
@@ -166,6 +215,7 @@ mod tests {
     struct FakePicker {
         reply: Option<Selection>,
         suggested: Mutex<Option<String>>,
+        filter: Mutex<Option<SaveFilter>>,
     }
 
     impl FakePicker {
@@ -173,6 +223,7 @@ mod tests {
             Self {
                 reply: Some(reply),
                 suggested: Mutex::new(None),
+                filter: Mutex::new(None),
             }
         }
 
@@ -180,6 +231,7 @@ mod tests {
             Self {
                 reply: None,
                 suggested: Mutex::new(None),
+                filter: Mutex::new(None),
             }
         }
 
@@ -195,8 +247,9 @@ mod tests {
             self.answer(done);
         }
 
-        fn choose_destination(&self, suggested_name: &str, done: Done) {
+        fn choose_destination(&self, suggested_name: &str, filter: SaveFilter, done: Done) {
             *self.suggested.lock().unwrap() = Some(suggested_name.to_owned());
+            *self.filter.lock().unwrap() = Some(filter);
             self.answer(done);
         }
     }
@@ -211,7 +264,7 @@ mod tests {
             let _ = self.held.lock().unwrap().send(done);
         }
 
-        fn choose_destination(&self, _suggested_name: &str, done: Done) {
+        fn choose_destination(&self, _suggested_name: &str, _filter: SaveFilter, done: Done) {
             let _ = self.held.lock().unwrap().send(done);
         }
     }
@@ -327,7 +380,13 @@ mod tests {
         let save_table = Arc::clone(&table);
         let save_picker = Arc::clone(&picker);
         std::thread::spawn(move || {
-            let outcome = block(pick_destination(&*save_picker, save_table, None)).map(|_| ());
+            let outcome = block(pick_destination(
+                &*save_picker,
+                save_table,
+                None,
+                OutputKind::Png,
+            ))
+            .map(|_| ());
             let _ = save_tx.send(outcome);
         });
         let busy_save = save_rx
@@ -370,6 +429,7 @@ mod tests {
             &picker,
             Arc::clone(&table),
             Some("../../secret/x.png"),
+            OutputKind::Png,
         ))
         .unwrap()
         .unwrap();
@@ -387,7 +447,13 @@ mod tests {
         let table = Arc::new(FileTable::default());
         let picker = FakePicker::replying(Ok(None));
         assert_eq!(
-            block(pick_destination(&picker, Arc::clone(&table), None)).unwrap(),
+            block(pick_destination(
+                &picker,
+                Arc::clone(&table),
+                None,
+                OutputKind::Png
+            ))
+            .unwrap(),
             None
         );
         assert_eq!(table.counts(), (0, 0));
@@ -401,7 +467,101 @@ mod tests {
     fn save_destination_without_a_file_name_is_rejected() {
         let table = Arc::new(FileTable::default());
         let picker = FakePicker::replying(Ok(Some(PathBuf::from("/"))));
-        let error = block(pick_destination(&picker, table, None)).unwrap_err();
+        let error = block(pick_destination(&picker, table, None, OutputKind::Png)).unwrap_err();
         assert_eq!(error.code(), ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn the_png_save_filter_and_default_name_are_unchanged() {
+        assert_eq!(
+            save_filter(OutputKind::Png),
+            SaveFilter {
+                label: "PNG image",
+                extensions: &["png"],
+            }
+        );
+        let table = Arc::new(FileTable::default());
+        let picker = FakePicker::replying(Ok(None));
+        block(pick_destination(&picker, table, None, OutputKind::Png)).unwrap();
+        assert_eq!(
+            picker.suggested.lock().unwrap().as_deref(),
+            Some("image.png")
+        );
+        assert_eq!(
+            *picker.filter.lock().unwrap(),
+            Some(save_filter(OutputKind::Png))
+        );
+    }
+
+    #[test]
+    fn the_text_save_filter_offers_txt_and_defaults_to_image_txt() {
+        assert_eq!(
+            save_filter(OutputKind::Text),
+            SaveFilter {
+                label: "Text",
+                extensions: &["txt"],
+            }
+        );
+        let table = Arc::new(FileTable::default());
+        let picker = FakePicker::replying(Ok(None));
+        block(pick_destination(&picker, table, None, OutputKind::Text)).unwrap();
+        assert_eq!(
+            picker.suggested.lock().unwrap().as_deref(),
+            Some("image.txt")
+        );
+        assert_eq!(
+            *picker.filter.lock().unwrap(),
+            Some(save_filter(OutputKind::Text))
+        );
+    }
+
+    #[test]
+    fn a_text_default_keeps_the_stem_of_a_png_hint_and_swaps_the_extension() {
+        assert_eq!(
+            destination_name(Some("photo-binary.png"), OutputKind::Text),
+            "photo-binary.txt"
+        );
+        assert_eq!(
+            destination_name(Some("photo-binary.txt"), OutputKind::Text),
+            "photo-binary.txt"
+        );
+        assert_eq!(
+            destination_name(Some("photo.TXT"), OutputKind::Text),
+            "photo.TXT"
+        );
+        assert_eq!(
+            destination_name(Some("photo-binary.txt"), OutputKind::Png),
+            "photo-binary.png"
+        );
+        assert_eq!(
+            destination_name(Some("plain"), OutputKind::Text),
+            "plain.txt"
+        );
+        assert_eq!(
+            destination_name(Some(".hidden"), OutputKind::Text),
+            ".hidden.txt"
+        );
+    }
+
+    #[test]
+    fn a_text_save_returns_a_sink_handle_for_the_chosen_txt_path() {
+        let dir = TestDir::new("dialog-text-save");
+        let destination = dir.path().join("grid.txt");
+        let table = Arc::new(FileTable::default());
+        let picker = FakePicker::replying(Ok(Some(destination.clone())));
+        let chosen = block(pick_destination(
+            &picker,
+            Arc::clone(&table),
+            Some("grid.png"),
+            OutputKind::Text,
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            picker.suggested.lock().unwrap().as_deref(),
+            Some("grid.txt")
+        );
+        assert_eq!(chosen.name(), "grid.txt");
+        assert_eq!(table.sink_path(chosen.id()).unwrap(), destination);
     }
 }

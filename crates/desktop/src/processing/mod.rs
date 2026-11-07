@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use image_to_binary_adapters::session::args;
 use image_to_binary_adapters::session::args::{BoolArg, StyleArgs, TextArg};
-use image_to_binary_adapters::session::{PreviewSettings, Session};
+use image_to_binary_adapters::session::{OutputKind, PreviewSettings, Session};
 use image_to_binary_core::Generation;
 use serde::Deserialize;
 use serde_json::Value;
@@ -81,6 +81,16 @@ pub(crate) fn settings_argument(value: Option<&Value>) -> Result<PreviewSettings
         },
     )
     .map_err(IpcError::from)
+}
+
+/// Converts the optional output kind with the shared contract: a missing or `null` value is PNG,
+/// `png` and `text` are the names, and any other value is refused.
+///
+/// # Errors
+///
+/// Returns `invalid_argument` for a non-string value and `invalid_settings` for an unknown name.
+pub(crate) fn output_kind_argument(value: Option<&Value>) -> Result<OutputKind, IpcError> {
+    args::output_kind(text_argument(value)).map_err(IpcError::from)
 }
 
 /// Maps a raw optional number field: a missing or `null` value is absent, any other value is a
@@ -348,7 +358,7 @@ impl Processing {
     ///
     /// Returns `stale_generation` for a generation not newer than the high-water mark, and the
     /// export errors. A job superseded before its commit reports `cancelled`.
-    pub(crate) async fn export_png<P>(
+    pub(crate) async fn export_file<P>(
         &self,
         request: ExportRequest,
         progress: P,
@@ -360,7 +370,7 @@ impl Processing {
         let files = Arc::clone(&self.files);
         let (_, receiver) = self
             .launch(Launch::Generation(request.generation), move |context| {
-                jobs::export_png(context, &slot, &files, &progress, request)
+                jobs::export_file(context, &slot, &files, &progress, request)
             })?;
         await_outcome(receiver).await
     }
@@ -906,8 +916,35 @@ mod tests {
             generation,
             settings: PreviewSettings::new(5, 10, 128, image_to_binary_core::Sampling::Classic)
                 .unwrap(),
+            output: OutputKind::Png,
             sink,
         }
+    }
+
+    #[test]
+    fn the_output_kind_argument_defaults_to_png_and_names_the_shared_refusals() {
+        assert_eq!(output_kind_argument(None).unwrap(), OutputKind::Png);
+        assert_eq!(
+            output_kind_argument(Some(&Value::Null)).unwrap(),
+            OutputKind::Png
+        );
+        assert_eq!(
+            output_kind_argument(Some(&json!("png"))).unwrap(),
+            OutputKind::Png
+        );
+        assert_eq!(
+            output_kind_argument(Some(&json!("text"))).unwrap(),
+            OutputKind::Text
+        );
+        let unknown = output_kind_argument(Some(&json!("svg"))).unwrap_err();
+        assert_eq!(unknown.code(), ErrorCode::InvalidSettings);
+        assert_eq!(
+            unknown.message(),
+            image_to_binary_adapters::session::args::OUTPUT_KIND_MESSAGE
+        );
+        let wrong_type = output_kind_argument(Some(&json!(1))).unwrap_err();
+        assert_eq!(wrong_type.code(), ErrorCode::InvalidArgument);
+        assert_eq!(wrong_type.message(), "outputKind must be a string");
     }
 
     #[test]
@@ -944,7 +981,7 @@ mod tests {
         let worker_processing = Arc::clone(&processing);
         let exporting = std::thread::spawn(move || {
             tauri::async_runtime::block_on(
-                worker_processing.export_png(export_request(1, sink_id), sink),
+                worker_processing.export_file(export_request(1, sink_id), sink),
             )
         });
         reached.recv_timeout(WAIT).unwrap();
@@ -964,7 +1001,7 @@ mod tests {
         let worker_processing = Arc::clone(&processing);
         let exporting = std::thread::spawn(move || {
             tauri::async_runtime::block_on(
-                worker_processing.export_png(export_request(1, sink_id), CommitGate(gate)),
+                worker_processing.export_file(export_request(1, sink_id), CommitGate(gate)),
             )
         });
         reached.recv_timeout(WAIT).unwrap();

@@ -43,6 +43,12 @@ const STYLE_PREVIEW_SIZE: (u64, u64) = (60, 36);
 const STYLE_PREVIEW_BYTES: usize = 60 * 36 * 4;
 /// Byte length of the styled PNG export reference from the `mono_custom_colours` entry.
 const STYLE_EXPORT_BYTES: usize = 9_986;
+/// Byte lengths of the classic, ASCII and block text references: 6 rows of 10 characters, 4 rows
+/// of 11 characters, and 4 rows of 11 three-byte block glyphs, each row followed by one LF.
+const TEXT_CLASSIC_BYTES: usize = 66;
+const TEXT_ASCII_BYTES: usize = 48;
+const TEXT_BLOCK_BYTES: usize = 136;
+const TEXT_CONTRAST_BYTES: usize = 48;
 const REJECTED_DROP_MESSAGE: &str =
     "Choose one image at a time. 2 files were selected, so nothing was changed.";
 
@@ -60,6 +66,10 @@ struct Assets {
     mode_export: PathBuf,
     style_preview: PathBuf,
     style_export: PathBuf,
+    text_classic: PathBuf,
+    text_ascii_custom: PathBuf,
+    text_block: PathBuf,
+    text_contrast_raised: PathBuf,
 }
 
 impl Assets {
@@ -75,47 +85,41 @@ impl Assets {
             mode_export: dir.join("mode64x40.ascii-custom.export.png"),
             style_preview: dir.join("style64x40.mono_custom_colours.preview.rgba"),
             style_export: dir.join("style64x40.mono_custom_colours.export.png"),
+            text_classic: dir.join("text64x40.classic.export.txt"),
+            text_ascii_custom: dir.join("text64x40.ascii_custom.export.txt"),
+            text_block: dir.join("text64x40.block.export.txt"),
+            text_contrast_raised: dir.join("text64x40.contrast_raised.export.txt"),
         };
-        let empty: Vec<String> = [
-            &assets.png,
-            &assets.png_export,
-            &assets.ui_preview,
-            &assets.large,
-            &assets.large_export,
-            &assets.mode,
-            &assets.mode_preview,
-            &assets.mode_export,
-            &assets.style_preview,
-            &assets.style_export,
-        ]
-        .into_iter()
-        .filter(|path| !fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.len() > 0))
-        .map(|path| path.display().to_string())
-        .collect();
-        if !empty.is_empty() {
-            return Err(format!("missing or empty: {}", empty.join(", ")));
-        }
-        let missing: Vec<String> = [
-            &assets.png,
-            &assets.png_export,
-            &assets.ui_preview,
-            &assets.large,
-            &assets.large_export,
-            &assets.mode,
-            &assets.mode_preview,
-            &assets.mode_export,
-            &assets.style_preview,
-            &assets.style_export,
-        ]
-        .into_iter()
-        .filter(|path| !path.is_file())
-        .map(|path| path.display().to_string())
-        .collect();
-        if missing.is_empty() {
+        let empty: Vec<String> = assets
+            .files()
+            .into_iter()
+            .filter(|path| !fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.len() > 0))
+            .map(|path| path.display().to_string())
+            .collect();
+        if empty.is_empty() {
             Ok(assets)
         } else {
-            Err(format!("missing: {}", missing.join(", ")))
+            Err(format!("missing or empty: {}", empty.join(", ")))
         }
+    }
+
+    fn files(&self) -> [&PathBuf; 14] {
+        [
+            &self.png,
+            &self.png_export,
+            &self.ui_preview,
+            &self.large,
+            &self.large_export,
+            &self.mode,
+            &self.mode_preview,
+            &self.mode_export,
+            &self.style_preview,
+            &self.style_export,
+            &self.text_classic,
+            &self.text_ascii_custom,
+            &self.text_block,
+            &self.text_contrast_raised,
+        ]
     }
 }
 
@@ -229,6 +233,7 @@ fn check_main(recorder: &mut Recorder, main: &Value, assets: &Assets, scratch: &
 
     check_mode(recorder, main, assets, scratch);
     check_style(recorder, main, assets, scratch);
+    check_text(recorder, main, assets, scratch);
 
     let demo_metadata = text(&main["demo"], "metadata");
     let demo_preview = &main["demo"]["preview"];
@@ -377,6 +382,58 @@ fn check_style(recorder: &mut Recorder, main: &Value, assets: &Assets, scratch: 
     );
 }
 
+/// The text phase saves classic, ASCII and block text while the studio colours are set. Text has
+/// no colour, so every saved file must equal the default-colour reference and its expected length.
+fn check_text(recorder: &mut Recorder, main: &Value, assets: &Assets, scratch: &Path) {
+    let text_phase = &main["text"];
+    let cases = [
+        (
+            "e2e_text_classic_matches_reference",
+            "classic",
+            "classic.txt",
+            &assets.text_classic,
+            TEXT_CLASSIC_BYTES,
+        ),
+        (
+            "e2e_text_ascii_matches_reference",
+            "asciiCustom",
+            "ascii-custom.txt",
+            &assets.text_ascii_custom,
+            TEXT_ASCII_BYTES,
+        ),
+        (
+            "e2e_text_block_matches_reference",
+            "block",
+            "block.txt",
+            &assets.text_block,
+            TEXT_BLOCK_BYTES,
+        ),
+        (
+            "e2e_text_contrast_matches_reference",
+            "contrastRaised",
+            "contrast-raised.txt",
+            &assets.text_contrast_raised,
+            TEXT_CONTRAST_BYTES,
+        ),
+    ];
+    for (check, key, file, reference, expected_len) in cases {
+        let status = text(text_phase, key);
+        let saved = read(&scratch.join(file));
+        let expected = read(reference);
+        recorder.check(
+            check,
+            status.starts_with(&format!("Saved {file}"))
+                && expected.len() == expected_len
+                && saved == expected,
+            format!(
+                "status {status:?}; {} bytes against {} reference bytes (expected {expected_len})",
+                saved.len(),
+                expected.len()
+            ),
+        );
+    }
+}
+
 fn check_cancel_and_outputs(recorder: &mut Recorder, main: &Value, scratch: &Path) {
     let cancel_status = text(&main["cancel"], "status");
     recorder.check(
@@ -416,10 +473,19 @@ fn check_cancel_and_outputs(recorder: &mut Recorder, main: &Value, scratch: &Pat
                 .collect()
         })
         .unwrap_or_default();
-    let expected: BTreeSet<String> = ["png.png", "large.png", "mode-ascii.png", "style-mono.png"]
-        .into_iter()
-        .map(str::to_owned)
-        .collect();
+    let expected: BTreeSet<String> = [
+        "png.png",
+        "large.png",
+        "mode-ascii.png",
+        "style-mono.png",
+        "classic.txt",
+        "ascii-custom.txt",
+        "block.txt",
+        "contrast-raised.txt",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
     recorder.check(
         "e2e_only_committed_outputs_exist",
         names == expected,

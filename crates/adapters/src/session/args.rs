@@ -11,6 +11,7 @@ use image_to_binary_core::{
 use image_to_binary_processing::{ColorMode, RenderStyle, Rgb};
 
 use super::error::{ErrorCode, SessionError};
+use super::job::OutputKind;
 use super::plan::SourcePlan;
 use super::settings::PreviewSettings;
 
@@ -85,6 +86,31 @@ pub fn generation(value: f64) -> Result<Generation, SessionError> {
 /// Returns the errors of [`positive`] for the name `pixelBudget`.
 pub fn pixel_budget(value: f64) -> Result<u64, SessionError> {
     positive(value, "pixelBudget")
+}
+
+/// Message for an unknown output kind; shells show it verbatim.
+pub const OUTPUT_KIND_MESSAGE: &str = "outputKind must be \"png\" or \"text\"";
+
+/// Converts the optional output kind. An absent value is [`OutputKind::Png`], so callers that
+/// send no kind keep the PNG contract; `"png"` and `"text"` are the only accepted names.
+///
+/// # Errors
+///
+/// Returns `invalid_argument` with `"outputKind must be a string"` for a non-string value and
+/// `invalid_settings` with [`OUTPUT_KIND_MESSAGE`] for any other name.
+pub fn output_kind(kind: TextArg<'_>) -> Result<OutputKind, SessionError> {
+    match kind {
+        TextArg::Absent | TextArg::Text("png") => Ok(OutputKind::Png),
+        TextArg::Text("text") => Ok(OutputKind::Text),
+        TextArg::Text(_) => Err(SessionError::Argument {
+            code: ErrorCode::InvalidSettings,
+            message: OUTPUT_KIND_MESSAGE.to_owned(),
+        }),
+        TextArg::NotText => Err(SessionError::Argument {
+            code: ErrorCode::InvalidArgument,
+            message: "outputKind must be a string".to_owned(),
+        }),
+    }
 }
 
 /// A text argument as the shells receive it. `Absent` covers a missing, `undefined` or `null`
@@ -573,6 +599,29 @@ mod tests {
             assert_eq!(code(pixel_budget(bad)), ErrorCode::InvalidArgument);
         }
         assert_eq!(text(pixel_budget(0.0)), "pixelBudget must be positive");
+    }
+
+    #[test]
+    fn output_kind_defaults_to_png_and_rejects_unknown_names() {
+        assert_eq!(output_kind(TextArg::Absent).unwrap(), OutputKind::Png);
+        assert_eq!(output_kind(TextArg::Text("png")).unwrap(), OutputKind::Png);
+        assert_eq!(
+            output_kind(TextArg::Text("text")).unwrap(),
+            OutputKind::Text
+        );
+        assert_eq!(
+            code(output_kind(TextArg::Text("TEXT"))),
+            ErrorCode::InvalidSettings
+        );
+        assert_eq!(text(output_kind(TextArg::Text("svg"))), OUTPUT_KIND_MESSAGE);
+        assert_eq!(
+            code(output_kind(TextArg::NotText)),
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            text(output_kind(TextArg::NotText)),
+            "outputKind must be a string"
+        );
     }
 
     #[test]

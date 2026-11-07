@@ -275,7 +275,7 @@ export function createWorkerHost(
   }
 
   /**
-   * Streams the PNG as ordered `exportChunk` messages, each transferring its own buffer,
+   * Streams the export bytes as ordered `exportChunk` messages, each transferring its own buffer,
    * then returns the `exported` totals. Every advance is followed by a drain and a progress
    * message, and yields first so cancel and release messages are observed between advances.
    */
@@ -299,7 +299,12 @@ export function createWorkerHost(
         if (chunk.byteLength === 0) continue
         assertRunning(job)
         if (emitted.byteLength + chunk.byteLength > MAX_ENCODED_BYTES) {
-          throw new JobFailure('resource_limit_exceeded', 'The encoded PNG exceeds the byte limit.')
+          throw new JobFailure(
+            'resource_limit_exceeded',
+            request.outputKind === 'png'
+              ? 'The encoded PNG exceeds the byte limit.'
+              : 'The encoded text exceeds the byte limit.',
+          )
         }
         const bytes = exactBuffer(chunk)
         const length = bytes.byteLength
@@ -334,6 +339,7 @@ export function createWorkerHost(
         colorMode,
         contrast,
         invert,
+        request.outputKind,
       )
       started = true
       while (stage !== engine.readyStage) {

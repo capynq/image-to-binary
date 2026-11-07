@@ -4,7 +4,7 @@ import { createExportAccumulator } from './exportAccumulator'
 import type { ExportAccumulator, ExportAccumulatorOptions } from './exportAccumulator'
 import { startHeifDecode } from './heifDecodeJob'
 import type { DecodedRgba, HeifDecodeJob, HeifDecoderEndpoint } from './heifDecodeJob'
-import { validateEncodedImport } from './protocol'
+import { isOutputKindName, validateEncodedImport } from './protocol'
 import { renderPreviewPng } from './previewRenderer'
 import type { PreviewRenderer } from './previewRenderer'
 import type {
@@ -24,13 +24,6 @@ import type {
 import { previewParametersOf, validateSettings } from './types'
 import { ProcessingWorkerError } from './workerClient'
 import type { PreviewPixels, ProcessingClient, RgbaImport, SourceHandle } from './workerClient'
-
-export class ExportUnavailableError extends Error {
-  constructor() {
-    super('Text export is not available until the text export phase.')
-    this.name = 'ExportUnavailableError'
-  }
-}
 
 export interface BrowserAdapterOptions {
   /** Invoked lazily on the first import; session creation allocates nothing heavy. */
@@ -59,8 +52,8 @@ interface SessionState {
 
 /**
  * Adapter backed by the Rust WASM worker client. Preview pixels are encoded to
- * a PNG object URL on the main thread. PNG export streams through the shared
- * scheduler into an adapter-owned accumulator; text export is unavailable.
+ * a PNG object URL on the main thread. PNG and UTF-8 text exports stream through the
+ * shared scheduler into an adapter-owned accumulator, which builds the Blob of the format.
  */
 export function createBrowserProcessingAdapter(options: BrowserAdapterOptions): ProcessingAdapter {
   return createAdapterWithAccumulator(options, createExportAccumulator)
@@ -270,15 +263,19 @@ export function createAdapterWithAccumulator(
       const state = assertSession(session)
       assertActive(state)
       const record = sourceOf(state, source)
-      if (format !== 'png') {
-        throw new ExportUnavailableError()
+      if (!isOutputKindName(format)) {
+        throw new RangeError('Export format must be png or text.')
       }
       validateSettings(settings)
-      const accumulator = makeAccumulator(onProgress === undefined ? {} : { onProgress })
+      const accumulator = makeAccumulator({
+        format,
+        ...(onProgress === undefined ? {} : { onProgress }),
+      })
       try {
-        return await clientOf(state).exportPng(
+        return await clientOf(state).exportFile(
           record.handle,
           previewParametersOf(settings),
+          format,
           context.operationId,
           accumulator,
           (completion) => accumulator.finish(completion),

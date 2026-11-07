@@ -40,7 +40,7 @@ use image_to_binary_processing::{
 
 pub use error::{EngineFailure, ErrorCode, JobKind, SessionError, StaleReason};
 pub use frame::Frame;
-pub use job::Stage;
+pub use job::{OutputKind, Stage};
 pub use limits::{
     DEFAULT_PIXEL_BUDGET, EXPORT_CHUNK_BYTES, EXPORT_LIMITS, EXPORT_MAX_ENCODED_BYTES,
     EXPORT_MAX_PENDING_BYTES, MAX_DECODED_BYTES, MAX_ENCODED_BYTES, MAX_SOURCE_PIXELS,
@@ -74,9 +74,10 @@ impl Live {
         generation: Generation,
         settings: PreviewSettings,
         kind: JobKind,
+        output: OutputKind,
     ) -> Result<Stage, SessionError> {
         self.ensure_newer(generation)?;
-        let job = self.begin(generation, settings, kind)?;
+        let job = self.begin(generation, settings, kind, output)?;
         Ok(self.commit(generation, job))
     }
 
@@ -113,6 +114,7 @@ impl Live {
         generation: Generation,
         settings: PreviewSettings,
         kind: JobKind,
+        output: OutputKind,
     ) -> Result<Job, SessionError> {
         let cell_height = match settings.sampling {
             Sampling::Classic => u32::from(settings.cell_size),
@@ -142,9 +144,9 @@ impl Live {
                 self.renderer.preview_task(grid, options, generation)?,
             )),
             (SamplingPlan::Cached(grid), JobKind::Export) => {
-                job::export_phase(grid, options, generation)?
+                job::export_phase(grid, options, generation, output)?
             }
-            (SamplingPlan::Task(task), kind) => Phase::Sampling(task, options, kind),
+            (SamplingPlan::Task(task), kind) => Phase::Sampling(task, options, kind, output),
         };
         Ok(Job {
             generation,
@@ -325,7 +327,7 @@ impl Session {
         settings: PreviewSettings,
     ) -> Result<Stage, SessionError> {
         self.live_mut()?
-            .start(generation, settings, JobKind::Preview)
+            .start(generation, settings, JobKind::Preview, OutputKind::Png)
     }
 
     /// Starts a PNG export job. It shares the preview sample cache for the same settings.
@@ -338,8 +340,23 @@ impl Session {
         generation: Generation,
         settings: PreviewSettings,
     ) -> Result<Stage, SessionError> {
+        self.start_export_as(generation, settings, OutputKind::Png)
+    }
+
+    /// Starts an export job of the given output kind over the same sampled grid and
+    /// settings as [`Session::start_preview`], so PNG and text describe one grid.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Session::start_preview`].
+    pub fn start_export_as(
+        &mut self,
+        generation: Generation,
+        settings: PreviewSettings,
+        output: OutputKind,
+    ) -> Result<Stage, SessionError> {
         self.live_mut()?
-            .start(generation, settings, JobKind::Export)
+            .start(generation, settings, JobKind::Export, output)
     }
 
     /// Starts a bounded original-image preview that supersedes any current job.

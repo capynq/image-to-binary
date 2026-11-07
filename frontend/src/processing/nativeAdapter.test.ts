@@ -7,7 +7,7 @@ import type { NativeBridge, NativeChannel } from './nativeBridge'
 import { NATIVE_FRAME_HEADER_BYTES } from './nativeFrame'
 import { createNativeFiles, toInput } from './nativeFiles'
 import type { NativeDropOutcome } from './nativeFiles'
-import type { JobContext, ProcessingSession, StudioSettings } from './types'
+import type { ExportFormat, JobContext, ProcessingSession, StudioSettings } from './types'
 import { DEFAULT_SETTINGS, ExportCancelledError } from './types'
 import { ProcessingWorkerError } from './workerClient'
 import { DEFAULT_RAMP } from './protocol'
@@ -290,7 +290,7 @@ describe('native preview', () => {
       .on('import_demo', demoReply)
       .on('start_preview', (args) => frameBody(Number(args?.generation), 2, 1))
       .on('save_image_dialog', () => ({ id: 7, name: 'out.png' }))
-      .on('export_png', () => ({ byteLength: 42 }))
+      .on('export_file', () => ({ byteLength: 42 }))
     const { adapter, s, source } = await withSource(bridge)
     const styled: StudioSettings = {
       ...artwork,
@@ -313,7 +313,7 @@ describe('native preview', () => {
     expect(bridge.calls.find((call) => call.command === 'start_preview')?.args).toMatchObject({
       settings: styleKeys,
     })
-    expect(bridge.calls.find((call) => call.command === 'export_png')?.args).toMatchObject({
+    expect(bridge.calls.find((call) => call.command === 'export_file')?.args).toMatchObject({
       settings: styleKeys,
     })
   })
@@ -449,7 +449,7 @@ describe('native export', () => {
     const bridge = new FakeBridge()
       .on('import_demo', demoReply)
       .on('save_image_dialog', () => ({ id: 7, name: 'out.png' }))
-      .on('export_png', (args) => {
+      .on('export_file', (args) => {
         ;(args?.progress as NativeChannel<unknown>).onmessage({
           generation: 4,
           stage: 'encoding',
@@ -471,8 +471,9 @@ describe('native export', () => {
     )
     expect(bridge.calls.find((call) => call.command === 'save_image_dialog')?.args).toEqual({
       suggestedName: exportFilename('Demo fixture'),
+      outputKind: 'png',
     })
-    expect(bridge.calls.find((call) => call.command === 'export_png')?.args).toMatchObject({
+    expect(bridge.calls.find((call) => call.command === 'export_file')?.args).toMatchObject({
       sinkId: 7,
       generation: 4,
       settings: { cellSize: 12, fontSize: 16, threshold: 128, sampling: 'classic' },
@@ -491,7 +492,7 @@ describe('native export', () => {
     const bridge = new FakeBridge()
       .on('import_demo', demoReply)
       .on('save_image_dialog', () => ({ id: 7, name: 'out.png' }))
-      .on('export_png', () => ({ byteLength: 42 }))
+      .on('export_file', () => ({ byteLength: 42 }))
     const { adapter, s, source } = await ready(bridge)
     await adapter.export(
       s,
@@ -500,7 +501,7 @@ describe('native export', () => {
       { ...DEFAULT_SETTINGS, mode: 'ascii', ramp: ' .oO@' },
       context(3, 4),
     )
-    expect(bridge.calls.find((call) => call.command === 'export_png')?.args).toMatchObject({
+    expect(bridge.calls.find((call) => call.command === 'export_file')?.args).toMatchObject({
       settings: { sampling: 'average', mode: 'ascii', ramp: ' .oO@' },
     })
   })
@@ -512,7 +513,7 @@ describe('native export', () => {
       adapter.export(s, source, 'png', DEFAULT_SETTINGS, context(3, 4)),
     )
     expect(error).toBeInstanceOf(ExportCancelledError)
-    expect(bridge.countCalls('export_png')).toBe(0)
+    expect(bridge.countCalls('export_file')).toBe(0)
     expect(bridge.countCalls('release_handle')).toBe(0)
   })
 
@@ -520,7 +521,7 @@ describe('native export', () => {
     const bridge = new FakeBridge()
       .on('import_demo', demoReply)
       .on('save_image_dialog', () => ({ id: 8, name: 'out.png' }))
-      .on('export_png', () => {
+      .on('export_file', () => {
         throw { code: 'internal', message: 'the file could not be written: PermissionDenied' }
       })
       .on('release_handle', () => undefined)
@@ -548,16 +549,42 @@ describe('native export', () => {
     adapter.cancel(s, 3)
     gate.answer?.({ id: 11, name: 'late.png' })
     expect(await pending).toMatchObject({ code: 'cancelled' })
-    expect(bridge.countCalls('export_png')).toBe(0)
+    expect(bridge.countCalls('export_file')).toBe(0)
     expect(bridge.calls.at(-1)).toEqual({ command: 'release_handle', args: { id: 11 } })
   })
 
-  it('keeps text export unavailable', async () => {
+  it('exports text through a .txt save dialog and the same file command with its kind', async () => {
+    const bridge = new FakeBridge()
+      .on('import_demo', demoReply)
+      .on('save_image_dialog', () => ({ id: 7, name: 'grid.txt' }))
+      .on('export_file', () => ({ byteLength: 37 }))
+    const { adapter, s, source } = await ready(bridge)
+    const artifact = await adapter.export(s, source, 'text', DEFAULT_SETTINGS, context(3, 4))
+    expect(artifact).toEqual({
+      kind: 'saved',
+      name: 'grid.txt',
+      byteLength: 37,
+      dispose: expect.any(Function),
+    })
+    expect(bridge.calls.find((call) => call.command === 'save_image_dialog')?.args).toEqual({
+      suggestedName: exportFilename('Demo fixture', 'text'),
+      outputKind: 'text',
+    })
+    expect(bridge.calls.find((call) => call.command === 'export_file')?.args).toMatchObject({
+      outputKind: 'text',
+      sinkId: 7,
+    })
+    expect(bridge.calls.at(-1)).toEqual({ command: 'release_handle', args: { id: 7 } })
+  })
+
+  it('rejects an unknown export format before any native command', async () => {
     const bridge = new FakeBridge().on('import_demo', demoReply)
     const { adapter, s, source } = await ready(bridge)
     await expect(
-      adapter.export(s, source, 'text', DEFAULT_SETTINGS, context(3, 4)),
-    ).rejects.toThrow('Text export is not available')
+      adapter.export(s, source, 'svg' as unknown as ExportFormat, DEFAULT_SETTINGS, context(3, 4)),
+    ).rejects.toBeInstanceOf(RangeError)
+    expect(bridge.countCalls('save_image_dialog')).toBe(0)
+    expect(bridge.countCalls('export_file')).toBe(0)
   })
 
   it('a dismissed save dialog returns the studio to idle with no error and no failure', async () => {
@@ -584,7 +611,7 @@ describe('native export', () => {
     const bridge = new FakeBridge()
       .on('import_demo', demoReply)
       .on('save_image_dialog', () => ({ id: 2, name: 'chosen.png' }))
-      .on('export_png', () => ({ generation: 3, byteLength: 9 }))
+      .on('export_file', () => ({ generation: 3, byteLength: 9 }))
       .on('release_handle', () => undefined)
       .on('reset', () => undefined)
     const adapter = createNativeProcessingAdapter({
@@ -761,14 +788,14 @@ describe('native reply validation', () => {
       adapter.export(s, source, 'png', DEFAULT_SETTINGS, context(3, 4)),
     )
     expect(error).toMatchObject({ code: 'internal' })
-    expect(bridge.countCalls('export_png')).toBe(0)
+    expect(bridge.countCalls('export_file')).toBe(0)
   })
 
   it('a malformed export byte length is refused, not shown as a saved size', async () => {
     const bridge = new FakeBridge()
       .on('import_demo', demoReply)
       .on('save_image_dialog', () => ({ id: 6, name: 'x.png' }))
-      .on('export_png', () => ({ generation: 4, byteLength: 1.5 }))
+      .on('export_file', () => ({ generation: 4, byteLength: 1.5 }))
       .on('release_handle', () => undefined)
     const { adapter } = setup(bridge)
     const s = adapter.createSession()

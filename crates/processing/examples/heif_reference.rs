@@ -54,7 +54,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut names = Vec::new();
     for entry in fs::read_dir(&fixtures_dir)? {
         let name = entry?.file_name().to_string_lossy().into_owned();
-        if name.ends_with(".heic") || name.ends_with(".avif") {
+        if name.strip_suffix(".heic").is_some() || name.strip_suffix(".avif").is_some() {
             names.push(name);
         }
     }

@@ -11,7 +11,7 @@
     "allow-import-source",
     "allow-import-demo",
     "allow-start-preview",
-    "allow-export-png",
+    "allow-export-file",
     "allow-cancel",
     "allow-reset",
     "core:event:allow-listen",

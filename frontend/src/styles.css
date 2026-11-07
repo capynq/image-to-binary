@@ -767,6 +767,12 @@ a.button {
   background: var(--panel);
   cursor: pointer;
 }
+.format-fieldset {
+  margin-bottom: 12px;
+}
+.format-options {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
 .choice-options {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

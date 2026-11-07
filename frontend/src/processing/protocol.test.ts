@@ -10,7 +10,10 @@ import {
   DEFAULT_RAMP,
   FOREGROUND_MESSAGE,
   isColorModeName,
+  isOutputKindName,
   MAX_ENCODED_BYTES,
+  OUTPUT_KIND_MESSAGE,
+  OUTPUT_KIND_NAMES,
   validateColour,
   validateContrast,
   RAMP_EMPTY_MESSAGE,
@@ -57,6 +60,19 @@ describe('protocol guards', () => {
     ).toBe(true)
     expect(isWorkerRequest({ type: 'cancel', requestId: 2, operationId: 1 })).toBe(true)
     expect(isWorkerRequest({ type: 'releaseSource', sourceId: 3 })).toBe(true)
+  })
+
+  it('rejects an outputKind on a preview request, which only export accepts', () => {
+    expect(
+      isWorkerRequest({
+        type: 'preview',
+        requestId: 2,
+        operationId: 1,
+        sourceId: 1,
+        parameters,
+        outputKind: 'png',
+      }),
+    ).toBe(false)
   })
 
   it.each([
@@ -355,5 +371,32 @@ describe('colour and contrast validation', () => {
     expect(validateContrast(MAX_CONTRAST + 1)).toBe(CONTRAST_RANGE_MESSAGE)
     expect(validateContrast(MIN_CONTRAST - 1)).toBe(CONTRAST_RANGE_MESSAGE)
     expect(CONTRAST_RANGE_MESSAGE).toBe('contrast must be between -100 and 100')
+  })
+})
+
+describe('output kind contract', () => {
+  const exportBase = { type: 'export', requestId: 1, operationId: 1, sourceId: 1, parameters }
+
+  it('names exactly png and text, with the pinned message', () => {
+    expect(OUTPUT_KIND_NAMES).toEqual(['png', 'text'])
+    expect(OUTPUT_KIND_MESSAGE).toBe('outputKind must be "png" or "text"')
+    expect(isOutputKindName('png')).toBe(true)
+    expect(isOutputKindName('text')).toBe(true)
+    for (const value of ['PNG', 'TEXT', 'svg', '', undefined, null, 1]) {
+      expect(isOutputKindName(value)).toBe(false)
+    }
+  })
+
+  it('accepts an export request only with a named output kind', () => {
+    expect(isWorkerRequest({ ...exportBase, outputKind: 'png' })).toBe(true)
+    expect(isWorkerRequest({ ...exportBase, outputKind: 'text' })).toBe(true)
+    for (const outputKind of [undefined, null, 'TEXT', 'svg', 0]) {
+      expect(isWorkerRequest({ ...exportBase, outputKind })).toBe(false)
+    }
+  })
+
+  it('does not require an output kind of preview requests', () => {
+    const preview = { type: 'preview', requestId: 1, operationId: 1, sourceId: 1, parameters }
+    expect(isWorkerRequest(preview)).toBe(true)
   })
 })

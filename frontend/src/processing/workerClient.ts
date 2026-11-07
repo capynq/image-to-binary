@@ -17,6 +17,7 @@ import type {
   ImportedReply,
   ImportRequest,
   OriginalPreviewRequest,
+  OutputKindName,
   PreviewParameters,
   PreviewRequest,
   PreviewedReply,
@@ -75,6 +76,9 @@ export interface PreviewPixels {
  * Adapter-side consumer of one export. Both methods run on the client's message path and
  * a throw fails the export and cancels the worker job; no later chunk reaches the sink.
  *
+ * Chunks are byte-level and may split a multi-byte UTF-8 character, so a sink must keep the raw
+ * bytes and never decode a chunk on its own.
+ *
  * Backpressure: the worker posts chunks without acknowledgement, so chunks can queue on the
  * port until the 256 MiB encoded ceiling. The sink must therefore keep every accepted chunk
  * (the adapter's accumulator does) and bound its own work per call. Memory is bounded by that
@@ -130,12 +134,14 @@ export interface ProcessingClient {
   ): Promise<T>
   originalPreviewPixels(source: SourceHandle, operationId: number): Promise<PreviewPixels>
   /**
-   * Streams a PNG of `source` through the shared scheduler. `finalize` runs only after the
-   * export completed and remained current, so its result is never published when superseded.
+   * Streams an export of `source` in `outputKind` through the shared scheduler. `finalize` runs
+   * only after the export completed and remained current, so its result is never published when
+   * superseded.
    */
-  exportPng<T extends Releasable>(
+  exportFile<T extends Releasable>(
     source: SourceHandle,
     parameters: PreviewParameters,
+    outputKind: OutputKindName,
     operationId: number,
     sink: ExportSink,
     finalize: (completion: ExportCompletion) => T,
@@ -319,9 +325,10 @@ class WorkerProcessingClient implements ProcessingClient {
     )
   }
 
-  exportPng<T extends Releasable>(
+  exportFile<T extends Releasable>(
     source: SourceHandle,
     parameters: PreviewParameters,
+    outputKind: OutputKindName,
     operationId: number,
     sink: ExportSink,
     finalize: (completion: ExportCompletion) => T,
@@ -341,6 +348,7 @@ class WorkerProcessingClient implements ProcessingClient {
         operationId,
         sourceId: source.sourceId,
         parameters: { ...parameters },
+        outputKind,
       }
       const stream: ExportStream = { sink, nextSequence: 0, receivedBytes: 0, failure: null }
       const reply = await this.request('export', request, [], stream)

@@ -12,7 +12,8 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::sync::TryLockError;
 
 use image_to_binary_adapters::session::{
-    EncodedPlan, PreviewSettings, Session, SessionError, SourcePlan, Stage, DEFAULT_PIXEL_BUDGET,
+    EncodedPlan, OutputKind, PreviewSettings, Session, SessionError, SourcePlan, Stage,
+    DEFAULT_PIXEL_BUDGET,
 };
 use image_to_binary_core::Generation;
 use serde::Serialize;
@@ -267,11 +268,12 @@ pub(crate) fn render_preview<P: ProgressSink>(
     encode_frame(request.generation, width, height, &pixels)
 }
 
-/// One PNG export. The sink is a temporary sibling of the destination until it commits.
+/// One export of `output`. The sink is a temporary sibling of the destination until it commits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ExportRequest {
     pub(crate) generation: u64,
     pub(crate) settings: PreviewSettings,
+    pub(crate) output: OutputKind,
     pub(crate) sink: FileId,
 }
 
@@ -283,13 +285,13 @@ pub(crate) struct ExportReport {
     pub(crate) byte_length: u64,
 }
 
-/// Streams a PNG export through the shared session into an atomic sink and commits it once the
+/// Streams an export through the shared session into an atomic sink and commits it once the
 /// stream is complete.
 ///
 /// # Errors
 ///
 /// Returns `invalid_argument` for an unavailable destination, and the errors of [`export_into`].
-pub(crate) fn export_png<P: ProgressSink>(
+pub(crate) fn export_file<P: ProgressSink>(
     context: &JobContext,
     slot: &SessionSlot,
     files: &FileTable,
@@ -320,7 +322,7 @@ pub(crate) fn export_into<K: ChunkSink, P: ProgressSink>(
     let generation = Generation::new(request.generation);
     with_session(slot, |session| {
         session
-            .start_export(generation, request.settings)
+            .start_export_as(generation, request.settings, request.output)
             .map(|_| ())
             .map_err(shared)
     })?;
@@ -706,10 +708,11 @@ mod tests {
         let request = ExportRequest {
             generation: 3,
             settings: settings(),
+            output: OutputKind::Png,
             sink,
         };
         let (_handle, rx) = wait_for_outcome(&worker, move |context| {
-            export_png(context, &job_slot, &job_files, &*job_recorder, request)
+            export_file(context, &job_slot, &job_files, &*job_recorder, request)
         });
         let report = rx.recv_timeout(WAIT).unwrap().unwrap();
         let written = std::fs::read(&destination).unwrap();
@@ -748,10 +751,11 @@ mod tests {
         let request = ExportRequest {
             generation: 1,
             settings: settings(),
+            output: OutputKind::Png,
             sink,
         };
         let (handle, rx) = wait_for_outcome(&worker, move |context| {
-            export_png(context, &job_slot, &job_files, &progress, request)
+            export_file(context, &job_slot, &job_files, &progress, request)
         });
         reached.recv_timeout(WAIT).unwrap();
         handle.cancel();
@@ -783,10 +787,11 @@ mod tests {
         let request = ExportRequest {
             generation: 1,
             settings: settings(),
+            output: OutputKind::Png,
             sink,
         };
         let (_handle, rx) = wait_for_outcome(&worker, move |context| {
-            export_png(context, &job_slot, &job_files, &progress, request)
+            export_file(context, &job_slot, &job_files, &progress, request)
         });
         reached.recv_timeout(WAIT).unwrap();
         let (_newer, newer_rx) = wait_for_outcome(&worker, |_| Ok::<_, IpcError>(()));
@@ -809,13 +814,14 @@ mod tests {
         let request = ExportRequest {
             generation: 0,
             settings: settings(),
+            output: OutputKind::Png,
             sink,
         };
         let worker = Worker::spawn().unwrap();
         let files = Arc::new(files);
         let slot = Arc::new(slot);
         let (_handle, rx) = wait_for_outcome(&worker, move |context| {
-            export_png(context, &slot, &files, &Recorder::default(), request)
+            export_file(context, &slot, &files, &Recorder::default(), request)
         });
         let error = rx.recv_timeout(WAIT).unwrap().unwrap_err();
         assert_eq!(error.code(), ErrorCode::NoJob);
@@ -868,6 +874,7 @@ mod tests {
         let request = ExportRequest {
             generation: 1,
             settings: settings(),
+            output: OutputKind::Png,
             sink: sink_id,
         };
         let (handle, rx) = wait_for_outcome(&worker, move |context| {
@@ -885,5 +892,106 @@ mod tests {
             "a cancelled export committed its file"
         );
         assert_eq!(names_in(dir.path()).len(), 1, "only the source may remain");
+    }
+
+    /// The bytes a complete text export of `settings()` produces through the held session.
+    fn session_text_bytes(slot: &SessionSlot) -> Vec<u8> {
+        let mut guard = slot.lock();
+        let session = guard.as_mut().expect("a source is held");
+        let generation = Generation::new(1);
+        session
+            .start_export_as(generation, settings(), OutputKind::Text)
+            .unwrap();
+        let mut bytes = Vec::new();
+        loop {
+            let stage = session.advance(generation, DEFAULT_PIXEL_BUDGET).unwrap();
+            for chunk in session.drain_export(generation).unwrap() {
+                bytes.extend_from_slice(&chunk);
+            }
+            if stage == Stage::Ready {
+                break;
+            }
+        }
+        for chunk in session.finish_export(generation).unwrap() {
+            bytes.extend_from_slice(&chunk);
+        }
+        bytes
+    }
+
+    #[test]
+    fn a_text_export_writes_the_session_text_bytes_and_no_image_trailer() {
+        let dir = TestDir::new("jobs-export-text");
+        let files = Arc::new(FileTable::default());
+        let slot = Arc::new(SessionSlot::default());
+        import_bmp(&files, &slot, &dir, 41, 29);
+        let expected = session_text_bytes(&slot);
+        let destination = dir.path().join("out.txt");
+        let sink = files.insert_sink(destination.clone()).unwrap();
+        let worker = Worker::spawn().unwrap();
+        let job_slot = Arc::clone(&slot);
+        let job_files = Arc::clone(&files);
+        let request = ExportRequest {
+            generation: 2,
+            settings: settings(),
+            output: OutputKind::Text,
+            sink,
+        };
+        let (_handle, rx) = wait_for_outcome(&worker, move |context| {
+            export_file(
+                context,
+                &job_slot,
+                &job_files,
+                &Recorder::default(),
+                request,
+            )
+        });
+        let report = rx.recv_timeout(WAIT).unwrap().unwrap();
+        let written = std::fs::read(&destination).unwrap();
+        assert_eq!(written, expected);
+        assert_eq!(report.byte_length, u64::try_from(written.len()).unwrap());
+        assert!(std::str::from_utf8(&written).is_ok());
+        assert_eq!(written.last(), Some(&b'\n'));
+        assert!(!written.starts_with(&[0x89, b'P', b'N', b'G']));
+        assert_eq!(
+            names_in(dir.path()).len(),
+            2,
+            "only the source and the export remain"
+        );
+    }
+
+    #[test]
+    fn a_cancelled_text_export_leaves_no_partial_file_and_keeps_an_existing_destination() {
+        let dir = TestDir::new("jobs-cancel-text");
+        let files = Arc::new(FileTable::default());
+        let slot = Arc::new(SessionSlot::default());
+        import_bmp(&files, &slot, &dir, 40, 30);
+        let destination = dir.file("out.txt", b"previous");
+        let sink = files.insert_sink(destination.clone()).unwrap();
+        let worker = Worker::spawn().unwrap();
+        let (progress, reached, release) = gate();
+        let job_slot = Arc::clone(&slot);
+        let job_files = Arc::clone(&files);
+        let request = ExportRequest {
+            generation: 1,
+            settings: settings(),
+            output: OutputKind::Text,
+            sink,
+        };
+        let (handle, rx) = wait_for_outcome(&worker, move |context| {
+            export_file(context, &job_slot, &job_files, &progress, request)
+        });
+        reached.recv_timeout(WAIT).unwrap();
+        handle.cancel();
+        release.send(()).unwrap();
+        assert!(
+            rx.recv_timeout(WAIT).is_err(),
+            "a cancelled text export was delivered"
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), b"previous");
+        assert_eq!(
+            names_in(dir.path()).len(),
+            2,
+            "no temporary file may remain"
+        );
     }
 }

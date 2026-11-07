@@ -49,6 +49,7 @@ function countingUrlApi(): UrlApi & { created: number; revoked: string[] } {
 function linkFor(size: number, filename: string, urls: UrlApi): DownloadLink {
   const artifact: BlobExportArtifact = {
     kind: 'blob',
+    format: 'png',
     blob: new Blob([new Uint8Array(size)], { type: 'image/png' }),
     byteLength: size,
     dispose: () => undefined,

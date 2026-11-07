@@ -75,18 +75,22 @@ pub(crate) async fn open_image_dialog(
     dialog::pick_source(&NativePicker::new(app), files.inner().clone()).await
 }
 
-/// Shows the save dialog with a suggested name that is used only as a display hint. Resolves to
-/// the destination's handle and name, or `None` when cancelled. Never returns a path.
+/// Shows the save dialog with a suggested name that is used only as a display hint. `outputKind`
+/// (`png` by default, or `text`) picks the filter and the default extension. Resolves to the
+/// destination's handle and name, or `None` when cancelled. Never returns a path.
 ///
-/// Failure contract: `invalid_argument` when the chosen location has no file name;
-/// `resource_limit_exceeded` when the handle table is full.
+/// Failure contract: `invalid_settings` or `invalid_argument` for an unknown or non-string kind;
+/// `invalid_argument` when the chosen location has no file name; `resource_limit_exceeded` when
+/// the handle table is full.
 #[allow(clippy::needless_pass_by_value)]
 #[tauri::command]
 pub(crate) async fn save_image_dialog(
     app: tauri::AppHandle,
     files: tauri::State<'_, Arc<FileTable>>,
     suggested_name: Option<String>,
+    output_kind: Option<serde_json::Value>,
 ) -> Result<Option<SinkRef>, IpcError> {
+    let output = processing::output_kind_argument(output_kind.as_ref())?;
     #[cfg(feature = "smoke")]
     if let Some(answer) = crate::smoke::take_save_answer(&app) {
         return answer;
@@ -95,6 +99,7 @@ pub(crate) async fn save_image_dialog(
         &NativePicker::new(app),
         files.inner().clone(),
         suggested_name.as_deref(),
+        output,
     )
     .await
 }
@@ -166,28 +171,32 @@ pub(crate) async fn start_preview(
     Ok(tauri::ipc::Response::new(frame))
 }
 
-/// Exports the artwork as a PNG into the chosen sink and commits it atomically. Returns the
-/// committed byte length; the destination path never crosses IPC.
+/// Exports the artwork into the chosen sink as `outputKind` (`png` by default, or `text`) and
+/// commits it atomically. Returns the committed byte length; the destination path never crosses
+/// IPC.
 ///
-/// Failure contract: the shared argument codes for `settings` and `generation`,
+/// Failure contract: the shared argument codes for `settings`, `generation` and `outputKind`,
 /// `invalid_argument` for an unavailable destination, `internal` for a write failure,
 /// `cancelled` or `stale_generation` when superseded before the commit.
 #[allow(clippy::needless_pass_by_value)]
 #[tauri::command]
-pub(crate) async fn export_png(
+pub(crate) async fn export_file(
     processing: tauri::State<'_, Arc<Processing>>,
     settings: Option<serde_json::Value>,
     sink_id: FileId,
     generation: Option<serde_json::Value>,
+    output_kind: Option<serde_json::Value>,
     progress: Channel<ProgressEvent>,
 ) -> Result<ExportReport, IpcError> {
     let generation = processing::generation_argument(generation.as_ref())?.value();
     let settings = processing::settings_argument(settings.as_ref())?;
+    let output = processing::output_kind_argument(output_kind.as_ref())?;
     processing
-        .export_png(
+        .export_file(
             ExportRequest {
                 generation,
                 settings,
+                output,
                 sink: sink_id,
             },
             progress,

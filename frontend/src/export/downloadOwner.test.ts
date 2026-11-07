@@ -19,9 +19,20 @@ function countingUrlApi(): UrlApi & { created: string[]; revoked: string[] } {
   }
 }
 
+function textArtifact(size: number): BlobExportArtifact {
+  return {
+    kind: 'blob',
+    format: 'text',
+    blob: new Blob([new Uint8Array(size)], { type: 'text/plain;charset=utf-8' }),
+    byteLength: size,
+    dispose: () => undefined,
+  }
+}
+
 function artifact(size: number): BlobExportArtifact {
   return {
     kind: 'blob',
+    format: 'png',
     blob: new Blob([new Uint8Array(size)], { type: 'image/png' }),
     byteLength: size,
     dispose: () => undefined,
@@ -105,5 +116,39 @@ describe('download owner', () => {
     expect(urls.created).toHaveLength(20)
     expect(urls.revoked).toHaveLength(20)
     expect(new Set(urls.revoked).size).toBe(20)
+  })
+})
+
+describe('download owner for text exports', () => {
+  it('owns one object URL for a .txt text artifact and reports its UTF-8 Blob type', () => {
+    const urls = countingUrlApi()
+    const owner = createDownloadOwner(urls)
+    const text = textArtifact(12)
+    const link = owner.show(text, 'grid-binary.txt')
+    expect(link?.filename).toBe('grid-binary.txt')
+    expect(link?.artifact.blob.type).toBe('text/plain;charset=utf-8')
+    expect(urls.created).toEqual(['blob:test/1:12'])
+  })
+
+  it('is idempotent for the same text artifact and name, and revokes the URL once on dispose', () => {
+    const urls = countingUrlApi()
+    const owner = createDownloadOwner(urls)
+    const text = textArtifact(4)
+    const first = owner.show(text, 'grid-binary.txt')
+    expect(owner.show(text, 'grid-binary.txt')).toBe(first)
+    owner.dispose()
+    owner.dispose()
+    expect(urls.revoked).toEqual(['blob:test/1'])
+  })
+
+  it('replaces a PNG link with a text link, revoking the PNG URL exactly once', () => {
+    const urls = countingUrlApi()
+    const owner = createDownloadOwner(urls)
+    owner.show(artifact(3), 'grid-binary.png')
+    const text = owner.show(textArtifact(5), 'grid-binary.txt')
+    expect(text?.url).toBe('blob:test/2')
+    expect(urls.revoked).toEqual(['blob:test/1'])
+    owner.show(null, '')
+    expect(urls.revoked).toEqual(['blob:test/1', 'blob:test/2'])
   })
 })

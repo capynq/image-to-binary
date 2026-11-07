@@ -13,7 +13,7 @@ use image::{Delay, DynamicImage, Frame, ImageBuffer, ImageFormat, Luma, Rgba};
 use image_to_binary_adapters::session::{
     EncodedPlan, PreviewSettings, Stage, DEFAULT_PIXEL_BUDGET,
 };
-use image_to_binary_adapters::{ArtworkPngTask, PngTaskLimits};
+use image_to_binary_adapters::{ArtworkPngTask, ArtworkTextTask, PngTaskLimits};
 use image_to_binary_core::{ContractError, Dimensions, Generation, Ramp, RenderMode, Sampling};
 use image_to_binary_processing::{
     decode, ColorMode, DecodeError, DecodeLimits, DecodedSource, RenderOptions, RenderStyle,
@@ -720,6 +720,191 @@ fn style_entries() -> Result<String, Box<dyn Error>> {
     Ok(entries.join(","))
 }
 
+/// One text reference, rendered directly by `ArtworkTextTask` and `Renderer::text_rows`. The
+/// invert case uses colours and source colour mode; its text must match the same settings with
+/// default colours, so colour is shown to have no effect while tone applies.
+struct TextCase {
+    name: &'static str,
+    mode: RenderMode,
+    sampling: Sampling,
+    ramp: Option<&'static str>,
+    style: RenderStyle,
+}
+
+fn text_cases() -> Result<[TextCase; 6], Box<dyn Error>> {
+    let defaults = RenderStyle::default();
+    Ok([
+        TextCase {
+            name: "classic",
+            mode: RenderMode::Binary,
+            sampling: Sampling::Classic,
+            ramp: None,
+            style: defaults,
+        },
+        TextCase {
+            name: "ascii_default",
+            mode: RenderMode::Ascii(Ramp::DEFAULT_ASCII),
+            sampling: Sampling::Average,
+            ramp: None,
+            style: defaults,
+        },
+        TextCase {
+            name: "ascii_custom",
+            mode: RenderMode::Ascii(Ramp::new(CUSTOM_RAMP)?),
+            sampling: Sampling::Average,
+            ramp: Some(CUSTOM_RAMP),
+            style: defaults,
+        },
+        TextCase {
+            name: "block",
+            mode: RenderMode::Block,
+            sampling: Sampling::Average,
+            ramp: None,
+            style: defaults,
+        },
+        TextCase {
+            name: "invert_coloured",
+            mode: RenderMode::Binary,
+            sampling: Sampling::Classic,
+            ramp: None,
+            style: RenderStyle {
+                foreground: STYLE_FOREGROUND,
+                background: STYLE_BACKGROUND,
+                color: ColorMode::Source,
+                invert: true,
+                ..defaults
+            },
+        },
+        TextCase {
+            name: "contrast_raised",
+            mode: RenderMode::Ascii(Ramp::DEFAULT_ASCII),
+            sampling: Sampling::Average,
+            ramp: None,
+            style: RenderStyle {
+                contrast: 100,
+                ..defaults
+            },
+        },
+    ])
+}
+
+/// Renders the text of one case with `style` through `ArtworkTextTask` and checks it against
+/// `Renderer::text_rows` over the whole grid, so the task and the direct path must agree.
+fn text_bytes(case: &TextCase, style: RenderStyle) -> Result<Vec<u8>, Box<dyn Error>> {
+    let pixels = rgba(MODE_WIDTH, MODE_HEIGHT);
+    let dimensions = Dimensions::new(MODE_WIDTH, MODE_HEIGHT)?;
+    let decoded = DecodedSource::from_rgba(dimensions, pixels, DecodeLimits::default())?;
+    let mut sampler = Sampler::new(Arc::new(decoded));
+    let renderer = Renderer::new()?;
+    let grid = match case.sampling {
+        Sampling::Classic => sampler.sample(MODE_CELL, Sampling::Classic)?,
+        Sampling::Average => {
+            let geometry = renderer.aspect_geometry(MODE_CELL, MODE_FONT)?;
+            sampler.sample_average_rect(MODE_CELL, u32::from(geometry.source_cell_height))?
+        }
+    };
+    let options = RenderOptions {
+        cell_size: MODE_CELL,
+        font_size: MODE_FONT,
+        threshold: MODE_THRESHOLD,
+        sampling: case.sampling,
+        mode: case.mode,
+        style,
+        ..RenderOptions::default()
+    };
+    let direct = renderer.text_rows(&grid, options, 0, grid.height())?;
+    let task = native_text(grid, options)?;
+    if direct != task {
+        return Err(format!("{}: ArtworkTextTask differs from text_rows", case.name).into());
+    }
+    Ok(task)
+}
+
+/// Drains a full `ArtworkTextTask` in one advance, the same way `native_export` drains PNG.
+fn native_text(grid: Arc<SampleGrid>, options: RenderOptions) -> Result<Vec<u8>, Box<dyn Error>> {
+    let mut task = ArtworkTextTask::new(
+        grid,
+        Renderer::new()?,
+        options,
+        EXPORT_GENERATION,
+        EXPORT_LIMITS,
+    )?;
+    task.advance(EXPORT_GENERATION, u64::MAX)?;
+    let mut bytes = Vec::new();
+    for chunk in task.drain_chunks()? {
+        bytes.extend(chunk);
+    }
+    for chunk in task.finish(EXPORT_GENERATION)? {
+        bytes.extend(chunk);
+    }
+    Ok(bytes)
+}
+
+/// Returns the JSON entry and the text bytes of one case. The case's text must equal its text
+/// with default colours and colour mode, proving colour has no effect.
+fn text_entry(case: &TextCase) -> Result<(String, Vec<u8>), Box<dyn Error>> {
+    let text = text_bytes(case, case.style)?;
+    let defaults = RenderStyle::default();
+    let uncoloured = RenderStyle {
+        foreground: defaults.foreground,
+        background: defaults.background,
+        color: defaults.color,
+        ..case.style
+    };
+    if text_bytes(case, uncoloured)? != text {
+        return Err(format!("{}: colour changes the text", case.name).into());
+    }
+    let pixels = rgba(MODE_WIDTH, MODE_HEIGHT);
+    let source = base64(&pixels);
+    let (mode, ramp) = match case.mode {
+        RenderMode::Binary => ("binary", "null".to_owned()),
+        RenderMode::Ascii(_) => (
+            "ascii",
+            format!("\"{}\"", case.ramp.unwrap_or(Ramp::DEFAULT_ASCII.as_str())),
+        ),
+        RenderMode::Block => ("block", "null".to_owned()),
+    };
+    let sampling = match case.sampling {
+        Sampling::Classic => "classic",
+        Sampling::Average => "average",
+    };
+    let color_mode = match case.style.color {
+        ColorMode::Monochrome => "monochrome",
+        ColorMode::Source => "source",
+    };
+    let entry = format!(
+        r#"{{"name":"{}","mode":"{mode}","ramp":{ramp},"width":{MODE_WIDTH},"height":{MODE_HEIGHT},"cellSize":{MODE_CELL},"fontSize":{MODE_FONT},"threshold":{MODE_THRESHOLD},"sampling":"{sampling}","foreground":"{}","background":"{}","colorMode":"{color_mode}","contrast":{},"invert":{},"source":"{source}","text":"{}"}}"#,
+        case.name,
+        colour_hex(case.style.foreground),
+        colour_hex(case.style.background),
+        case.style.contrast,
+        case.style.invert,
+        base64(&text)
+    );
+    Ok((entry, text))
+}
+
+/// Appends the text references. Each must differ from every other, otherwise the case does not
+/// exercise its mode or tone.
+fn text_entries() -> Result<String, Box<dyn Error>> {
+    let mut entries = Vec::new();
+    let mut texts: Vec<Vec<u8>> = Vec::new();
+    for case in &text_cases()? {
+        let (entry, text) = text_entry(case)?;
+        if texts.contains(&text) {
+            return Err(format!("{}: text must differ from earlier cases", case.name).into());
+        }
+        texts.push(text);
+        entries.push(entry);
+    }
+    Ok(entries.join(","))
+}
+
+/// Closes the JSON object with the `text` array, the last field of the reference.
+fn text_section() -> Result<String, Box<dyn Error>> {
+    Ok(format!("],\"text\":[{}]}}", text_entries()?))
+}
+
 /// Writes every file `crates/desktop/src/smoke/e2e.rs` reads, from the same deterministic sources
 /// and native renders as the JSON reference, so the desktop smoke needs no hand-made fixtures.
 fn write_e2e_fixtures(dir: &Path, fixtures: &[Fixture]) -> Result<(), Box<dyn Error>> {
@@ -765,6 +950,10 @@ fn write_e2e_fixtures(dir: &Path, fixtures: &[Fixture]) -> Result<(), Box<dyn Er
             preview.pixels(),
         )?;
         write(&format!("style64x40.{}.export.png", case.name), &export)?;
+    }
+    for case in &text_cases()? {
+        let (_, text) = text_entry(case)?;
+        write(&format!("text64x40.{}.export.txt", case.name), &text)?;
     }
     Ok(())
 }
@@ -851,7 +1040,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     json.push_str(&mode_entries()?);
     json.push_str("],\"styles\":[");
     json.push_str(&style_entries()?);
-    json.push_str("]}");
+    json.push_str(&text_section()?);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }

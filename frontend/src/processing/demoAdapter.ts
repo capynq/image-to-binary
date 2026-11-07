@@ -163,10 +163,23 @@ export function createDemoProcessingAdapter(options: DemoAdapterOptions = {}): P
       try {
         await delay(0)
         assertOperationActive(demoSession, context, guard)
-        const blob = new Blob([fixtureChars(settings.threshold).join('\n')], {
-          type: 'text/plain;charset=utf-8',
-        })
-        return { kind: 'blob', blob, byteLength: blob.size, dispose: () => undefined }
+        const blob = new Blob(
+          [
+            fixtureChars(settings.threshold)
+              .map((row) => `${row}\n`)
+              .join(''),
+          ],
+          {
+            type: 'text/plain;charset=utf-8',
+          },
+        )
+        return {
+          kind: 'blob',
+          format: 'text',
+          blob,
+          byteLength: blob.size,
+          dispose: () => undefined,
+        }
       } finally {
         finishOperation(demoSession, guard)
       }

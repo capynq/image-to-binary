@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { createBrowserProcessingAdapter, ExportUnavailableError } from './browserAdapter'
+import { createBrowserProcessingAdapter } from './browserAdapter'
 import type { BrowserAdapterOptions } from './browserAdapter'
 import { createDemoProcessingAdapter, UnsupportedPreviewKindError } from './demoAdapter'
-import type { JobContext, PreviewKind, ProcessingAdapter } from './types'
-import type { PreviewParameters } from './protocol'
+import type { ExportFormat, JobContext, PreviewKind, ProcessingAdapter } from './types'
+import type { OutputKindName, PreviewParameters } from './protocol'
 import { DEFAULT_SETTINGS } from './types'
 import type { StudioSettings } from './types'
 import type {
@@ -31,6 +31,7 @@ class FakeClient implements ProcessingClient {
   originals = 0
   readonly previewParameters: unknown[] = []
   readonly exportParameters: unknown[] = []
+  readonly exportKinds: OutputKindName[] = []
 
   private handleFor(name: string, width: number, height: number): SourceHandle {
     let released = false
@@ -61,14 +62,16 @@ class FakeClient implements ProcessingClient {
     return this.handleFor(image.name, 3, 2)
   }
 
-  exportPng<T extends Releasable>(
+  exportFile<T extends Releasable>(
     _source: SourceHandle,
     parameters: PreviewParameters,
+    outputKind: OutputKindName,
     _operationId: number,
     _sink: ExportSink,
     _finalize: (completion: ExportCompletion) => T,
   ): Promise<T> {
     this.exportParameters.push(parameters)
+    this.exportKinds.push(outputKind)
     return Promise.reject(new Error('export is not faked in this suite'))
   }
 
@@ -478,16 +481,33 @@ describe('browser processing adapter', () => {
     ).rejects.toThrow('does not belong')
   })
 
-  it('rejects text export explicitly and routes PNG export through the client', async () => {
-    const { adapter } = harness()
+  it('routes PNG and text exports through the client with their output kind', async () => {
+    const { adapter, clients } = harness()
     const session = adapter.createSession()
     const { source } = await adapter.import(session, { kind: 'demo' }, context(1))
     await expect(
-      adapter.export(session, source, 'text', DEFAULT_SETTINGS, context(2)),
-    ).rejects.toBeInstanceOf(ExportUnavailableError)
-    await expect(
-      adapter.export(session, source, 'png', DEFAULT_SETTINGS, context(3)),
+      adapter.export(session, source, 'png', DEFAULT_SETTINGS, context(2)),
     ).rejects.toThrow('export is not faked')
+    await expect(
+      adapter.export(session, source, 'text', DEFAULT_SETTINGS, context(3)),
+    ).rejects.toThrow('export is not faked')
+    expect(clients[0]?.exportKinds).toEqual(['png', 'text'])
+  })
+
+  it('rejects an unknown export format before any client call', async () => {
+    const { adapter, clients } = harness()
+    const session = adapter.createSession()
+    const { source } = await adapter.import(session, { kind: 'demo' }, context(1))
+    await expect(
+      adapter.export(
+        session,
+        source,
+        'svg' as unknown as ExportFormat,
+        DEFAULT_SETTINGS,
+        context(2),
+      ),
+    ).rejects.toBeInstanceOf(RangeError)
+    expect(clients[0]?.exportKinds).toEqual([])
   })
 
   it('reports a disposed session before export unavailability', async () => {

@@ -35,3 +35,44 @@ describe('announceExportPhase', () => {
     expect(announceExportPhase(running, 'failed', null, null)).toBe('PNG export failed.')
   })
 })
+
+describe('announceExportPhase for text exports', () => {
+  const runningText: AnnouncedExport = { phase: 'running', text: 'Rendering text export.' }
+
+  it('speaks the text render, the download step and the text ready size', () => {
+    expect(announceExportPhase(null, 'running', null, null, null, 'text')).toBe(
+      'Rendering text export.',
+    )
+    expect(announceExportPhase(runningText, 'preparing', null, null, null, 'text')).toBe(
+      'Rendering text export.',
+    )
+    expect(announceExportPhase(null, 'preparing', null, null, null, 'text')).toBe(
+      'Preparing text download.',
+    )
+    expect(announceExportPhase(runningText, 'ready', 2048, null, null, 'text')).toBe(
+      'Text export ready, 2.0 KiB.',
+    )
+  })
+
+  it('speaks a text cancellation and a saved text file', () => {
+    expect(announceExportPhase(runningText, 'idle', null, null, null, 'text')).toBe(
+      'Text export cancelled.',
+    )
+    expect(announceExportPhase(null, 'ready', 2048, null, 'grid.txt', 'text')).toBe(
+      'Saved grid.txt, 2.0 KiB.',
+    )
+  })
+
+  it('speaks a text failure with and without its message', () => {
+    expect(announceExportPhase(null, 'failed', null, null, null, 'text')).toBe(
+      'Text export failed.',
+    )
+    expect(announceExportPhase(null, 'failed', null, 'Too big.', null, 'text')).toBe(
+      'Text export failed. Too big.',
+    )
+  })
+
+  it('keeps the PNG wording when no format is given', () => {
+    expect(announceExportPhase(null, 'ready', 2048, null)).toBe('PNG export ready, 2.0 KiB.')
+  })
+})

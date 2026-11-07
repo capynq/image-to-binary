@@ -22,16 +22,10 @@ import type {
   StudioSettings,
   UrlApi,
 } from './types'
+import { isOutputKindName } from './protocol'
 import { ExportCancelledError, previewParametersOf, validateSettings } from './types'
 import { ProcessingWorkerError } from './workerClient'
 import type { PreviewPixels } from './workerClient'
-
-export class NativeExportUnavailableError extends Error {
-  constructor() {
-    super('Text export is not available until the text export phase.')
-    this.name = 'NativeExportUnavailableError'
-  }
-}
 
 export class NativeUnsupportedInputError extends Error {
   constructor() {
@@ -92,10 +86,10 @@ interface ProgressMessage {
 const NO_CANCEL: Promise<void> = Promise.resolve()
 
 /**
- * Adapter that runs import, preview and PNG export in the desktop shell through the typed
- * native commands. The page holds only opaque handles; preview frames are validated and turned
- * into the same PNG object URL as the browser path, and exports stream into a file the shell
- * commits. Text export is unavailable.
+ * Adapter that runs import, preview and export in the desktop shell through the typed native
+ * commands. The page holds only opaque handles; preview frames are validated and turned into the
+ * same PNG object URL as the browser path, and PNG or text exports stream into a file the shell
+ * commits with the same atomic sink.
  *
  * Ordering: a cancel is awaited before any later command of the session, so the shell has
  * applied it first. An import that was cancelled is never adopted as the current source.
@@ -296,8 +290,8 @@ export function createNativeProcessingAdapter(options: NativeAdapterOptions): Pr
       const state = assertSession(session)
       assertActive(state)
       const record = sourceOf(state, source)
-      if (format !== 'png') {
-        throw new NativeExportUnavailableError()
+      if (!isOutputKindName(format)) {
+        throw new RangeError('Export format must be png or text.')
       }
       validateSettings(settings)
       const generation = context.generation
@@ -308,7 +302,8 @@ export function createNativeProcessingAdapter(options: NativeAdapterOptions): Pr
         try {
           await state.pendingCancel
           chosen = await bridge.invoke('save_image_dialog', {
-            suggestedName: exportFilename(record.name),
+            suggestedName: exportFilename(record.name, format),
+            outputKind: format,
           })
         } catch (error) {
           throw nativeError(error)
@@ -318,10 +313,11 @@ export function createNativeProcessingAdapter(options: NativeAdapterOptions): Pr
         if (operation.cancelled) throw cancelledError()
         let reply: unknown
         try {
-          reply = await bridge.invoke('export_png', {
+          reply = await bridge.invoke('export_file', {
             settings: previewParametersOf(settings),
             sinkId: sink.id,
             generation,
+            outputKind: format,
             progress: progressChannel(generation, onProgress),
           })
         } catch (error) {

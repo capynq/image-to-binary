@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { createTaskYielder } from './taskYield'
 import type { TaskYielder } from './taskYield'
+import { createExportAccumulator } from './exportAccumulator'
 import { createWorkerHost } from './workerHost'
 import {
   ControlledEndpoint,
@@ -57,6 +58,7 @@ async function exportOnHost(endpoint: ControlledEndpoint, requestId: number): Pr
     operationId: requestId,
     sourceId: 1,
     parameters: PARAMS,
+    outputKind: 'png',
   })
   await until(
     () =>
@@ -130,9 +132,10 @@ describe('worker export transfer', () => {
     const engine = new FakeEngine({ steps: 3 })
     const pair = createLinkedPair(engine)
     const source = await pair.client.importRgba(rgba(), 1)
-    const exported = await pair.client.exportPng(
+    const exported = await pair.client.exportFile(
       source,
       PARAMS,
+      'png',
       2,
       { accept: () => undefined, progress: () => undefined },
       (completion) => ({ ...completion, dispose: () => undefined }),
@@ -140,6 +143,26 @@ describe('worker export transfer', () => {
     expect(exported.chunkCount).toBe(3)
     expect(engine.drainedBuffers.length).toBe(3)
     expect(engine.drainedBuffers.every((buffer) => buffer.byteLength === 0)).toBe(true)
+    pair.close()
+  })
+
+  it('passes the text output kind to the engine and builds a text Blob over the same grid', async () => {
+    const engine = new FakeEngine({ steps: 3 })
+    const pair = createLinkedPair(engine)
+    const source = await pair.client.importRgba(rgba(), 1)
+    const accumulator = createExportAccumulator({ format: 'text' })
+    const exported = await pair.client.exportFile(
+      source,
+      PARAMS,
+      'text',
+      2,
+      accumulator,
+      (completion) => accumulator.finish(completion),
+    )
+    expect(engine.starts.at(-1)).toMatchObject({ kind: 'export', outputKind: 'text' })
+    expect(exported.format).toBe('text')
+    expect(exported.blob.type).toBe('text/plain;charset=utf-8')
+    expect(exported.byteLength).toBe(fakePngBytes(3).byteLength)
     pair.close()
   })
 
@@ -166,6 +189,7 @@ describe('worker export transfer', () => {
       operationId: 2,
       sourceId: 1,
       parameters: PARAMS,
+      outputKind: 'png',
     })
     await until(() => endpoint.requests('cancelled').length === 1, 'cancel reply')
 
@@ -196,6 +220,7 @@ describe('worker export transfer', () => {
       operationId: 2,
       sourceId: 9,
       parameters: PARAMS,
+      outputKind: 'png',
     })
     await until(() => endpoint.requests('failed').length === 1, 'failure reply')
     expect(endpoint.requests('failed')).toEqual([

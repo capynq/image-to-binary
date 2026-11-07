@@ -38,6 +38,17 @@ export const CONTRAST_INTEGER_MESSAGE = 'contrast must be an integer'
 export const CONTRAST_RANGE_MESSAGE = `contrast must be between ${MIN_CONTRAST} and ${MAX_CONTRAST}`
 export const INVERT_BOOLEAN_MESSAGE = 'invert must be a boolean'
 
+/** `png` is the default export; `text` is UTF-8 grid text over the same grid and settings. */
+export type OutputKindName = 'png' | 'text'
+
+export const OUTPUT_KIND_NAMES: readonly OutputKindName[] = ['png', 'text']
+
+export const OUTPUT_KIND_MESSAGE = 'outputKind must be "png" or "text"'
+
+export function isOutputKindName(value: unknown): value is OutputKindName {
+  return OUTPUT_KIND_NAMES.some((name) => name === value)
+}
+
 const HEX_COLOUR = /^#[0-9a-fA-F]{6}$/
 
 function isHexColour(text: string): boolean {
@@ -138,11 +149,12 @@ export interface OriginalPreviewRequest extends RequestIdentity {
   readonly sourceId: number
 }
 
-/** Starts a PNG export of a retained source; answered by ordered `exportChunk` messages and one `exported`. */
+/** Starts an export of a retained source in `outputKind`; answered by ordered `exportChunk` messages and one `exported`. */
 export interface ExportRequest extends RequestIdentity {
   readonly type: 'export'
   readonly sourceId: number
   readonly parameters: PreviewParameters
+  readonly outputKind: OutputKindName
 }
 
 export interface CancelRequest extends RequestIdentity {
@@ -182,7 +194,7 @@ export interface PreviewedReply extends RequestIdentity {
   readonly pixels: ArrayBuffer
 }
 
-/** One ordered, worker-owned slice of the PNG; `sequence` starts at 0 and never repeats. */
+/** One ordered, worker-owned slice of the export bytes; `sequence` starts at 0 and never repeats. */
 export interface ExportChunkReply extends RequestIdentity {
   readonly type: 'exportChunk'
   readonly sequence: number
@@ -398,8 +410,19 @@ export function isWorkerRequest(value: unknown): value is WorkerRequest {
         isArrayBuffer(value.pixels)
       )
     case 'preview':
+      return (
+        hasIdentity(value) &&
+        isCount(value.sourceId) &&
+        isPreviewParameters(value.parameters) &&
+        !('outputKind' in value)
+      )
     case 'export':
-      return hasIdentity(value) && isCount(value.sourceId) && isPreviewParameters(value.parameters)
+      return (
+        hasIdentity(value) &&
+        isCount(value.sourceId) &&
+        isPreviewParameters(value.parameters) &&
+        isOutputKindName(value.outputKind)
+      )
     case 'importEncoded':
       return hasIdentity(value) && typeof value.name === 'string' && isArrayBuffer(value.bytes)
     case 'originalPreview':

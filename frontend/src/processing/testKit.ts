@@ -1,6 +1,12 @@
 import type { EngineFrame, EngineSession, ProcessingEngine } from './engine'
-import { DEFAULT_BACKGROUND, DEFAULT_FOREGROUND, DEFAULT_RAMP } from './protocol'
-import type { ColorModeName, PreviewParameters, PreviewSampling, RenderModeName } from './protocol'
+import { DEFAULT_BACKGROUND, DEFAULT_FOREGROUND, DEFAULT_RAMP, MAX_ENCODED_BYTES } from './protocol'
+import type {
+  ColorModeName,
+  OutputKindName,
+  PreviewParameters,
+  PreviewSampling,
+  RenderModeName,
+} from './protocol'
 import { createProcessingClient } from './workerClient'
 import type { ClientEndpoint, ProcessingClient, RgbaImport } from './workerClient'
 import type { HeifDecoderEndpoint } from './heifDecodeJob'
@@ -76,6 +82,13 @@ export function fakeChunkBytes(index: number): Uint8Array {
 }
 
 /** Concatenated bytes a complete fake export with `steps` advances must deliver. */
+/** A one-byte view that reports a length over the encoded ceiling, so the host's limit check runs without allocating it. */
+export function oversizedChunk(): Uint8Array {
+  const view = new Uint8Array(1)
+  Object.defineProperty(view, 'byteLength', { value: MAX_ENCODED_BYTES + 1 })
+  return view
+}
+
 export function fakePngBytes(steps: number): Uint8Array {
   const parts: number[] = []
   for (let index = 1; index <= steps; index += 1) {
@@ -151,6 +164,7 @@ export class FakeSession implements EngineSession {
     colorMode: ColorModeName,
     contrast: number,
     invert: boolean,
+    outputKind: OutputKindName,
   ): number {
     this.engine.starts.push({
       kind: 'export',
@@ -166,6 +180,7 @@ export class FakeSession implements EngineSession {
       colorMode,
       contrast,
       invert,
+      outputKind,
     })
     this.engine.log.push(`export:${generation}`)
     this.original = false
@@ -236,6 +251,7 @@ export class FakeSession implements EngineSession {
 
   /** Fresh chunk; a sub-view option places it inside a larger buffer to exercise copying. */
   private chunk(index: number): Uint8Array {
+    if (this.engine.oversizedChunks) return oversizedChunk()
     const bytes = fakeChunkBytes(index)
     if (!this.engine.subViewChunks) {
       this.engine.drainedBuffers.push(bytes.buffer)
@@ -270,7 +286,10 @@ export class FakeSession implements EngineSession {
   }
 }
 
-/** The render arguments one fake start received, in the order the engine signature names them. */
+/**
+ * The render arguments one fake start received, in the order the engine signature names them.
+ * `outputKind` is set only for exports.
+ */
 export interface RecordedStart {
   readonly kind: 'preview' | 'export'
   readonly generation: number
@@ -285,6 +304,7 @@ export interface RecordedStart {
   readonly colorMode: ColorModeName
   readonly contrast: number
   readonly invert: boolean
+  readonly outputKind?: OutputKindName
 }
 
 /** Deterministic engine double with the same stage protocol as the WASM session. */
@@ -299,6 +319,7 @@ export class FakeEngine implements ProcessingEngine {
   readonly drainedBuffers: ArrayBufferLike[] = []
   readonly steps: number
   readonly subViewChunks: boolean
+  readonly oversizedChunks: boolean
   /** The advance index (1-based) whose export call throws `encode_failed`, or null. */
   readonly failExportAt: number | null
   failNextCreate: string | null = null
@@ -316,11 +337,13 @@ export class FakeEngine implements ProcessingEngine {
     options: {
       readonly steps?: number
       readonly subViewChunks?: boolean
+      readonly oversizedChunks?: boolean
       readonly failExportAt?: number
     } = {},
   ) {
     this.steps = options.steps ?? 3
     this.subViewChunks = options.subViewChunks ?? false
+    this.oversizedChunks = options.oversizedChunks ?? false
     this.failExportAt = options.failExportAt ?? null
   }
 

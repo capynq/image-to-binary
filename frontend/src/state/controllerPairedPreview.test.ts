@@ -161,7 +161,7 @@ describe('controller paired previews', () => {
     expect(after.error).toBe('Import rejected. Previous image remains available.')
     expect(h.sourcesDisposed).toEqual([])
     expect(h.revoked).toEqual([])
-    expect(await (await controller.exportDemo('text')).text()).toBe('1010\n0101\n1010\n0101')
+    expect(await (await controller.exportDemo('text')).text()).toBe('1010\n0101\n1010\n0101\n')
   })
 
   it.each(['cancel', 'supersede'] as const)(
@@ -324,6 +324,6 @@ describe('controller paired previews', () => {
     expect(snapshot.preview).toBe(artwork)
     expect(snapshot.metadata?.name).toBe('Demo fixture')
     expect(revoked).toEqual([])
-    expect(await (await controller.exportDemo('text')).text()).toBe('1010\n0101\n1010\n0101')
+    expect(await (await controller.exportDemo('text')).text()).toBe('1010\n0101\n1010\n0101\n')
   })
 })

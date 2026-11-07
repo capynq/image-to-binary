@@ -26,7 +26,7 @@ describe('studio controller', () => {
     expect(preview?.width).toBe(48)
 
     const text = await controller.exportDemo('text')
-    expect(await text.text()).toBe('1010\n0101\n1010\n0101')
+    expect(await text.text()).toBe('1010\n0101\n1010\n0101\n')
     expect(controller.getSnapshot().status).toBe('ready')
   })
 

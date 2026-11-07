@@ -4,7 +4,7 @@ export {
   UnsupportedInputError,
   UnsupportedPreviewKindError,
 } from './demoAdapter'
-export { createBrowserProcessingAdapter, ExportUnavailableError } from './browserAdapter'
+export { createBrowserProcessingAdapter } from './browserAdapter'
 export { ExportLimitError, MAX_EXPORT_BYTES } from './exportAccumulator'
 export { createProcessingClient, ProcessingWorkerError } from './workerClient'
 export type {

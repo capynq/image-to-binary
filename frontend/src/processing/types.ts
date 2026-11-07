@@ -31,7 +31,14 @@ export type StudioJobStatus =
   | 'error'
   | 'disposed'
 
+/** `png` is the image file; `text` is UTF-8 grid text over the same grid and settings. */
 export type ExportFormat = 'png' | 'text'
+
+/** The Blob type of each export format; text is UTF-8 with no BOM. */
+export const EXPORT_MIME_TYPES: Readonly<Record<ExportFormat, string>> = Object.freeze({
+  png: 'image/png',
+  text: 'text/plain;charset=utf-8',
+})
 
 export type ExportStatus = 'idle' | 'running' | 'ready' | 'failed'
 
@@ -135,9 +142,13 @@ export interface PreviewArtifact {
   dispose(): void
 }
 
-/** Browser export: `blob` is the only handle to the encoded bytes, which never enter JSON state. */
+/**
+ * Browser export: `blob` is the only handle to the encoded bytes, which never enter JSON state.
+ * `format` names the file kind and fixes the Blob type.
+ */
 export interface BlobExportArtifact {
   readonly kind: 'blob'
+  readonly format: ExportFormat
   readonly blob: Blob
   readonly byteLength: number
   dispose(): void
@@ -188,8 +199,8 @@ export interface ProcessingAdapter {
     onProgress?: PreviewProgressListener,
   ): Promise<PreviewArtifact>
   /**
-   * Encodes `source` with `settings`. Rejects with the typed adapter error when `format` is
-   * unavailable; `onProgress` may run zero or more times before the result settles.
+   * Encodes `source` with `settings` as `format`. Rejects with a `RangeError` for any other
+   * format; `onProgress` may run zero or more times before the result settles.
    */
   export(
     session: ProcessingSession,

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { DEFAULT_RAMP, MAX_ENCODED_BYTES, eventData } from './protocol'
 import type { TaskYielder } from './taskYield'
-import { FakeEngine, portEndpoint, until } from './testKit'
+import { FakeEngine, PARAMS, portEndpoint, until } from './testKit'
 import { createWorkerHost } from './workerHost'
 import type { WorkerHostOptions } from './workerHost'
 
@@ -376,6 +376,7 @@ describe('worker host render modes', () => {
         operationId: 3,
         sourceId: 1,
         parameters: { ...parameters, mode: 'block', ramp: DEFAULT_RAMP },
+        outputKind: 'png',
       }),
     )
     expect(engine.starts).toEqual([
@@ -399,6 +400,7 @@ describe('worker host render modes', () => {
         sampling: 'average',
         mode: 'block',
         ramp: DEFAULT_RAMP,
+        outputKind: 'png',
         ...style,
       },
     ])
@@ -489,4 +491,41 @@ describe('worker host original preview', () => {
     expect(engine.log).toEqual(['original:2'])
     expect(engine.sessions[0]).toMatchObject({ disposeCalls: 1, freed: true })
   })
+})
+
+function replyType(reply: unknown): unknown {
+  return typeof reply === 'object' && reply !== null && 'type' in reply ? reply.type : undefined
+}
+
+describe('worker host encoded output limit', () => {
+  it.each([
+    ['text', 'The encoded text exceeds the byte limit.'],
+    ['png', 'The encoded PNG exceeds the byte limit.'],
+  ] as const)(
+    'fails an over-limit %s export with its own message and sends no chunk',
+    async (outputKind, message) => {
+      const engine = new FakeEngine({ oversizedChunks: true })
+      const raw = openHost(engine)
+      await roundTrip(raw, () => sendImport(raw, 1))
+      raw.send({
+        type: 'export',
+        requestId: 2,
+        operationId: 2,
+        sourceId: 1,
+        parameters: PARAMS,
+        outputKind,
+      })
+      await until(
+        () => raw.replies.some((reply) => replyType(reply) === 'failed'),
+        'the over-limit failure',
+      )
+      expect(raw.replies.at(-1)).toMatchObject({
+        type: 'failed',
+        requestId: 2,
+        code: 'resource_limit_exceeded',
+        message,
+      })
+      expect(raw.replies.some((reply) => replyType(reply) === 'exportChunk')).toBe(false)
+    },
+  )
 })

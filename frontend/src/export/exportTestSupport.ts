@@ -32,7 +32,19 @@ export function countingUrlApi(): CountingUrlApi {
 export function artifactOf(size: number): BlobExportArtifact {
   return {
     kind: 'blob',
+    format: 'png',
     blob: new Blob([new Uint8Array(size)], { type: 'image/png' }),
+    byteLength: size,
+    dispose: () => undefined,
+  }
+}
+
+/** A text export artifact of `size` bytes with the UTF-8 text Blob type. */
+export function textArtifactOf(size: number): BlobExportArtifact {
+  return {
+    kind: 'blob',
+    format: 'text',
+    blob: new Blob([new Uint8Array(size)], { type: 'text/plain;charset=utf-8' }),
     byteLength: size,
     dispose: () => undefined,
   }

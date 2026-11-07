@@ -15,7 +15,7 @@ const APP_COMMANDS: &[&str] = &[
     "import_source",
     "import_demo",
     "start_preview",
-    "export_png",
+    "export_file",
     "cancel",
     "reset",
 ];
@@ -28,7 +28,7 @@ const SMOKE_COMMANDS: &[&str] = &[
     "import_source",
     "import_demo",
     "start_preview",
-    "export_png",
+    "export_file",
     "cancel",
     "reset",
     "echo_binary",

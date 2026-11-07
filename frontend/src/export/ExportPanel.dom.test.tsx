@@ -7,7 +7,8 @@ import { createDownloadOwner } from './downloadOwner'
 import type { DownloadLink } from './downloadOwner'
 import { ExportPanel } from './ExportPanel'
 import type { ExportPanelProps } from './ExportPanel'
-import { artifactOf, countingUrlApi } from './exportTestSupport'
+import { artifactOf, countingUrlApi, textArtifactOf } from './exportTestSupport'
+import type { ExportFormat } from '../processing/types'
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
 
@@ -72,6 +73,18 @@ function linkFor(size: number, filename: string): DownloadLink {
   const link = createDownloadOwner(countingUrlApi()).show(artifactOf(size), filename)
   if (link === null) throw new Error('A link was expected.')
   return link
+}
+
+function textLinkFor(size: number, filename: string): DownloadLink {
+  const link = createDownloadOwner(countingUrlApi()).show(textArtifactOf(size), filename)
+  if (link === null) throw new Error('A link was expected.')
+  return link
+}
+
+function formatRadio(value: ExportFormat): HTMLInputElement {
+  const found = container.querySelector<HTMLInputElement>(`input[type="radio"][value="${value}"]`)
+  if (found === null) throw new Error(`No format radio ${value}.`)
+  return found
 }
 
 describe('ExportPanel focus', () => {
@@ -176,5 +189,122 @@ describe('ExportPanel saved export', () => {
     expect(liveText()).toBe('PNG export cancelled.')
     expect(container.querySelector('.error-panel')).toBeNull()
     expect(control('Export PNG')).toBeInstanceOf(HTMLButtonElement)
+  })
+})
+
+describe('ExportPanel format choice', () => {
+  it('lists PNG and text as radios in one Format group, with PNG chosen by default', () => {
+    show({ format: 'png', onFormatChange: noop })
+    const group = container.querySelector('fieldset')
+    expect(group?.querySelector('legend')?.textContent).toBe('Format')
+    const radios = [...container.querySelectorAll<HTMLInputElement>('input[type="radio"]')]
+    expect(radios.map((radio) => radio.value)).toEqual(['png', 'text'])
+    expect(new Set(radios.map((radio) => radio.name)).size).toBe(1)
+    expect(formatRadio('png').checked).toBe(true)
+    expect(control('Export PNG')).toBeTruthy()
+  })
+
+  it('reports the chosen format and names the export button for it', () => {
+    const chosen: ExportFormat[] = []
+    show({ format: 'png', onFormatChange: (format) => chosen.push(format) })
+    act(() => formatRadio('text').click())
+    expect(chosen).toEqual(['text'])
+    show({ format: 'text', onFormatChange: noop })
+    expect(control('Export text')).toBeTruthy()
+    expect(formatRadio('text').checked).toBe(true)
+    expect(container.textContent).toContain('Text uses the same grid and settings as PNG')
+  })
+
+  it('hides the format choice while an export runs or prepares', () => {
+    show({ phase: 'running', format: 'text', shownFormat: 'text', onFormatChange: noop })
+    expect(container.querySelector('fieldset')).toBeNull()
+    show({ phase: 'preparing', format: 'text', shownFormat: 'text', onFormatChange: noop })
+    expect(container.querySelector('fieldset')).toBeNull()
+  })
+
+  it('keeps keyboard focus on the chosen format radio, so choosing does not move focus away', () => {
+    show({ format: 'png', onFormatChange: noop })
+    formatRadio('text').focus()
+    act(() => formatRadio('text').click())
+    show({ format: 'text', onFormatChange: noop })
+    expect(document.activeElement).toBe(formatRadio('text'))
+  })
+
+  it('keeps the export section without a format control when none is wired', () => {
+    show({})
+    expect(container.querySelector('fieldset')).toBeNull()
+    expect(control('Export PNG')).toBeTruthy()
+  })
+
+  it('moves focus to Cancel for a text render and to Download text when it is ready', () => {
+    show({ format: 'text', onFormatChange: noop })
+    control('Export text').focus()
+    show({ phase: 'running', format: 'text', shownFormat: 'text', progress: 0.1 })
+    expect(document.activeElement).toBe(control('Cancel export'))
+    show({
+      phase: 'ready',
+      format: 'text',
+      shownFormat: 'text',
+      byteLength: 2048,
+      download: textLinkFor(2048, 'grid-binary.txt'),
+    })
+    expect(document.activeElement).toBe(control('Download text'))
+  })
+
+  it('moves focus to Retry text export when a text export fails', () => {
+    show({ phase: 'running', format: 'text', shownFormat: 'text' })
+    control('Cancel export').focus()
+    show({ phase: 'failed', format: 'text', shownFormat: 'text', error: null })
+    expect(document.activeElement).toBe(control('Retry text export'))
+    expect(container.querySelector('.error-text')?.textContent).toBe('The text export failed.')
+  })
+
+  it('invokes Cancel for a text render and speaks the text cancellation', () => {
+    let cancelled = 0
+    show({
+      phase: 'running',
+      format: 'text',
+      shownFormat: 'text',
+      onCancel: () => (cancelled += 1),
+    })
+    act(() => control('Cancel export').click())
+    expect(cancelled).toBe(1)
+    show({ phase: 'idle', format: 'text', shownFormat: 'text', onFormatChange: noop })
+    expect(liveText()).toBe('Text export cancelled.')
+  })
+
+  it('speaks the text render, the ready size and a saved text file', () => {
+    show({ phase: 'running', format: 'text', shownFormat: 'text' })
+    expect(liveText()).toBe('Rendering text export.')
+    show({
+      phase: 'ready',
+      format: 'text',
+      shownFormat: 'text',
+      byteLength: 2048,
+      download: textLinkFor(2048, 'grid-binary.txt'),
+    })
+    expect(liveText()).toBe('Text export ready, 2.0 KiB.')
+    show({ phase: 'idle', format: 'text', shownFormat: 'text', onFormatChange: noop })
+    show({
+      phase: 'ready',
+      format: 'text',
+      shownFormat: 'text',
+      byteLength: 2048,
+      savedName: 'grid.txt',
+    })
+    expect(liveText()).toBe('Saved grid.txt, 2.0 KiB.')
+  })
+
+  it('offers a Download text link with the .txt filename', () => {
+    show({
+      phase: 'ready',
+      format: 'text',
+      shownFormat: 'text',
+      byteLength: 2048,
+      download: textLinkFor(2048, 'grid-binary.txt'),
+    })
+    const link = control('Download text') as HTMLAnchorElement
+    expect(link.getAttribute('download')).toBe('grid-binary.txt')
+    expect(link.getAttribute('href')).toMatch(/^blob:/)
   })
 })
