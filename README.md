@@ -4,12 +4,13 @@ Image to Binary turns a picture into a grid of characters: classic 0/1 binary
 digits, a custom ASCII ramp, or Unicode block characters. The result is shown
 as a live preview and saved as a PNG image or as UTF-8 text.
 
-The project ships three front ends:
+The project ships two front ends:
 
 - a browser studio (React, TypeScript and a Rust engine compiled to WebAssembly);
-- a desktop app (a Tauri 2 shell around the same studio, with image processing in Rust);
-- the original Python/Tkinter application, kept as the reference until the
-  acceptance decision in [docs/PLAN.md](docs/PLAN.md) (subphase 8.3).
+- a desktop app (a Tauri 2 shell around the same studio, with image processing in Rust).
+
+The studio replaced the original Python/Tkinter application; see the
+[Migration note](#migration-note).
 
 ![Split comparison with the dark theme on a 1280 by 800 window](docs/images/desktop-split-dark-1280x800.png)
 
@@ -30,7 +31,7 @@ The project ships three front ends:
 - [Licences and notices](#licences-and-notices)
 - [Troubleshooting](#troubleshooting)
 - [Contributing](#contributing)
-- [Python reference application](#python-reference-application)
+- [Migration note](#migration-note)
 
 ## Quick start
 
@@ -41,7 +42,6 @@ Requirements:
 | Rust | 1.88.0 with `rustfmt`, `clippy` and the `wasm32-unknown-unknown` target | `rust-toolchain.toml` |
 | Node.js | 24.15.0 (the frontend requires 24.15.0 or later) | `frontend/.node-version`, `frontend/package.json` |
 | wasm-bindgen CLI | 0.2.128 | `crates/wasm/Cargo.toml`, installed by `crates/wasm/scripts/setup.mjs` |
-| Python | 3.11 to 3.14 (reference app only) | `pyproject.toml`, `requirements.txt` |
 
 Rust builds use `--locked` so `Cargo.lock` is respected. The setup script
 installs `wasm-bindgen-cli` only under `.local/wasm-tools`. Explicit
@@ -247,9 +247,6 @@ memory at the same time. WASM memory grows but never shrinks during a session.
   not file paths or handles. Frames cross IPC as raw bytes, not JSON or base64.
   Files are opened from regular files with a 256 MiB cap. Saves write a temporary
   file beside the target, so the destination is not left partly written.
-- **Python reference.** `main.py` (Tkinter) and `image_processor.py` form a
-  separate implementation with a classic 128 threshold and nearest-neighbour
-  sampling. It does not share code with the Rust engine.
 
 ## Project layout
 
@@ -265,10 +262,8 @@ memory at the same time. WASM memory grows but never shrinks during a session.
 | `tools/package/` | Desktop packaging, third-party notice generation (`generate-notices.sh`), guard tests and `verify-macos.sh` |
 | `tools/native-codecs/` | Pinned, decode-only native libheif, libde265 and libaom builds for the `heif` feature |
 | `tools/wasm-codecs/` | Pinned Emscripten build of the browser HEIF and AVIF decoder |
-| `tests/` | Python regression tests for the reference app |
 | `assets/fonts/` | IBM Plex Mono and its OFL notice |
 | `docs/` | `PLAN.md` (migration plan), `format-coverage.md`, `images/` (README screenshots) |
-| `main.py`, `image_processor.py` | Python reference application |
 | `.github/workflows/` | Continuous integration (checks only) |
 
 Ignored outputs include `.local/`, `target/`, `frontend/dist/`,
@@ -296,8 +291,6 @@ network audit show.
   dependencies of the workspace crates or the desktop crate, the updater is not
   configured, and the packages disable updater artifacts. This is evidence from
   configuration and dependency lists, not from a traffic capture.
-- **Python reference.** `main.py` and `image_processor.py` import no networking
-  module.
 
 Outside the app, your operating system, browser extensions and the browser
 itself control their own network traffic. Those are not covered here.
@@ -425,15 +418,12 @@ licence text in source files when you edit them.
   systems is not verified. The webview may claim `Ctrl+R` as a reload before the menu sees it.
 - **A very large image takes time.** Decode and render run in a worker, so the
   interface stays responsive. Press `Escape` (desktop or browser) to cancel.
-- **Python: `ModuleNotFoundError: _tkinter`.** The Python installation lacks Tk.
-  Install a Tk-enabled Python, then recreate `.venv`. Headless tests still work without Tk.
 
 ## Contributing
 
 Work follows the numbered subphases in [docs/PLAN.md](docs/PLAN.md). Each subphase
 has its own scope, acceptance checks and commit boundary. Keep changes inside the
-subphase you are working on, and keep the Python fallback until the plan's
-acceptance gate allows its removal.
+subphase you are working on.
 
 ### Checks
 
@@ -470,13 +460,6 @@ cargo test --locked --features smoke
 # Packaging guards and notices
 bash tools/package/test/package-guards.sh
 bash tools/package/generate-notices.sh aarch64-apple-darwin   # use your host triple
-
-# Python reference app
-.venv/bin/python -m pip check
-.venv/bin/python -m compileall -q main.py image_processor.py tests
-.venv/bin/python -m unittest discover -s tests -v
-.venv/bin/python -m ruff format --check main.py image_processor.py tests
-.venv/bin/python -m ruff check main.py image_processor.py tests
 ```
 
 CI also asserts that generated outputs are ignored, that the source fixtures,
@@ -512,34 +495,16 @@ WASM package, the desktop checks on Linux, macOS and Windows, package guard test
 a real-app smoke run under Xvfb on Linux, and a repository hygiene check.
 They do not deploy, publish artifacts, sign or notarise releases, or make release decisions.
 
-## Python reference application
+## Migration note
 
-`main.py` and `image_processor.py` are the original Tkinter application. The
-Rust and browser studio is the replacement under development, and this
-application stays available until the acceptance decision in the migration plan.
+The Rust, browser and desktop studio replaced the original Python/Tkinter
+application. Its sources (`main.py` and `image_processor.py`, with their
+Python tests and dependency files) were removed from the working tree once the
+replacement was accepted. They remain in this repository's git history, before
+the commit that removed them.
 
-Setup:
+The classic binary mode keeps the original semantics: nearest-neighbour
+sampling, the floor-grid geometry, a threshold of 128 with dark pixels mapped
+to `1`, and green-on-black output. Byte parity with the old Pillow glyph raster is
+not claimed; the grid and the 0/1 decisions are the parity target.
 
-```sh
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
-.venv/bin/python -m pip install -r requirements-dev.txt   # for the checks
-.venv/bin/python main.py
-```
-
-On Windows, use `py -3 -m venv .venv` and `.venv\Scripts\python.exe`.
-
-The picker accepts JPEG, PNG and BMP. Images are converted to grayscale and
-sampled with nearest-neighbour sampling. A sample below the threshold of 128 becomes `1`,
-and otherwise `0`. Output dimensions are rounded down to whole cells. The
-preview is a 256 px thumbnail.
-
-Known defects that the regression tests record as expected failures:
-
-- tiny images smaller than a cell can fail;
-- Reset does not remove the previous export, so avoid saving after Reset until a new image is processed;
-- multiple dropped paths become one invalid path, so use the picker for ambiguous paths.
-
-The headless tests use generated fixtures and the bundled font. They do not
-establish GUI or cross-platform visual behaviour. The Python application does
-not share code with the Rust engine.

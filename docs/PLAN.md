@@ -26,7 +26,8 @@ Known baseline defects to preserve as regression fixtures or explicitly retire:
 
 ## Architecture and scope
 
-The product remains Python until the replacement is accepted. The target is a
+The product remained Python until the replacement was accepted in 8.3, which
+retired the Python application. The target is a
 shared Rust core with a React/TypeScript/Vite UI, exposed through a browser Rust
 WASM worker and a Tauri native shell for Windows, macOS, and Linux. The core
 owns decoding, normalization, sampling, glyph masks, rendering, export, limits,
@@ -121,7 +122,8 @@ native targets in CI.
 ## Decisions and engineering conventions
 
 - Keep Python until the Rust/browser/native replacement passes the acceptance
-  gates; do not silently remove the fallback.
+  gates; do not silently remove the fallback. (Satisfied: 8.3 recorded the
+  acceptance decision and retired Python.)
 - Keep contracts typed and minimal. Encapsulate caches and resources privately,
   use composition, RAII, checked arithmetic, and `Result`-based error handling
   in Rust; use strict TypeScript and opaque adapter sessions.
@@ -2248,9 +2250,44 @@ Proposed commit title: `refactor: retire Python fallback after acceptance`
 
 Completion checklist:
 
-- [ ] Acceptance decision recorded.
-- [ ] Fixtures and notices retained.
-- [ ] Python removal/retention is explicit and validated.
+- [x] Acceptance decision recorded.
+- [x] Fixtures and notices retained.
+- [x] Python removal/retention is explicit and validated.
+
+Validation: on 2026-11-08 the user decided to remove the Python application,
+and the root accepted the replacement against the plan's gates:
+- classic geometry, threshold and sampling parity (phase 2 and 3 checks);
+- format coverage (`docs/format-coverage.md`), resource limits, and PNG and
+  text export parity across native, WASM and browser;
+- the Chromium accessibility and boundary matrix (7.4);
+- the real-app smoke run on macOS and in CI on Linux, and green CI on
+  Linux, macOS and Windows (8.1).
+Removed: `main.py`, `image_processor.py`, `pyproject.toml`, the two
+requirements files, `ruff.toml`, `tests/test_baseline.py`, and the Python
+baseline workflow. Nothing else referenced them. No fixture came from the
+Python tests, so every Rust and frontend fixture stays in place, as do the
+IBM Plex Mono OFL notice, LICENSE, THIRD_PARTY_NOTICES.md, the codec licence
+texts, and the Python build helpers under `tools/native-codecs/` and
+`crates/desktop/icons/`. The README replaces its Python section with a
+migration note pointing to the git history.
+After removal, root format, lint and 292 tests, 785 frontend tests with
+typecheck and format, the hygiene assertions, and 17 package guard tests pass.
+
+Accepted in writing as known risks:
+- No user-visible classic regression is expected. Classic mode keeps
+  nearest-neighbour sampling, the floor grid, threshold 128, dark pixels as
+  `1`, and green on black; glyph pixels come from the bundled font, so byte
+  parity with the old Pillow raster was never claimed.
+- The LGPL-3.0 and HEVC distribution question stays open. Default desktop
+  packages exclude HEIC and AVIF, which the Python app never supported.
+- Upstream issues: animated WebP with alpha-blended frames, and HEIC 10-bit
+  not being verified locally.
+- Not exercised: Firefox, WebKit, screen readers, macOS 11–13, the desktop
+  smoke run on Windows, and native window screenshots.
+- When a chosen file cannot be opened or read (for example, it is missing or
+  access is denied), the desktop reports a decode failure; a clearer code is
+  a follow-up.
+- The old Tkinter interface was never launched in this environment.
 
 ## Subphase 0.1 validation record
 
