@@ -8,8 +8,11 @@ const frontendRoot = dirname(fileURLToPath(import.meta.url))
 const wasmPackage = resolve(frontendRoot, '../.local/wasm/pkg')
 const heifDist = resolve(frontendRoot, '../.local/wasm-codecs/dist')
 const heifGlueBuilt = resolve(heifDist, 'heif_decode.mjs')
+const heifGlueDisabled = process.env.IMAGE_TO_BINARY_DISABLE_HEIF_GLUE === '1'
 const heifGlueAvailable =
-  existsSync(heifGlueBuilt) && existsSync(resolve(heifDist, 'heif_decode.wasm'))
+  !heifGlueDisabled &&
+  existsSync(heifGlueBuilt) &&
+  existsSync(resolve(heifDist, 'heif_decode.wasm'))
 const heifGlue = heifGlueAvailable
   ? heifGlueBuilt
   : resolve(frontendRoot, 'src/processing/heif/unavailableGlue.ts')

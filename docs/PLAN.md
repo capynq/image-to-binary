@@ -1571,9 +1571,26 @@ Proposed commit title: `build: validate local desktop packages`
 
 Completion checklist:
 
-- [ ] Three-target scripts reviewed.
-- [ ] Available packages smoke-tested.
-- [ ] No publishing or signing side effects.
+- [x] Three-target scripts reviewed.
+- [x] Available packages smoke-tested.
+- [x] No publishing or signing side effects.
+
+Validation: `tools/package/` holds macOS, Windows, and Linux build scripts that
+build the frontend and the default desktop feature set (no native codecs and no
+browser HEIF decoder, pending the open LGPL/HEVC decision) and write only
+ignored outputs. They refuse to run when any signing, notarization, or updater
+key Tauri reads is set, or when the configuration or an overlay enables signing,
+and they restore the desktop manifest on interruption. Each package ships the
+project license, the font and codec notices, and an offline-generated notice
+file for the 263 Rust crates and 4 npm packages it bundles, with every license
+inside an allowlist. The macOS arm64 app and DMG were built, are ad-hoc signed
+only and unsealed, mount read-only, launch from a scratch copy, show their window,
+and quit cleanly; the packaged binary contains no smoke or HEIF decoder code.
+Two clean builds produced a byte-identical binary and app contents, while the
+DMG bytes differed. Windows and Linux report unavailable on this host and were
+not built. 17 package guard tests, root (292), desktop (142 per build), and
+frontend (629) tests pass. Nothing was signed, notarized, uploaded, published,
+or installed system-wide.
 
 ### 6.1 Add ASCII, block, and custom ramps
 
