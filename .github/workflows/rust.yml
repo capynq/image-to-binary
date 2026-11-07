@@ -16,7 +16,7 @@ jobs:
   checks:
     name: Rust checks
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - name: Check out source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
@@ -26,6 +26,15 @@ jobs:
         run: rustup show
       - name: Add WebAssembly target
         run: rustup target add wasm32-unknown-unknown
+      - name: Restore root Cargo cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: rust-root-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
       - name: Check Rust formatting
         run: cargo fmt --all --check
       - name: Check Rust lints
@@ -34,3 +43,64 @@ jobs:
         run: cargo test --workspace --locked
       - name: Check WebAssembly target
         run: cargo check --workspace --target wasm32-unknown-unknown --locked
+
+  wasm-package:
+    name: WASM package and node tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Set up Node.js from the frontend pin
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version-file: frontend/.node-version
+      - name: Initialize declared Rust toolchain
+        run: rustup show
+      - name: Add WebAssembly target
+        run: rustup target add wasm32-unknown-unknown
+      - name: Restore root Cargo cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: rust-root-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+      - name: Restore pinned wasm-bindgen tools
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: .local/wasm-tools
+          key: wasm-tools-${{ runner.os }}-${{ hashFiles('crates/wasm/Cargo.toml') }}
+      - name: Install pinned wasm-bindgen CLI
+        run: node crates/wasm/scripts/setup.mjs
+      - name: Build WASM package
+        run: node crates/wasm/scripts/build.mjs
+      - name: Run WASM node tests
+        run: node crates/wasm/scripts/test.mjs
+
+  bench-smoke:
+    name: Core benchmark smoke (1 MP)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Initialize declared Rust toolchain
+        run: rustup show
+      - name: Restore root Cargo cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: rust-root-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+      - name: Run the smallest release benchmark case
+        run: cargo run -p image-to-binary-processing --release --locked --example core_bench -- 1

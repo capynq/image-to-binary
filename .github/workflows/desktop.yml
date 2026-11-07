@@ -1,0 +1,213 @@
+name: Desktop checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  desktop-checks:
+    name: Desktop checks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Install Linux WebKitGTK prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential curl wget file libxdo-dev libssl-dev \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev \
+            libsoup-3.0-dev libjavascriptcoregtk-4.1-dev
+      - name: Initialize declared Rust toolchain
+        run: rustup show
+      - name: Add WebAssembly target
+        run: rustup target add wasm32-unknown-unknown
+      - name: Set up Node.js from the frontend pin
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version-file: frontend/.node-version
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Restore pinned wasm-bindgen tools
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: .local/wasm-tools
+          key: wasm-tools-${{ runner.os }}-${{ hashFiles('crates/wasm/Cargo.toml') }}
+      - name: Install pinned wasm-bindgen CLI
+        run: node crates/wasm/scripts/setup.mjs
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Build frontend dist for embedding
+        working-directory: frontend
+        run: npm run build
+      - name: Restore desktop Cargo cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            crates/desktop/target
+          key: desktop-${{ runner.os }}-${{ hashFiles('crates/desktop/Cargo.lock', 'rust-toolchain.toml') }}
+      - name: Fetch desktop crate dependencies
+        working-directory: crates/desktop
+        run: cargo fetch --locked
+      - name: Generate third-party notices for the host target
+        run: |
+          host="$(rustc -vV | sed -n 's/^host: //p')"
+          bash tools/package/generate-notices.sh "$host"
+      - name: Check desktop formatting
+        working-directory: crates/desktop
+        run: cargo fmt --all --check
+      - name: Check desktop lints (default features)
+        working-directory: crates/desktop
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Check desktop lints (smoke feature)
+        working-directory: crates/desktop
+        run: cargo clippy --all-targets --locked --features smoke -- -D warnings
+      - name: Run desktop tests (default features)
+        working-directory: crates/desktop
+        run: cargo test --locked
+      - name: Run desktop tests (smoke feature)
+        working-directory: crates/desktop
+        run: cargo test --locked --features smoke
+
+  package-guards:
+    name: Package guard tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Initialize declared Rust toolchain
+        run: rustup show
+      - name: Set up Node.js from the frontend pin
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version-file: frontend/.node-version
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Restore desktop Cargo cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: desktop-registry-${{ runner.os }}-${{ hashFiles('crates/desktop/Cargo.lock') }}
+      - name: Fetch desktop crate dependencies
+        working-directory: crates/desktop
+        run: cargo fetch --locked
+      - name: Run package guard tests with no signing environment
+        run: |
+          mkdir -p .local
+          bash tools/package/test/package-guards.sh
+
+  smoke:
+    name: Real-app smoke (Linux, xvfb)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Install Linux WebKitGTK prerequisites and virtual display
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential curl wget file libxdo-dev libssl-dev \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev \
+            libsoup-3.0-dev libjavascriptcoregtk-4.1-dev xvfb
+      - name: Initialize declared Rust toolchain
+        run: rustup show
+      - name: Add WebAssembly target
+        run: rustup target add wasm32-unknown-unknown
+      - name: Set up Node.js from the frontend pin
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version-file: frontend/.node-version
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Restore root Cargo cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: rust-root-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+      - name: Restore desktop Cargo cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            crates/desktop/target
+          key: desktop-${{ runner.os }}-${{ hashFiles('crates/desktop/Cargo.lock', 'rust-toolchain.toml') }}
+      - name: Restore pinned wasm-bindgen tools
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: .local/wasm-tools
+          key: wasm-tools-${{ runner.os }}-${{ hashFiles('crates/wasm/Cargo.toml') }}
+      - name: Install pinned wasm-bindgen CLI
+        run: node crates/wasm/scripts/setup.mjs
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Build frontend dist for embedding
+        working-directory: frontend
+        run: npm run build
+      - name: Fetch desktop crate dependencies
+        working-directory: crates/desktop
+        run: cargo fetch --locked
+      - name: Generate third-party notices for the host target
+        run: bash tools/package/generate-notices.sh x86_64-unknown-linux-gnu
+      - name: Generate smoke fixtures
+        run: |
+          fixtures="$RUNNER_TEMP/smoke-fixtures"
+          mkdir -p "$fixtures/e2e"
+          cargo run -p image-to-binary-processing --example reference_fixtures --locked -- \
+            "$fixtures/reference.json" "$fixtures/ui-preview.rgba" "$fixtures/e2e"
+      - name: Build desktop binary with smoke feature
+        working-directory: crates/desktop
+        run: cargo build --locked --features smoke
+      - name: Run real desktop app smoke under xvfb
+        run: |
+          report="$RUNNER_TEMP/smoke-report.json"
+          xvfb-run -a --server-args="-screen 0 1280x1024x24" \
+            crates/desktop/target/debug/image-to-binary-desktop \
+            --smoke --smoke-report "$report" --smoke-e2e-dir "$RUNNER_TEMP/smoke-fixtures/e2e"
+          python3 -c "import json,sys; r=json.load(open(sys.argv[1])); assert r['failures']==[], r['failures']; print('smoke checks:', len(r['checks']))" "$report"
