@@ -1,7 +1,12 @@
 //! Narrow typed command surface. Binary payloads travel as raw bytes, never as JSON or base64.
 
+use std::sync::Arc;
+
 use serde::Serialize;
 
+use crate::error::IpcError;
+use crate::files::dialog::{self, NativePicker};
+use crate::files::{FileId, FileRef, FileTable, SinkRef};
 use crate::limits::AppLimits;
 
 /// Codecs compiled into this binary; the native codec path is enabled by the `native-codecs` feature.
@@ -44,6 +49,49 @@ pub(crate) fn app_info() -> AppInfo {
 #[tauri::command]
 pub(crate) fn app_limits() -> AppLimits {
     crate::limits::app_limits()
+}
+
+/// Shows the image picker. Resolves to the chosen file's handle and name, or `None` when the
+/// user cancels. Never returns a path.
+///
+/// Failure contract: `invalid_argument` for a non-local, directory, or non-regular selection;
+/// `encoded_too_large` above the input limit; `resource_limit_exceeded` when the handle table is
+/// full. The dialog is shown by the platform without blocking the UI thread.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+pub(crate) async fn open_image_dialog(
+    app: tauri::AppHandle,
+    files: tauri::State<'_, Arc<FileTable>>,
+) -> Result<Option<FileRef>, IpcError> {
+    dialog::pick_source(&NativePicker::new(app), files.inner().clone()).await
+}
+
+/// Shows the save dialog with a suggested name that is used only as a display hint. Resolves to
+/// the destination's handle and name, or `None` when cancelled. Never returns a path.
+///
+/// Failure contract: `invalid_argument` when the chosen location has no file name;
+/// `resource_limit_exceeded` when the handle table is full.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+pub(crate) async fn save_image_dialog(
+    app: tauri::AppHandle,
+    files: tauri::State<'_, Arc<FileTable>>,
+    suggested_name: Option<String>,
+) -> Result<Option<SinkRef>, IpcError> {
+    dialog::pick_destination(
+        &NativePicker::new(app),
+        files.inner().clone(),
+        suggested_name.as_deref(),
+    )
+    .await
+}
+
+/// Releases a handle. Idempotent: an unknown or already released id succeeds, so the page can
+/// release without tracking which handles remain.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+pub(crate) fn release_handle(files: tauri::State<'_, Arc<FileTable>>, id: FileId) {
+    files.release(id);
 }
 
 #[cfg(feature = "smoke")]

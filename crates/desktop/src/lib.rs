@@ -4,6 +4,7 @@
 //! scheduled on the background [`worker::Worker`], never on the UI thread.
 
 pub mod error;
+mod files;
 mod ipc;
 pub mod limits;
 #[cfg(feature = "smoke")]
@@ -33,17 +34,29 @@ pub fn run() -> ExitCode {
     };
     let worker = Arc::new(worker);
     let exit_worker = Arc::clone(&worker);
-    let builder = tauri::Builder::default().manage(worker).setup(setup);
+    let builder = tauri::Builder::default()
+        .manage(worker)
+        .manage(Arc::new(files::FileTable::default()))
+        .setup(setup);
     #[cfg(feature = "smoke")]
     let builder = builder.invoke_handler(tauri::generate_handler![
         ipc::app_info,
         ipc::app_limits,
+        ipc::open_image_dialog,
+        ipc::save_image_dialog,
+        ipc::release_handle,
         ipc::echo_binary,
         smoke::smoke_page,
         smoke::smoke_worker_probe,
     ]);
     #[cfg(not(feature = "smoke"))]
-    let builder = builder.invoke_handler(tauri::generate_handler![ipc::app_info, ipc::app_limits]);
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        ipc::app_info,
+        ipc::app_limits,
+        ipc::open_image_dialog,
+        ipc::save_image_dialog,
+        ipc::release_handle,
+    ]);
     let Ok(app) = builder.build(tauri::generate_context!()) else {
         return ExitCode::FAILURE;
     };
@@ -83,14 +96,14 @@ fn setup(app: &mut App) -> Result<(), Box<dyn Error>> {
     } else {
         builder
     };
+    let main_window = builder.build()?;
+    let drop_window = main_window.clone();
+    main_window.on_window_event(move |event| files::dropped::on_window_event(&drop_window, event));
     #[cfg(feature = "smoke")]
     {
-        let main_window = builder.build()?;
         let guard = main_window.clone();
         main_window.on_window_event(move |event| window::enforce_minimum(&guard, event));
     }
-    #[cfg(not(feature = "smoke"))]
-    builder.build()?;
     #[cfg(feature = "smoke")]
     if let Some((options, probes)) = smoke_run {
         smoke::start(app.handle().clone(), options, probes);

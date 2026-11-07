@@ -2,5 +2,11 @@
   "identifier": "main-window",
   "description": "Read-only build identity and engine limits for the main window.",
   "windows": ["main"],
-  "permissions": ["allow-app-info", "allow-app-limits"]
+  "permissions": [
+    "allow-app-info",
+    "allow-app-limits",
+    "allow-open-image-dialog",
+    "allow-save-image-dialog",
+    "allow-release-handle"
+  ]
 }

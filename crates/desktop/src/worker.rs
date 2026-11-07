@@ -387,6 +387,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
     use std::sync::mpsc::{channel, Sender};
+    use std::time::Instant;
 
     const WAIT: Duration = Duration::from_secs(10);
 
@@ -617,11 +618,21 @@ mod tests {
         );
     }
 
+    fn wait_for_shutdown_flag(shared: &Shared) {
+        let deadline = Instant::now() + WAIT;
+        while !lock(shared).shutdown {
+            assert!(Instant::now() < deadline, "the shutdown flag was never set");
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
     #[test]
     fn shutdown_while_busy_cancels_joins_and_delivers_nothing() {
         let worker = Worker::spawn().unwrap();
+        let shared = Arc::clone(&worker.shared);
         let (started_tx, started_rx) = channel();
         let (checkpoint_tx, checkpoint_rx) = channel();
+        let (open_gate, wait_gate) = gate();
         let (tx, rx) = channel();
         let pending_ran = Arc::new(AtomicUsize::new(0));
         worker
@@ -631,6 +642,7 @@ mod tests {
                     loop {
                         if let Err(error) = context.checkpoint() {
                             let _ = checkpoint_tx.send(error);
+                            wait_gate.recv().unwrap();
                             return Err(WorkerError::Stopped);
                         }
                         thread::sleep(Duration::from_millis(1));
@@ -652,22 +664,24 @@ mod tests {
                 |_, _| panic!("pending job must not deliver after shutdown"),
             )
             .unwrap();
-
-        let (done_tx, done_rx) = channel();
-        let joiner = thread::spawn(move || {
-            let outcome = worker.shutdown();
-            let _ = done_tx.send(outcome);
-            worker
-        });
-        let outcome = done_rx.recv_timeout(WAIT).expect("shutdown must not hang");
-        assert_eq!(outcome, ShutdownOutcome::Joined);
-        let worker = joiner.join().unwrap();
-
         assert_eq!(
             checkpoint_rx.recv_timeout(WAIT).unwrap(),
             ContractError::StaleGeneration,
             "submitting the pending job superseded the active one before shutdown"
         );
+
+        let (done_tx, done_rx) = channel();
+        let joiner = thread::spawn(move || {
+            let outcome = worker.shutdown_within(WAIT);
+            let _ = done_tx.send(outcome);
+            worker
+        });
+        wait_for_shutdown_flag(&shared);
+        open_gate.send(()).unwrap();
+        let outcome = done_rx.recv_timeout(WAIT).expect("shutdown must not hang");
+        assert_eq!(outcome, ShutdownOutcome::Joined);
+        let worker = joiner.join().unwrap();
+
         assert!(
             rx.recv_timeout(Duration::from_millis(200)).is_err(),
             "a superseded active job must not deliver"
@@ -705,7 +719,7 @@ mod tests {
             )
             .unwrap();
         started_rx.recv_timeout(WAIT).unwrap();
-        assert_eq!(worker.shutdown(), ShutdownOutcome::Joined);
+        assert_eq!(worker.shutdown_within(WAIT), ShutdownOutcome::Joined);
         assert_eq!(
             checkpoint_rx.recv_timeout(WAIT).unwrap(),
             ContractError::Cancelled

@@ -6,10 +6,19 @@ use std::path::PathBuf;
 
 use tauri_build::{AppManifest, Attributes};
 
-const APP_COMMANDS: &[&str] = &["app_info", "app_limits"];
+const APP_COMMANDS: &[&str] = &[
+    "app_info",
+    "app_limits",
+    "open_image_dialog",
+    "save_image_dialog",
+    "release_handle",
+];
 const SMOKE_COMMANDS: &[&str] = &[
     "app_info",
     "app_limits",
+    "open_image_dialog",
+    "save_image_dialog",
+    "release_handle",
     "echo_binary",
     "smoke_page",
     "smoke_worker_probe",

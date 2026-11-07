@@ -1390,6 +1390,79 @@ Completion checklist:
 - [ ] Off-thread and cancellation behavior passes.
 - [ ] Browser/native parity reviewed.
 
+#### 5.2.1 Add the native file boundary
+
+Objective: give the desktop app safe file access without exposing paths to the page.
+
+Ordered steps:
+
+1. Run open and save dialogs from Rust and hand the page opaque ids only.
+2. Accept drops through typed window events with the browser's one-file rule.
+3. Read through bounded, non-blocking opens and write through an atomic sink.
+
+Acceptance checks: no path reaches the page; reads are bounded and never block on
+special files; a cancelled or failed save leaves no partial file.
+
+Proposed commit title: `feat: add native file boundary`
+
+Completion checklist:
+
+- [x] Path, read and sink contracts tested.
+- [x] Independent trust-boundary review passes.
+- [x] Smoke and capability checks pass.
+
+Validation: 94 desktop tests, formatting, and clippy with warnings denied pass,
+and the macOS arm64 smoke run passed 24/24 checks. The page holds only opaque
+ids for one source and one sink, so a replaced handle fails typed instead of
+leaking; dialogs use rfd from Rust, run one at a time, and grant the page no
+dialog permission. Reads reject non-regular files, open without blocking, and
+stop at the 256 MiB limit even if a file grows. Saves write a 0600 temporary
+file beside the target, keep its permissions, write through symlinks, and
+remove the temporary on failure. Real OS dialogs, drag and drop, Windows and
+Linux were not exercised.
+
+#### 5.2.2 Share the processing session with native
+
+Objective: run the WASM session's job state machine natively from one shared
+implementation.
+
+Ordered steps:
+
+1. Move the transport-neutral session from `crates/wasm` into `crates/adapters`.
+2. Drive it on the desktop worker with bounded progress over binary IPC.
+3. Stream native exports into the atomic sink.
+
+Acceptance checks: WASM behavior and fixtures are unchanged, and native previews
+and exports match the same references.
+
+Proposed commit title: `refactor: share the processing session natively`
+
+Completion checklist:
+
+- [ ] WASM parity unchanged after extraction.
+- [ ] Native preview and export match references.
+- [ ] Off-thread and cancellation behavior passes.
+
+#### 5.2.3 Connect the studio to the native adapter
+
+Objective: let the shared UI import, preview and export through the desktop app.
+
+Ordered steps:
+
+1. Add a native adapter behind the existing adapter contract.
+2. Wire dialogs, drops and saves into the studio's lifecycle.
+3. Compare native and browser metadata, errors, cancellation and reset.
+
+Acceptance checks: the same UI flows work natively with browser parity.
+
+Proposed commit title: `feat: connect native processing and file flows`
+
+Completion checklist:
+
+- [ ] Native adapter tests pass.
+- [ ] Browser/native parity reviewed.
+- [ ] Parent 5.2 checklist reflects verified evidence.
+
 ### 5.3 Add desktop menus, shortcuts, focus, appearance, and DPI
 
 Objective: complete platform-native interaction and accessibility behavior.

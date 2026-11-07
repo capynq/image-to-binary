@@ -159,6 +159,16 @@ mod tests {
     }
 
     #[test]
+    fn encoded_input_limit_matches_the_browser_session() {
+        let session = include_str!("../../wasm/src/session.rs");
+        assert!(
+            session.contains("const MAX_ENCODED_BYTES: u64 = 256 * 1024 * 1024;"),
+            "the browser encoded-input limit changed; update MAX_ENCODED_INPUT_BYTES"
+        );
+        assert_eq!(MAX_ENCODED_INPUT_BYTES, 256 * 1024 * 1024);
+    }
+
+    #[test]
     fn payload_length_is_rejected_before_it_is_copied() {
         assert!(validate_payload_length(64, 64).is_ok());
         let error = validate_payload_length(65, 64).unwrap_err();
