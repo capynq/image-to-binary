@@ -1,0 +1,15 @@
+name	expected	ramp
+ascii_one_char	ok	#
+space	ok	 
+tilde_last_printable	ok	~
+default_ramp	ok	 .:-=+*#%@
+sixty_four_chars	ok	aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+sixty_five_chars	ramp must be at most 64 characters	aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+empty	ramp must contain at least one character	
+tab	ramp must contain only printable ASCII characters	\u0009
+unit_separator	ramp must contain only printable ASCII characters	\u001F
+delete	ramp must contain only printable ASCII characters	\u007F
+nul	ramp must contain only printable ASCII characters	\u0000
+e_acute	ramp must contain only printable ASCII characters	\u00E9
+emoji_surrogate_pair	ramp must contain only printable ASCII characters	\uD83D\uDE00
+sixty_four_with_emoji_last	ramp must contain only printable ASCII characters	aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\uD83D\uDE00

@@ -14,7 +14,7 @@ use image_to_binary_adapters::session::{
     EncodedPlan, PreviewSettings, Stage, DEFAULT_PIXEL_BUDGET,
 };
 use image_to_binary_adapters::{ArtworkPngTask, PngTaskLimits};
-use image_to_binary_core::{ContractError, Dimensions, Generation, Sampling};
+use image_to_binary_core::{ContractError, Dimensions, Generation, Ramp, RenderMode, Sampling};
 use image_to_binary_processing::{
     decode, DecodeError, DecodeLimits, DecodedSource, RenderOptions, RenderedFrame, Renderer,
     SampleGrid, Sampler,
@@ -466,6 +466,126 @@ fn ui_preview(encoded: &[u8]) -> Result<(u32, u32, Vec<u8>), Box<dyn Error>> {
     Ok((width, height, pixels))
 }
 
+/// One render-mode reference: a deterministic source and the settings the browser and desktop
+/// send for that mode. Sampling is `average` for every non-binary mode, as the shells force it.
+struct ModeCase {
+    name: &'static str,
+    mode: RenderMode,
+    sampling: Sampling,
+    ramp: Option<&'static str>,
+}
+
+const MODE_WIDTH: u32 = 64;
+const MODE_HEIGHT: u32 = 40;
+const MODE_CELL: u8 = 6;
+const MODE_FONT: u8 = 10;
+const MODE_THRESHOLD: u8 = 128;
+const CUSTOM_RAMP: &str = " .oO@";
+
+fn mode_cases() -> Result<[ModeCase; 4], Box<dyn Error>> {
+    Ok([
+        ModeCase {
+            name: "binary_classic",
+            mode: RenderMode::Binary,
+            sampling: Sampling::Classic,
+            ramp: None,
+        },
+        ModeCase {
+            name: "ascii_default",
+            mode: RenderMode::Ascii(Ramp::DEFAULT_ASCII),
+            sampling: Sampling::Average,
+            ramp: None,
+        },
+        ModeCase {
+            name: "ascii_custom",
+            mode: RenderMode::Ascii(Ramp::new(CUSTOM_RAMP)?),
+            sampling: Sampling::Average,
+            ramp: Some(CUSTOM_RAMP),
+        },
+        ModeCase {
+            name: "block",
+            mode: RenderMode::Block,
+            sampling: Sampling::Average,
+            ramp: None,
+        },
+    ])
+}
+
+/// Renders one mode through the processing renderer and the native PNG task directly, without
+/// the shared session, so the browser and desktop output is compared with independent bytes.
+fn mode_entry(case: &ModeCase) -> Result<(String, RenderedFrame), Box<dyn Error>> {
+    let pixels = rgba(MODE_WIDTH, MODE_HEIGHT);
+    let source = base64(&pixels);
+    let dimensions = Dimensions::new(MODE_WIDTH, MODE_HEIGHT)?;
+    let decoded = DecodedSource::from_rgba(dimensions, pixels, DecodeLimits::default())?;
+    let mut sampler = Sampler::new(Arc::new(decoded));
+    let mut renderer = Renderer::new()?;
+    let grid = match case.sampling {
+        Sampling::Classic => sampler.sample(MODE_CELL, Sampling::Classic)?,
+        Sampling::Average => {
+            let geometry = renderer.aspect_geometry(MODE_CELL, MODE_FONT)?;
+            sampler.sample_average_rect(MODE_CELL, u32::from(geometry.source_cell_height))?
+        }
+    };
+    let options = RenderOptions {
+        cell_size: MODE_CELL,
+        font_size: MODE_FONT,
+        threshold: MODE_THRESHOLD,
+        sampling: case.sampling,
+        mode: case.mode,
+        ..RenderOptions::default()
+    };
+    let preview = renderer.render_preview(&grid, options)?;
+    let png = native_export(&grid, options)?;
+    let sampling = match case.sampling {
+        Sampling::Classic => "classic",
+        Sampling::Average => "average",
+    };
+    let (mode, ramp) = match case.mode {
+        RenderMode::Binary => ("binary", "null".to_owned()),
+        RenderMode::Ascii(_) => (
+            "ascii",
+            format!("\"{}\"", case.ramp.unwrap_or(Ramp::DEFAULT_ASCII.as_str())),
+        ),
+        RenderMode::Block => ("block", "null".to_owned()),
+    };
+    let entry = format!(
+        r#"{{"name":"{}","mode":"{mode}","ramp":{ramp},"width":{MODE_WIDTH},"height":{MODE_HEIGHT},"cellSize":{MODE_CELL},"fontSize":{MODE_FONT},"threshold":{MODE_THRESHOLD},"sampling":"{sampling}","source":"{source}","previewWidth":{},"previewHeight":{},"preview":"{}","export":"{}"}}"#,
+        case.name,
+        preview.width(),
+        preview.height(),
+        base64(preview.pixels()),
+        base64(&png)
+    );
+    Ok((entry, preview))
+}
+
+/// Appends the per-mode references after `rejected`. Each mode must differ from every other,
+/// otherwise the mode is not exercised.
+fn mode_entries() -> Result<String, Box<dyn Error>> {
+    let cases = mode_cases()?;
+    let mut entries = Vec::new();
+    let mut previews: Vec<RenderedFrame> = Vec::new();
+    for case in &cases {
+        let (entry, preview) = mode_entry(case)?;
+        entries.push(entry);
+        previews.push(preview);
+    }
+    for (index, preview) in previews.iter().enumerate() {
+        if previews[..index]
+            .iter()
+            .any(|earlier| earlier.pixels() == preview.pixels())
+        {
+            return Err(format!(
+                "{}: mode output must differ from earlier modes",
+                cases[index].name
+            )
+            .into());
+        }
+    }
+    Ok(entries.join(","))
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let arguments: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
     let path = arguments
@@ -544,6 +664,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             base64(&rejected.bytes)
         )?;
     }
+    json.push_str("],\"modes\":[");
+    json.push_str(&mode_entries()?);
     json.push_str("]}");
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;

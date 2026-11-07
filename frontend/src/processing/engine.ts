@@ -1,4 +1,4 @@
-import type { PreviewSampling } from './protocol'
+import type { PreviewSampling, RenderModeName } from './protocol'
 
 export type EngineStage = number
 
@@ -28,6 +28,8 @@ export interface EngineSession {
     fontSize: number,
     threshold: number,
     sampling: PreviewSampling,
+    mode: RenderModeName,
+    ramp: string,
   ): EngineStage
   /** Starts the bounded original-image preview job; shares advance, cancel and finish. */
   startOriginalPreview(generation: number): EngineStage
@@ -38,6 +40,8 @@ export interface EngineSession {
     fontSize: number,
     threshold: number,
     sampling: PreviewSampling,
+    mode: RenderModeName,
+    ramp: string,
   ): EngineStage
   advance(generation: number, pixelBudget: number): EngineStage
   /** Returns encoded chunks completed since the last drain; each array is JS-owned. */

@@ -286,6 +286,7 @@ fn failed_starts_keep_the_current_job_and_the_proposed_generation() {
         font_size: 10,
         threshold: 128,
         sampling: Sampling::Classic,
+        mode: image_to_binary_core::RenderMode::Binary,
     };
     let failed = session
         .live_mut()
@@ -429,6 +430,7 @@ fn invalid_starts_keep_an_accepted_original_job() {
         font_size: 10,
         threshold: 128,
         sampling: Sampling::Classic,
+        mode: image_to_binary_core::RenderMode::Binary,
     };
     let failed = session
         .live_mut()

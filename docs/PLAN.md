@@ -1574,9 +1574,9 @@ Proposed commit title: `feat: add ASCII and block render modes`
 
 Completion checklist:
 
-- [ ] Mode fixtures pass.
-- [ ] Ramp bounds and printable validation pass.
-- [ ] Classic parity remains green.
+- [x] Mode fixtures pass.
+- [x] Ramp bounds and printable validation pass.
+- [x] Classic parity remains green.
 
 Parent 6.1 keeps the scope and checklist above and stays incomplete until
 6.1.1 and 6.1.2 are both committed. The split adds no scope.
@@ -1637,9 +1637,27 @@ Proposed commit title: `feat: expose render modes in the studio`
 
 Completion checklist:
 
-- [ ] WASM and worker mode parity pass.
-- [ ] Mode and ramp controls pass keyboard and error review.
-- [ ] Real-browser mode parity passes.
+- [x] WASM and worker mode parity pass.
+- [x] Mode and ramp controls pass keyboard and error review.
+- [x] Real-browser mode parity passes.
+
+Validation: mode and ramp travel through the shared session arguments, the WASM
+binding, the worker protocol, both adapters and desktop IPC, and a supplied ramp
+is validated by one rule in every mode. A shared table of 14 ramp cases is read
+by both the Rust and the frontend tests, and the frontend's limits and messages
+are pinned to the Rust constants. Classic stays the default, and callers that
+send no mode get unchanged output. For classic, the default ASCII ramp, a
+custom ramp and block, the WASM session and Chromium produce previews and PNG
+exports byte-identical to the references rendered directly by the processing
+renderer and the native PNG task (exports of 4,270, 5,098, 5,282 and 8,029
+bytes), and the real desktop app passes 45 smoke checks, including an ASCII
+preview and export equal to the reference. The mode choice is a native radio
+group with its own description per option, the ramp field reports a readable
+error politely, and while a draft is invalid Render, Export and the Artwork tab
+are blocked without losing the accepted source. Root (270), WASM (85), desktop
+(124 per build) and frontend (441) tests pass, and mutations of the binding,
+the IPC ramp, UI validation, the 64-character cap and the shared messages are
+caught. A screen reader, Firefox and WebKit were not used.
 
 ### 6.2 Add tone/color controls, invalidation, and bounds
 

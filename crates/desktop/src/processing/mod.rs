@@ -17,6 +17,7 @@ mod jobs;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use image_to_binary_adapters::session::args;
+use image_to_binary_adapters::session::args::TextArg;
 use image_to_binary_adapters::session::{PreviewSettings, Session};
 use image_to_binary_core::Generation;
 use serde::Deserialize;
@@ -69,8 +70,20 @@ pub(crate) fn settings_argument(value: Option<&Value>) -> Result<PreviewSettings
         js_number(field("fontSize")),
         js_number(field("threshold")),
         sampling,
+        text_argument(field("mode")),
+        text_argument(field("ramp")),
     )
     .map_err(IpcError::from)
+}
+
+/// Maps a raw optional text field onto the shared contract: a missing or `null` value is absent,
+/// a string is text, and any other JSON type is not text.
+fn text_argument(value: Option<&Value>) -> TextArg<'_> {
+    match value {
+        None | Some(Value::Null) => TextArg::Absent,
+        Some(Value::String(text)) => TextArg::Text(text),
+        Some(_) => TextArg::NotText,
+    }
 }
 
 /// Accepts a worker result only while its token is still the newest launch.
@@ -462,6 +475,8 @@ mod tests {
                 value["fontSize"].as_f64().unwrap_or(f64::NAN),
                 value["threshold"].as_f64().unwrap_or(f64::NAN),
                 value["sampling"].as_str(),
+                text_argument(value.get("mode")),
+                text_argument(value.get("ramp")),
             )
             .unwrap_err();
             assert_eq!(
@@ -472,6 +487,50 @@ mod tests {
         assert_eq!(
             settings_argument(None).unwrap_err().message(),
             "sampling must be a string"
+        );
+    }
+
+    #[test]
+    fn mode_and_ramp_reach_the_shared_contract_over_ipc() {
+        let mut value = settings_json(json!(5), json!(10), json!(128), json!("average"));
+        value["mode"] = json!("ascii");
+        value["ramp"] = json!(" .#@");
+        let settings = settings_argument(Some(&value)).unwrap();
+        assert_eq!(
+            settings,
+            PreviewSettings::new(5, 10, 128, image_to_binary_core::Sampling::Average)
+                .unwrap()
+                .with_mode(image_to_binary_core::RenderMode::Ascii(
+                    image_to_binary_core::Ramp::new(" .#@").unwrap()
+                ))
+                .unwrap()
+        );
+        value["ramp"] = json!("");
+        assert_eq!(
+            settings_argument(Some(&value)).unwrap_err().message(),
+            "ramp must contain at least one character"
+        );
+        value["ramp"] = json!(7);
+        assert_eq!(
+            settings_argument(Some(&value)).unwrap_err().message(),
+            "ramp must be a string"
+        );
+        value["ramp"] = Value::Null;
+        value["mode"] = json!("block");
+        assert_eq!(
+            settings_argument(Some(&value)).unwrap().mode(),
+            image_to_binary_core::RenderMode::Block
+        );
+        value["mode"] = json!("binary");
+        value["sampling"] = json!("classic");
+        assert_eq!(
+            settings_argument(Some(&value)).unwrap().mode(),
+            image_to_binary_core::RenderMode::Binary
+        );
+        value["mode"] = json!("block");
+        assert_eq!(
+            settings_argument(Some(&value)).unwrap_err().message(),
+            "ascii and block modes require average sampling"
         );
     }
 

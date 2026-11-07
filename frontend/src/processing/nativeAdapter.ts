@@ -3,6 +3,7 @@ import { defaultUrlApi, isDemoFixture } from './demoAdapter'
 import type { NativeBridge, NativeChannel } from './nativeBridge'
 import { isCount, malformedReply, nativeError } from './nativeErrors'
 import { parsePreviewFrame } from './nativeFrame'
+import { samplingForMode } from './protocol'
 import { renderPreviewPng } from './previewRenderer'
 import type { PreviewRenderer } from './previewRenderer'
 import type {
@@ -374,7 +375,9 @@ function wireSettings(settings: StudioSettings) {
     cellSize: settings.cellSize,
     fontSize: settings.fontSize,
     threshold: settings.threshold,
-    sampling: 'classic',
+    sampling: samplingForMode(settings.mode),
+    mode: settings.mode,
+    ramp: settings.ramp,
   }
 }
 

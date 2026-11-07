@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { MAX_ENCODED_BYTES, eventData } from './protocol'
+import { DEFAULT_RAMP, MAX_ENCODED_BYTES, eventData } from './protocol'
 import type { TaskYielder } from './taskYield'
 import { FakeEngine, portEndpoint, until } from './testKit'
 import { createWorkerHost } from './workerHost'
@@ -56,7 +56,14 @@ function sendPreview(raw: RawHost, requestId: number, sourceId: number): void {
     requestId,
     operationId: requestId,
     sourceId,
-    parameters: { cellSize: 12, fontSize: 16, threshold: 128, sampling: 'classic' },
+    parameters: {
+      cellSize: 12,
+      fontSize: 16,
+      threshold: 128,
+      sampling: 'classic',
+      mode: 'binary',
+      ramp: DEFAULT_RAMP,
+    },
   })
 }
 
@@ -330,6 +337,56 @@ describe('worker host encoded import', () => {
     await roundTrip(raw, () => sendOriginal(raw, 1, 1))
     expect(raw.replies[1]).toMatchObject({ type: 'fatal' })
     expect(engine.log).toEqual([])
+  })
+})
+
+describe('worker host render modes', () => {
+  it('passes the mode and ramp to the engine for previews and exports', async () => {
+    const engine = new FakeEngine()
+    const raw = openHost(engine)
+    await roundTrip(raw, () => sendImport(raw, 1))
+    const parameters = {
+      cellSize: 12,
+      fontSize: 16,
+      threshold: 128,
+      sampling: 'average',
+      mode: 'ascii',
+      ramp: ' .#@',
+    }
+    await roundTrip(raw, () =>
+      raw.send({ type: 'preview', requestId: 2, operationId: 2, sourceId: 1, parameters }),
+    )
+    await roundTrip(raw, () =>
+      raw.send({
+        type: 'export',
+        requestId: 3,
+        operationId: 3,
+        sourceId: 1,
+        parameters: { ...parameters, mode: 'block', ramp: DEFAULT_RAMP },
+      }),
+    )
+    expect(engine.starts).toEqual([
+      {
+        kind: 'preview',
+        generation: 2,
+        cellSize: 12,
+        fontSize: 16,
+        threshold: 128,
+        sampling: 'average',
+        mode: 'ascii',
+        ramp: ' .#@',
+      },
+      {
+        kind: 'export',
+        generation: 3,
+        cellSize: 12,
+        fontSize: 16,
+        threshold: 128,
+        sampling: 'average',
+        mode: 'block',
+        ramp: DEFAULT_RAMP,
+      },
+    ])
   })
 })
 

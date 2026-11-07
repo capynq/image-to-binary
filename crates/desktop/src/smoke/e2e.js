@@ -31,11 +31,11 @@
   const status = () => document.querySelector('.export-section .export-status')?.textContent ?? ''
   const metadata = () => document.querySelector('.metadata-list')?.textContent ?? ''
   const alerts = () => document.querySelectorAll('[role="alert"]').length
-  const setRange = (id, value) => {
-    const element = document.getElementById(id)
+  const setValue = (element, value) => {
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(element, String(value))
     element.dispatchEvent(new Event('input', { bubbles: true }))
   }
+  const setRange = (id, value) => setValue(document.getElementById(id), value)
   const previewImage = () => {
     const image = document.querySelector('img.fixture-preview[alt="Binary artwork preview"]')
     return image !== null && image.complete && image.naturalWidth > 0 ? image : null
@@ -148,6 +148,30 @@
     enabledButton('Cancel export').click()
     await waitFor(() => status() === 'PNG export cancelled.', 'export cancellation', 60000)
     out.cancel = { status: status(), alerts: alerts() }
+
+    await openNative(cfg.modeFixture)
+    await waitFor(() => metadata().includes('mode64x40.png'), 'mode PNG import')
+    setRange('cell-size', 6)
+    setRange('font-size', 10)
+    await waitFor(
+      () => document.querySelector('label[for="font-size"] output')?.textContent === '10px',
+      'mode font setting',
+    )
+    document.querySelector('input[type="radio"][value="ascii"]').click()
+    const rampField = await waitFor(() => document.querySelector('input[name="ramp"]'), 'ASCII ramp field')
+    setValue(rampField, cfg.modeRamp)
+    await clickEnabled('Render artwork')
+    const asciiPreview = await waitFor(previewImage, 'ASCII artwork preview')
+    out.mode = {
+      ramp: document.querySelector('input[name="ramp"]').value,
+      preview: pixelsOf(asciiPreview),
+    }
+    await invoke('smoke_queue_save', { path: `${cfg.outDir}/mode-ascii.png` })
+    await clickEnabled(['Export PNG', 'Export again'])
+    await waitFor(() => status().startsWith('Saved '), 'ASCII export to the chosen file')
+    out.mode.exportStatus = status()
+    document.querySelector('input[type="radio"][value="binary"]').click()
+    await waitFor(() => document.querySelector('input[name="ramp"]') === null, 'classic mode restored')
 
     headerButton('Reset').click()
     await waitFor(() => document.querySelector('.metadata-list') === null, 'reset')

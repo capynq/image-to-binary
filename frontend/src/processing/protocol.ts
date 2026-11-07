@@ -11,14 +11,51 @@ export const MAX_RETAINED_SOURCES = 2
 export const MAX_SOURCE_NAME_LENGTH = 256
 export const MAX_PREVIEW_DIMENSION = 1600
 export const MAX_ENCODED_BYTES = 256 * 1024 * 1024
+/** Matches `MAX_RAMP_LENGTH` in `image_to_binary_core`; a contract test pins the value. */
+export const MAX_RAMP_LENGTH = 64
+/** Matches the default ASCII ramp of the shared argument contract, least ink first. */
+export const DEFAULT_RAMP = ' .:-=+*#%@'
 
 export type PreviewSampling = 'classic' | 'average'
+
+/** `binary` is the classic compatibility mode; `ascii` and `block` need average sampling. */
+export type RenderModeName = 'binary' | 'ascii' | 'block'
+
+export const RENDER_MODE_NAMES: readonly RenderModeName[] = ['binary', 'ascii', 'block']
+
+export function isRenderModeName(value: unknown): value is RenderModeName {
+  return RENDER_MODE_NAMES.some((name) => name === value)
+}
+
+/** The sampling a mode is rendered with: classic for binary, average for ascii and block. */
+export function samplingForMode(mode: RenderModeName): PreviewSampling {
+  return mode === 'binary' ? 'classic' : 'average'
+}
+
+/** Messages match the shared argument contract, so the page and the native shell read the same. */
+export const RAMP_EMPTY_MESSAGE = 'ramp must contain at least one character'
+export const RAMP_NOT_PRINTABLE_MESSAGE = 'ramp must contain only printable ASCII characters'
+export const RAMP_TOO_LONG_MESSAGE = `ramp must be at most ${MAX_RAMP_LENGTH} characters`
+
+/** Returns the readable reason a ramp is rejected, or `null` when it is a valid ramp. */
+export function validateRamp(text: string): string | null {
+  if (text.length === 0) return RAMP_EMPTY_MESSAGE
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.charCodeAt(index)
+    if (code < 0x20 || code > 0x7e) return RAMP_NOT_PRINTABLE_MESSAGE
+  }
+  if (text.length > MAX_RAMP_LENGTH) return RAMP_TOO_LONG_MESSAGE
+  return null
+}
 
 export interface PreviewParameters {
   readonly cellSize: number
   readonly fontSize: number
   readonly threshold: number
   readonly sampling: PreviewSampling
+  readonly mode: RenderModeName
+  /** Printable ASCII ramp; read only when `mode` is `ascii`. */
+  readonly ramp: string
 }
 
 export interface RequestIdentity {
@@ -285,7 +322,9 @@ function isPreviewParameters(value: unknown): value is PreviewParameters {
     isCount(value.cellSize) &&
     isCount(value.fontSize) &&
     isCount(value.threshold) &&
-    (value.sampling === 'classic' || value.sampling === 'average')
+    (value.sampling === 'classic' || value.sampling === 'average') &&
+    isRenderModeName(value.mode) &&
+    typeof value.ramp === 'string'
   )
 }
 

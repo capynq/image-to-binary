@@ -127,6 +127,7 @@ impl Live {
             font_size: settings.font_size,
             threshold: settings.threshold,
             sampling: settings.sampling,
+            mode: settings.mode,
             ..RenderOptions::default()
         };
         let plan = self.sampler.prepare(

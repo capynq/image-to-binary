@@ -3,6 +3,7 @@ import { createDemoProcessingAdapter } from '../processing/demoAdapter'
 import { until } from '../processing/testKit'
 import type { PreviewKind, ProcessingAdapter } from '../processing/types'
 import { createStudioController } from './controller'
+import { DEFAULT_RAMP } from '../processing/protocol'
 
 function gateway(): { readonly promise: Promise<void>; release(): void } {
   let release: () => void = () => undefined
@@ -113,8 +114,20 @@ describe('controller paired previews', () => {
     await controller.loadDemo()
     await controller.preview('original')
     await controller.preview()
-    controller.updateSettings({ cellSize: 14, fontSize: 16, threshold: 128 })
-    controller.updateSettings({ cellSize: 15, fontSize: 16, threshold: 128 })
+    controller.updateSettings({
+      cellSize: 14,
+      fontSize: 16,
+      threshold: 128,
+      mode: 'binary' as const,
+      ramp: DEFAULT_RAMP,
+    })
+    controller.updateSettings({
+      cellSize: 15,
+      fontSize: 16,
+      threshold: 128,
+      mode: 'binary' as const,
+      ramp: DEFAULT_RAMP,
+    })
     expect(h.revoked).toEqual(['blob:artwork-2'])
     expect(controller.getSnapshot().preview).toBeNull()
     expect(controller.getSnapshot().original?.url).toBe('blob:original-1')

@@ -5,6 +5,7 @@ import { createDemoProcessingAdapter, UnsupportedPreviewKindError } from './demo
 import type { JobContext, PreviewKind, ProcessingAdapter } from './types'
 import type { PreviewParameters } from './protocol'
 import { DEFAULT_SETTINGS } from './types'
+import type { StudioSettings } from './types'
 import type {
   EncodedImportSource,
   ExportCompletion,
@@ -15,6 +16,7 @@ import type {
   RgbaImportSource,
   SourceHandle,
 } from './workerClient'
+import { DEFAULT_RAMP } from './protocol'
 
 const context = (operationId: number): JobContext => ({ operationId, generation: operationId })
 
@@ -27,6 +29,8 @@ class FakeClient implements ProcessingClient {
   cancelled: number[] = []
   previews = 0
   originals = 0
+  readonly previewParameters: unknown[] = []
+  readonly exportParameters: unknown[] = []
 
   private handleFor(name: string, width: number, height: number): SourceHandle {
     let released = false
@@ -59,11 +63,12 @@ class FakeClient implements ProcessingClient {
 
   exportPng<T extends Releasable>(
     _source: SourceHandle,
-    _parameters: PreviewParameters,
+    parameters: PreviewParameters,
     _operationId: number,
     _sink: ExportSink,
     _finalize: (completion: ExportCompletion) => T,
   ): Promise<T> {
+    this.exportParameters.push(parameters)
     return Promise.reject(new Error('export is not faked in this suite'))
   }
 
@@ -82,11 +87,12 @@ class FakeClient implements ProcessingClient {
 
   preview<T extends Releasable>(
     _source: SourceHandle,
-    _parameters: unknown,
+    parameters: unknown,
     _operationId: number,
     finalize: (pixels: PreviewPixels) => Promise<T>,
   ): Promise<T> {
     this.previews += 1
+    this.previewParameters.push(parameters)
     return finalize({ width: 2, height: 1, pixels: new ArrayBuffer(8) })
   }
 
@@ -245,13 +251,77 @@ describe('browser processing adapter', () => {
     expect(client.handleDisposals).toBe(1)
   })
 
+  it('forwards the render mode, ramp and the mode-forced sampling to the client', async () => {
+    const { adapter, clients } = harness()
+    const session = adapter.createSession()
+    const { source } = await adapter.import(session, { kind: 'demo' }, context(1))
+    const binary = await adapter.preview(session, source, DEFAULT_SETTINGS, context(2))
+    binary.dispose()
+    const ascii: StudioSettings = { ...DEFAULT_SETTINGS, mode: 'ascii', ramp: ' .#@' }
+    const artwork = await adapter.preview(session, source, ascii, context(3))
+    artwork.dispose()
+    const block: StudioSettings = { ...DEFAULT_SETTINGS, mode: 'block' }
+    const blockArtwork = await adapter.preview(session, source, block, context(4))
+    blockArtwork.dispose()
+    expect(clients[0]?.previewParameters).toEqual([
+      {
+        cellSize: 12,
+        fontSize: 16,
+        threshold: 128,
+        sampling: 'classic',
+        mode: 'binary',
+        ramp: DEFAULT_RAMP,
+      },
+      {
+        cellSize: 12,
+        fontSize: 16,
+        threshold: 128,
+        sampling: 'average',
+        mode: 'ascii',
+        ramp: ' .#@',
+      },
+      {
+        cellSize: 12,
+        fontSize: 16,
+        threshold: 128,
+        sampling: 'average',
+        mode: 'block',
+        ramp: DEFAULT_RAMP,
+      },
+    ])
+  })
+
+  it('refuses an invalid ramp before any client call, keeping the source usable', async () => {
+    const { adapter, clients } = harness()
+    const session = adapter.createSession()
+    const { source } = await adapter.import(session, { kind: 'demo' }, context(1))
+    const bad: StudioSettings = { ...DEFAULT_SETTINGS, mode: 'ascii', ramp: '' }
+    await expect(adapter.preview(session, source, bad, context(2))).rejects.toThrow(
+      'ramp must contain at least one character',
+    )
+    await expect(adapter.export(session, source, 'png', bad, context(3))).rejects.toThrow(
+      'ramp must contain at least one character',
+    )
+    expect(clients[0]?.previews).toBe(0)
+    expect(clients[0]?.exportParameters).toEqual([])
+    const ok = await adapter.preview(session, source, DEFAULT_SETTINGS, context(4))
+    ok.dispose()
+    expect(clients[0]?.previews).toBe(1)
+  })
+
   it('dispatches original previews for file and demo sources without artwork settings', async () => {
     const { adapter, clients, urls } = harness()
     const session = adapter.createSession()
     const demo = await adapter.import(session, { kind: 'demo' }, context(1))
     const { file } = fileProbe('photo.png', [1, 2, 3])
     const imported = await adapter.import(session, file, context(2))
-    const invalid = { cellSize: 1, fontSize: 1, threshold: 999 }
+    const invalid = {
+      cellSize: 1,
+      fontSize: 1,
+      threshold: 999,
+      mode: 'binary' as const,
+      ramp: DEFAULT_RAMP,
+    }
     for (const [index, source] of [demo.source, imported.source].entries()) {
       const artifact = await adapter.preview(
         session,

@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import {
+  DEFAULT_RAMP,
   MAX_ENCODED_BYTES,
+  MAX_RAMP_LENGTH,
+  RAMP_EMPTY_MESSAGE,
+  RAMP_NOT_PRINTABLE_MESSAGE,
+  RAMP_TOO_LONG_MESSAGE,
+  samplingForMode,
+  validateRamp,
   isWorkerReply,
   isWorkerRequest,
   validateEncodedImport,
@@ -8,7 +15,14 @@ import {
   validateRgbaImage,
 } from './protocol'
 
-const parameters = { cellSize: 12, fontSize: 16, threshold: 128, sampling: 'classic' }
+const parameters = {
+  cellSize: 12,
+  fontSize: 16,
+  threshold: 128,
+  sampling: 'classic',
+  mode: 'binary',
+  ramp: DEFAULT_RAMP,
+} as const
 
 describe('protocol guards', () => {
   it('accepts well-formed requests', () => {
@@ -212,5 +226,40 @@ describe('encoded import and original preview protocol', () => {
     expect(
       isWorkerReply({ ...reply, width: 1601, height: 1, pixels: new ArrayBuffer(1601 * 4) }),
     ).toBe(false)
+  })
+})
+
+describe('render mode and ramp contract', () => {
+  it('keeps the classic binary default and forces average sampling for ascii and block', () => {
+    expect(samplingForMode('binary')).toBe('classic')
+    expect(samplingForMode('ascii')).toBe('average')
+    expect(samplingForMode('block')).toBe('average')
+  })
+
+  it('accepts printable ASCII ramps from one to sixty-four characters', () => {
+    expect(validateRamp(DEFAULT_RAMP)).toBeNull()
+    expect(validateRamp('#')).toBeNull()
+    expect(validateRamp(' ')).toBeNull()
+    expect(validateRamp('!'.repeat(1).concat('~'.repeat(MAX_RAMP_LENGTH - 1)))).toBeNull()
+  })
+
+  it('names the failure for empty, non-printable, non-ASCII and oversized ramps', () => {
+    expect(validateRamp('')).toBe(RAMP_EMPTY_MESSAGE)
+    expect(validateRamp('\t')).toBe(RAMP_NOT_PRINTABLE_MESSAGE)
+    expect(validateRamp('\u007f')).toBe(RAMP_NOT_PRINTABLE_MESSAGE)
+    expect(validateRamp('caf\u00e9')).toBe(RAMP_NOT_PRINTABLE_MESSAGE)
+    expect(validateRamp('\u{1f600}')).toBe(RAMP_NOT_PRINTABLE_MESSAGE)
+    expect(validateRamp('a'.repeat(MAX_RAMP_LENGTH + 1))).toBe(RAMP_TOO_LONG_MESSAGE)
+    expect(RAMP_TOO_LONG_MESSAGE).toBe('ramp must be at most 64 characters')
+  })
+
+  it('rejects worker requests whose mode or ramp has the wrong type or name', () => {
+    const base = { type: 'preview', requestId: 1, operationId: 1, sourceId: 1 }
+    const valid = { ...parameters, sampling: 'average', mode: 'ascii', ramp: ' .#' }
+    expect(isWorkerRequest({ ...base, parameters: valid })).toBe(true)
+    expect(isWorkerRequest({ ...base, parameters: { ...valid, mode: 'dots' } })).toBe(false)
+    expect(isWorkerRequest({ ...base, parameters: { ...valid, mode: undefined } })).toBe(false)
+    expect(isWorkerRequest({ ...base, parameters: { ...valid, ramp: 7 } })).toBe(false)
+    expect(isWorkerRequest({ ...base, parameters: { ...valid, ramp: undefined } })).toBe(false)
   })
 })

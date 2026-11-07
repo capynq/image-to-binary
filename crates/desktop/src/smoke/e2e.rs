@@ -27,6 +27,15 @@ const RAF_GAP_LIMIT_MS: u64 = 250;
 /// Artwork preview size of the 23x17 fixture at cell 12: floor(width / cell) * cell per axis.
 /// `png23x17.ui-preview.rgba` comes from `reference_fixtures` and matches the Chromium studio.
 const PREVIEW_SIZE: (u64, u64) = (12, 12);
+/// Artwork preview size of the 64x40 mode fixture at cell 6 with average sampling, from
+/// `reference_fixtures`' `modes` entry `ascii_custom`.
+const MODE_PREVIEW_SIZE: (u64, u64) = (66, 52);
+/// Custom ramp typed into the studio for the ASCII phase; the reference export uses the same ramp.
+const MODE_RAMP: &str = " .oO@";
+/// RGBA8 bytes of the mode preview: 66 × 52 × 4.
+const MODE_PREVIEW_BYTES: usize = 66 * 52 * 4;
+/// Byte length of the ASCII PNG export reference from the `ascii_custom` entry.
+const MODE_EXPORT_BYTES: usize = 5_282;
 const REJECTED_DROP_MESSAGE: &str =
     "Choose one image at a time. 2 files were selected, so nothing was changed.";
 
@@ -37,6 +46,9 @@ struct Assets {
     ui_preview: PathBuf,
     large: PathBuf,
     large_export: PathBuf,
+    mode: PathBuf,
+    mode_preview: PathBuf,
+    mode_export: PathBuf,
 }
 
 impl Assets {
@@ -47,13 +59,36 @@ impl Assets {
             ui_preview: dir.join("png23x17.ui-preview.rgba"),
             large: dir.join("large1200.png"),
             large_export: dir.join("large1200.export.png"),
+            mode: dir.join("mode64x40.png"),
+            mode_preview: dir.join("mode64x40.ascii-custom.preview.rgba"),
+            mode_export: dir.join("mode64x40.ascii-custom.export.png"),
         };
+        let empty: Vec<String> = [
+            &assets.png,
+            &assets.png_export,
+            &assets.ui_preview,
+            &assets.large,
+            &assets.large_export,
+            &assets.mode,
+            &assets.mode_preview,
+            &assets.mode_export,
+        ]
+        .into_iter()
+        .filter(|path| !fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.len() > 0))
+        .map(|path| path.display().to_string())
+        .collect();
+        if !empty.is_empty() {
+            return Err(format!("missing or empty: {}", empty.join(", ")));
+        }
         let missing: Vec<String> = [
             &assets.png,
             &assets.png_export,
             &assets.ui_preview,
             &assets.large,
             &assets.large_export,
+            &assets.mode,
+            &assets.mode_preview,
+            &assets.mode_export,
         ]
         .into_iter()
         .filter(|path| !path.is_file())
@@ -114,6 +149,8 @@ fn main_phase(
         "mode": "main",
         "pngFixture": assets.png,
         "largeFixture": assets.large,
+        "modeFixture": assets.mode,
+        "modeRamp": MODE_RAMP,
         "outDir": scratch,
     });
     let main = match eval_and_wait(window, reports, &config, PAGE_TIMEOUT) {
@@ -172,6 +209,8 @@ fn check_main(recorder: &mut Recorder, main: &Value, assets: &Assets, scratch: &
             read(&assets.png_export).len()
         ),
     );
+
+    check_mode(recorder, main, assets, scratch);
 
     let demo_metadata = text(&main["demo"], "metadata");
     let demo_preview = &main["demo"]["preview"];
@@ -232,6 +271,46 @@ fn check_main(recorder: &mut Recorder, main: &Value, assets: &Assets, scratch: &
     check_cancel_and_outputs(recorder, main, scratch);
 }
 
+/// The ASCII phase drives the mode and the custom ramp through the studio; its preview and PNG
+/// must equal the independently rendered `ascii_custom` reference.
+fn check_mode(recorder: &mut Recorder, main: &Value, assets: &Assets, scratch: &Path) {
+    let mode = &main["mode"];
+    let preview = &mode["preview"];
+    let expected_preview = read(&assets.mode_preview);
+    let preview_size = (number(&preview["width"]), number(&preview["height"]));
+    let preview_pixels = bytes_of(&preview["rgba"]);
+    recorder.check(
+        "e2e_mode_ramp_is_applied_in_the_studio",
+        text(mode, "ramp") == MODE_RAMP,
+        format!("ramp field {:?}", text(mode, "ramp")),
+    );
+    recorder.check(
+        "e2e_ascii_preview_matches_native_reference",
+        preview_size == MODE_PREVIEW_SIZE
+            && preview_pixels.len() == MODE_PREVIEW_BYTES
+            && expected_preview.len() == MODE_PREVIEW_BYTES
+            && preview_pixels == expected_preview,
+        format!(
+            "size {preview_size:?}, {} bytes compared with {} reference bytes",
+            preview_pixels.len(),
+            expected_preview.len()
+        ),
+    );
+    let status = text(mode, "exportStatus");
+    let exported = read(&scratch.join("mode-ascii.png"));
+    recorder.check(
+        "e2e_ascii_export_matches_native_reference",
+        status.starts_with("Saved mode-ascii.png")
+            && exported.len() == MODE_EXPORT_BYTES
+            && exported == read(&assets.mode_export),
+        format!(
+            "status {status:?}; {} bytes against {} reference bytes",
+            exported.len(),
+            read(&assets.mode_export).len()
+        ),
+    );
+}
+
 fn check_cancel_and_outputs(recorder: &mut Recorder, main: &Value, scratch: &Path) {
     let cancel_status = text(&main["cancel"], "status");
     recorder.check(
@@ -271,7 +350,7 @@ fn check_cancel_and_outputs(recorder: &mut Recorder, main: &Value, scratch: &Pat
                 .collect()
         })
         .unwrap_or_default();
-    let expected: BTreeSet<String> = ["png.png", "large.png"]
+    let expected: BTreeSet<String> = ["png.png", "large.png", "mode-ascii.png"]
         .into_iter()
         .map(str::to_owned)
         .collect();

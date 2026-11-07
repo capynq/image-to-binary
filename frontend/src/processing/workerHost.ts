@@ -215,8 +215,16 @@ export function createWorkerHost(
       assertRunning(job)
       let stage: number
       if (request.type === 'preview') {
-        const { cellSize, fontSize, threshold, sampling } = request.parameters
-        stage = record.session.startPreview(generation, cellSize, fontSize, threshold, sampling)
+        const { cellSize, fontSize, threshold, sampling, mode, ramp } = request.parameters
+        stage = record.session.startPreview(
+          generation,
+          cellSize,
+          fontSize,
+          threshold,
+          sampling,
+          mode,
+          ramp,
+        )
       } else {
         stage = record.session.startOriginalPreview(generation)
       }
@@ -277,7 +285,7 @@ export function createWorkerHost(
     }
     const { session } = record
     const generation = request.requestId
-    const { cellSize, fontSize, threshold, sampling } = request.parameters
+    const { cellSize, fontSize, threshold, sampling, mode, ramp } = request.parameters
     const emitted = { sequence: 0, byteLength: 0 }
     const postChunks = (chunks: Uint8Array[]): void => {
       for (const chunk of chunks) {
@@ -306,7 +314,15 @@ export function createWorkerHost(
     let finished = false
     try {
       assertRunning(job)
-      let stage = session.startExport(generation, cellSize, fontSize, threshold, sampling)
+      let stage = session.startExport(
+        generation,
+        cellSize,
+        fontSize,
+        threshold,
+        sampling,
+        mode,
+        ramp,
+      )
       started = true
       while (stage !== engine.readyStage) {
         if (stage === engine.failedStage) {

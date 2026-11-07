@@ -1,4 +1,5 @@
 import { useEffect, useId, useState } from 'react'
+import { RenderModeFields, rampProblem } from './RenderModeFields'
 import { ExportPanel } from './export/ExportPanel'
 import { exportFilename } from './export/downloadName'
 import type { ExportPhase } from './export/exportFocus'
@@ -7,6 +8,8 @@ import { useExportDownload } from './export/useExportDownload'
 import { defaultUrlApi } from './processing/demoAdapter'
 import type { NativeFiles } from './processing/nativeFiles'
 import type { ExportStatus } from './processing/types'
+import { validateRamp } from './processing/protocol'
+import type { RenderModeName } from './processing/protocol'
 import type { StudioController } from './state/controller'
 import { IMPORT_ACCEPT, IMPORT_GUIDANCE, formatBytes, useImportFlow } from './useImportFlow'
 import { useStudio } from './useStudio'
@@ -38,10 +41,11 @@ function exportPhaseOf(status: ExportStatus, hasDownload: boolean): ExportPhase 
   }
 }
 
-function exportBlockedBy(status: string, hasSource: boolean): string | null {
+function exportBlockedBy(status: string, hasSource: boolean, rampBlocked: boolean): string | null {
   if (!hasSource) return 'Open or load an image to enable PNG export.'
   if (status === 'importing') return 'Wait for the image to finish importing.'
   if (status === 'processing') return 'Wait for the artwork preview to finish rendering.'
+  if (rampBlocked) return 'Fix the ramp to enable PNG export.'
   return null
 }
 
@@ -57,6 +61,8 @@ export default function App({ controller, native }: AppProps) {
   const hintId = useId()
   const [theme, setTheme] = useState<Theme>(getInitialTheme)
   const [inspectorOpen, setInspectorOpen] = useState(true)
+  const [rampDraft, setRampDraft] = useState(() => snapshot.settings.ramp)
+  const artworkReasonId = useId()
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -76,6 +82,10 @@ export default function App({ controller, native }: AppProps) {
     snapshot.status === 'processing' ||
     snapshot.status === 'exporting'
   const settings = snapshot.settings
+
+  useEffect(() => {
+    setRampDraft(settings.ramp)
+  }, [settings.ramp])
   const isOriginal = flow.view === 'original'
   const shown = isOriginal ? snapshot.original : snapshot.preview
   const viewName = isOriginal ? 'original image' : 'artwork'
@@ -98,14 +108,33 @@ export default function App({ controller, native }: AppProps) {
     snapshot.export.status,
     download !== null || savedExport !== null,
   )
-  const canExport = hasSource && !isBusy
-  const exportBlock = canExport ? null : exportBlockedBy(snapshot.status, hasSource)
+  const rampBlocked = rampProblem(settings.mode, rampDraft) !== null
+  const canExport = hasSource && !isBusy && !rampBlocked
+  const exportBlock = canExport ? null : exportBlockedBy(snapshot.status, hasSource, rampBlocked)
+  const thresholdApplies = settings.mode === 'binary'
 
   function updateSetting(key: 'cellSize' | 'fontSize' | 'threshold', value: string) {
     controller.updateSettings({ ...settings, [key]: Number(value) })
   }
 
+  function updateMode(mode: RenderModeName) {
+    controller.updateSettings({ ...settings, mode })
+  }
+
+  /** Only a valid draft reaches the controller; an invalid one leaves the accepted ramp in use. */
+  function updateRampDraft(draft: string) {
+    setRampDraft(draft)
+    if (validateRamp(draft) === null && draft !== settings.ramp) {
+      controller.updateSettings({ ...settings, ramp: draft })
+    }
+  }
+
+  function renderArtwork() {
+    if (!rampBlocked) flow.renderArtwork()
+  }
+
   function startPngExport() {
+    if (!canExport) return
     controller.startExport().catch(() => undefined)
   }
 
@@ -181,13 +210,19 @@ export default function App({ controller, native }: AppProps) {
                   type="button"
                   className={isOriginal ? undefined : 'is-selected'}
                   aria-pressed={!isOriginal}
-                  disabled={!hasSource}
+                  disabled={!hasSource || rampBlocked}
+                  aria-describedby={rampBlocked ? artworkReasonId : undefined}
                   onClick={() => flow.selectView('artwork')}
                 >
                   Artwork
                 </button>
               </div>
             </div>
+            {rampBlocked && (
+              <p className="field-note" id={artworkReasonId}>
+                Fix the ramp to show the artwork.
+              </p>
+            )}
             {isBusy && snapshot.status !== 'exporting' && (
               <div className="busy-row">
                 <progress aria-label={busyLabel} />
@@ -259,7 +294,8 @@ export default function App({ controller, native }: AppProps) {
                   <button
                     className="button button-secondary"
                     type="button"
-                    onClick={flow.renderArtwork}
+                    onClick={renderArtwork}
+                    disabled={rampBlocked}
                   >
                     Render artwork
                   </button>
@@ -319,7 +355,12 @@ export default function App({ controller, native }: AppProps) {
                 value={settings.fontSize}
                 onChange={(event) => updateSetting('fontSize', event.target.value)}
               />
-              <p className="field-note">Binary 0 / 1 output</p>
+              <RenderModeFields
+                mode={settings.mode}
+                rampDraft={rampDraft}
+                onModeChange={updateMode}
+                onRampDraftChange={updateRampDraft}
+              />
               <label className="field-label" htmlFor="threshold">
                 Threshold <output>{settings.threshold}</output>
               </label>
@@ -331,13 +372,20 @@ export default function App({ controller, native }: AppProps) {
                 min="0"
                 max="255"
                 value={settings.threshold}
+                disabled={!thresholdApplies}
+                aria-describedby="threshold-note"
                 onChange={(event) => updateSetting('threshold', event.target.value)}
               />
+              <p className="field-note" id="threshold-note">
+                {thresholdApplies
+                  ? 'The threshold splits cells into 0 and 1 in classic binary mode.'
+                  : 'The threshold has no effect in ASCII or block mode.'}
+              </p>
               <button
                 className="button button-primary button-wide"
                 type="button"
-                onClick={flow.renderArtwork}
-                disabled={!hasSource || isBusy}
+                onClick={renderArtwork}
+                disabled={!hasSource || isBusy || rampBlocked}
               >
                 {snapshot.status === 'processing' ? 'Rendering…' : 'Render artwork'}
               </button>

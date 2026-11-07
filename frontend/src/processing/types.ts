@@ -1,3 +1,6 @@
+import { DEFAULT_RAMP, isRenderModeName, validateRamp } from './protocol'
+import type { RenderModeName } from './protocol'
+
 export type StudioJobStatus =
   | 'idle'
   | 'importing'
@@ -20,11 +23,16 @@ export interface ExportSnapshot {
   readonly error: string | null
 }
 
-/** Immutable settings shared by preview and export operations. */
+/**
+ * Immutable settings shared by preview and export operations. `ramp` is always a valid ramp:
+ * the studio keeps an invalid draft out of this snapshot, so the last accepted ramp stays in use.
+ */
 export interface StudioSettings {
   readonly cellSize: number
   readonly fontSize: number
   readonly threshold: number
+  readonly mode: RenderModeName
+  readonly ramp: string
 }
 
 export interface StudioMetadata {
@@ -179,6 +187,8 @@ export const DEFAULT_SETTINGS: StudioSettings = Object.freeze({
   cellSize: 12,
   fontSize: 16,
   threshold: 128,
+  mode: 'binary',
+  ramp: DEFAULT_RAMP,
 })
 
 export function cloneSettings(settings: StudioSettings): StudioSettings {
@@ -195,4 +205,9 @@ export function validateSettings(settings: StudioSettings): void {
   if (!Number.isInteger(settings.threshold) || settings.threshold < 0 || settings.threshold > 255) {
     throw new RangeError('Threshold must be an integer from 0 through 255.')
   }
+  if (!isRenderModeName(settings.mode)) {
+    throw new RangeError('Render mode must be binary, ascii or block.')
+  }
+  const rampProblem = validateRamp(settings.ramp)
+  if (rampProblem !== null) throw new RangeError(rampProblem)
 }

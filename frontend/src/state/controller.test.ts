@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { createDemoProcessingAdapter } from '../processing/demoAdapter'
 import { createStudioController } from './controller'
+import { DEFAULT_RAMP } from '../processing/protocol'
 
 describe('studio controller', () => {
   it('loads the demo, renders a preview, and exports the same fixture as text', async () => {
@@ -48,9 +49,15 @@ describe('studio controller', () => {
     await controller.loadDemo()
     await controller.preview()
 
-    expect(() => controller.updateSettings({ cellSize: 4, fontSize: 16, threshold: 128 })).toThrow(
-      'Cell size',
-    )
+    expect(() =>
+      controller.updateSettings({
+        cellSize: 4,
+        fontSize: 16,
+        threshold: 128,
+        mode: 'binary' as const,
+        ramp: DEFAULT_RAMP,
+      }),
+    ).toThrow('Cell size')
     expect(controller.getSnapshot().status).toBe('error')
 
     controller.reset()
@@ -100,7 +107,13 @@ describe('studio controller', () => {
     })
     await controller.loadDemo()
     const pending = controller.preview()
-    controller.updateSettings({ cellSize: 20, fontSize: 20, threshold: 200 })
+    controller.updateSettings({
+      cellSize: 20,
+      fontSize: 20,
+      threshold: 200,
+      mode: 'binary' as const,
+      ramp: DEFAULT_RAMP,
+    })
     release?.()
     await pending
     expect(controller.getSnapshot().status).toBe('ready')
@@ -131,9 +144,15 @@ describe('studio controller', () => {
     })
     await controller.loadDemo()
     const pending = controller.preview()
-    expect(() => controller.updateSettings({ cellSize: 4, fontSize: 16, threshold: 128 })).toThrow(
-      'Cell size',
-    )
+    expect(() =>
+      controller.updateSettings({
+        cellSize: 4,
+        fontSize: 16,
+        threshold: 128,
+        mode: 'binary' as const,
+        ramp: DEFAULT_RAMP,
+      }),
+    ).toThrow('Cell size')
     release?.()
     await pending
     expect(controller.getSnapshot().status).toBe('error')

@@ -9,7 +9,7 @@
 mod error;
 mod numbers;
 
-use image_to_binary_adapters::session::args;
+use image_to_binary_adapters::session::args::{self, TextArg};
 use image_to_binary_adapters::session::{EncodedPlan, Frame, JobKind, Session, SourcePlan, Stage};
 use image_to_binary_core::Generation;
 use js_sys::{Error as JsError, Reflect, Uint8Array};
@@ -84,6 +84,33 @@ fn generation_of(session: &Session, value: &JsValue) -> Result<Generation, Bindi
     args::generation(number(value)).map_err(BindingError::from)
 }
 
+/// An optional text argument owned for the duration of one call. `undefined` and `null` are
+/// absent, so existing callers that omit the trailing arguments keep the classic path.
+enum OwnedText {
+    Absent,
+    Text(String),
+    NotText,
+}
+
+impl OwnedText {
+    fn of(value: &JsValue) -> Self {
+        if value.is_undefined() || value.is_null() {
+            Self::Absent
+        } else {
+            value.as_string().map_or(Self::NotText, Self::Text)
+        }
+    }
+
+    fn arg(&self) -> TextArg<'_> {
+        match self {
+            Self::Absent => TextArg::Absent,
+            Self::Text(text) => TextArg::Text(text),
+            Self::NotText => TextArg::NotText,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn start_job(
     session: &mut Session,
     kind: JobKind,
@@ -92,14 +119,20 @@ fn start_job(
     font_size: &JsValue,
     threshold: &JsValue,
     sampling: &JsValue,
+    mode: &JsValue,
+    ramp: &JsValue,
 ) -> Result<Stage, BindingError> {
     let generation = generation_of(session, generation)?;
     let sampling = sampling.as_string();
+    let mode = OwnedText::of(mode);
+    let ramp = OwnedText::of(ramp);
     let settings = args::preview_settings(
         number(cell_size),
         number(font_size),
         number(threshold),
         sampling.as_deref(),
+        mode.arg(),
+        ramp.arg(),
     )
     .map_err(BindingError::from)?;
     match kind {
@@ -299,6 +332,7 @@ impl ImageSession {
     /// Throws `invalid_argument`, `invalid_settings`, `stale_generation`,
     /// `disposed` or a resource error; invalid or stale starts keep current state.
     #[wasm_bindgen(js_name = startPreview)]
+    #[allow(clippy::too_many_arguments)]
     pub fn start_preview(
         &mut self,
         #[wasm_bindgen(unchecked_param_type = "number")] generation: &JsValue,
@@ -306,6 +340,9 @@ impl ImageSession {
         #[wasm_bindgen(unchecked_param_type = "number")] font_size: &JsValue,
         #[wasm_bindgen(unchecked_param_type = "number")] threshold: &JsValue,
         #[wasm_bindgen(unchecked_param_type = "\"classic\" | \"average\"")] sampling: &JsValue,
+        #[wasm_bindgen(unchecked_param_type = "\"binary\" | \"ascii\" | \"block\" | undefined")]
+        mode: &JsValue,
+        #[wasm_bindgen(unchecked_param_type = "string | undefined")] ramp: &JsValue,
     ) -> Result<JobStage, JsValue> {
         lift(start_job(
             &mut self.inner,
@@ -315,6 +352,8 @@ impl ImageSession {
             font_size,
             threshold,
             sampling,
+            mode,
+            ramp,
         ))
         .map(JobStage::from)
     }
@@ -442,6 +481,7 @@ impl ImageSession {
     /// Throws `invalid_argument`, `invalid_settings`, `stale_generation`,
     /// `disposed` or a resource error; invalid or stale starts keep the current job.
     #[wasm_bindgen(js_name = startExport)]
+    #[allow(clippy::too_many_arguments)]
     pub fn start_export(
         &mut self,
         #[wasm_bindgen(unchecked_param_type = "number")] generation: &JsValue,
@@ -449,6 +489,9 @@ impl ImageSession {
         #[wasm_bindgen(unchecked_param_type = "number")] font_size: &JsValue,
         #[wasm_bindgen(unchecked_param_type = "number")] threshold: &JsValue,
         #[wasm_bindgen(unchecked_param_type = "\"classic\" | \"average\"")] sampling: &JsValue,
+        #[wasm_bindgen(unchecked_param_type = "\"binary\" | \"ascii\" | \"block\" | undefined")]
+        mode: &JsValue,
+        #[wasm_bindgen(unchecked_param_type = "string | undefined")] ramp: &JsValue,
     ) -> Result<JobStage, JsValue> {
         lift(start_job(
             &mut self.inner,
@@ -458,6 +501,8 @@ impl ImageSession {
             font_size,
             threshold,
             sampling,
+            mode,
+            ramp,
         ))
         .map(JobStage::from)
     }

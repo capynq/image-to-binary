@@ -3,6 +3,7 @@ import { createDemoProcessingAdapter } from '../processing/demoAdapter'
 import type { JobContext, ProcessingAdapter, StudioMetadata } from '../processing/types'
 import { DEFAULT_SETTINGS } from '../processing/types'
 import { createStudioController, StaleOperationError } from './controller'
+import { DEFAULT_RAMP } from '../processing/protocol'
 
 const context = (operationId: number): JobContext => ({ operationId, generation: operationId })
 
@@ -108,10 +109,22 @@ describe('phase 3.1 acceptance contracts', () => {
   it('applies threshold to the shared fixture for preview and text export', async () => {
     const controller = createStudioController()
     await controller.loadDemo()
-    controller.updateSettings({ cellSize: 12, fontSize: 16, threshold: 0 })
+    controller.updateSettings({
+      cellSize: 12,
+      fontSize: 16,
+      threshold: 0,
+      mode: 'binary' as const,
+      ramp: DEFAULT_RAMP,
+    })
     await controller.preview()
     expect(await (await controller.exportDemo('text')).text()).toBe('0000\n0000\n0000\n0000')
-    controller.updateSettings({ cellSize: 12, fontSize: 16, threshold: 255 })
+    controller.updateSettings({
+      cellSize: 12,
+      fontSize: 16,
+      threshold: 255,
+      mode: 'binary' as const,
+      ramp: DEFAULT_RAMP,
+    })
     await controller.preview()
     expect(await (await controller.exportDemo('text')).text()).toBe('1111\n1111\n1111\n1111')
   })
@@ -167,9 +180,18 @@ describe('phase 3.1 acceptance contracts', () => {
   })
 
   it.each([
-    [{ cellSize: 4, fontSize: 16, threshold: 128 }, 'Cell size'],
-    [{ cellSize: 12, fontSize: 7, threshold: 128 }, 'Font size'],
-    [{ cellSize: 12, fontSize: 16, threshold: 256 }, 'Threshold'],
+    [
+      { cellSize: 4, fontSize: 16, threshold: 128, mode: 'binary' as const, ramp: DEFAULT_RAMP },
+      'Cell size',
+    ],
+    [
+      { cellSize: 12, fontSize: 7, threshold: 128, mode: 'binary' as const, ramp: DEFAULT_RAMP },
+      'Font size',
+    ],
+    [
+      { cellSize: 12, fontSize: 16, threshold: 256, mode: 'binary' as const, ramp: DEFAULT_RAMP },
+      'Threshold',
+    ],
   ] as const)('validates %s', (settings, message) => {
     const controller = createStudioController()
     expect(() => controller.updateSettings(settings)).toThrow(message)

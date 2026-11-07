@@ -4,7 +4,7 @@ import { createExportAccumulator } from './exportAccumulator'
 import type { ExportAccumulator, ExportAccumulatorOptions } from './exportAccumulator'
 import { startHeifDecode } from './heifDecodeJob'
 import type { DecodedRgba, HeifDecodeJob, HeifDecoderEndpoint } from './heifDecodeJob'
-import { validateEncodedImport } from './protocol'
+import { samplingForMode, validateEncodedImport } from './protocol'
 import { renderPreviewPng } from './previewRenderer'
 import type { PreviewRenderer } from './previewRenderer'
 import type {
@@ -258,7 +258,9 @@ export function createAdapterWithAccumulator(
           cellSize: settings.cellSize,
           fontSize: settings.fontSize,
           threshold: settings.threshold,
-          sampling: 'classic',
+          sampling: samplingForMode(settings.mode),
+          mode: settings.mode,
+          ramp: settings.ramp,
         },
         context.operationId,
         createArtifact,
@@ -287,7 +289,9 @@ export function createAdapterWithAccumulator(
             cellSize: settings.cellSize,
             fontSize: settings.fontSize,
             threshold: settings.threshold,
-            sampling: 'classic',
+            sampling: samplingForMode(settings.mode),
+            mode: settings.mode,
+            ramp: settings.ramp,
           },
           context.operationId,
           accumulator,

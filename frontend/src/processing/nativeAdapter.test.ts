@@ -10,6 +10,7 @@ import type { NativeDropOutcome } from './nativeFiles'
 import type { JobContext, ProcessingSession, StudioSettings } from './types'
 import { DEFAULT_SETTINGS, ExportCancelledError } from './types'
 import { ProcessingWorkerError } from './workerClient'
+import { DEFAULT_RAMP } from './protocol'
 
 type Handler = (args: Record<string, unknown> | undefined) => unknown
 
@@ -217,7 +218,13 @@ describe('native import', () => {
 })
 
 describe('native preview', () => {
-  const artwork: StudioSettings = { cellSize: 12, fontSize: 16, threshold: 128 }
+  const artwork: StudioSettings = {
+    cellSize: 12,
+    fontSize: 16,
+    threshold: 128,
+    mode: 'binary' as const,
+    ramp: DEFAULT_RAMP,
+  }
 
   async function withSource(bridge: FakeBridge) {
     const { adapter, urlApi } = setup(bridge)
@@ -244,6 +251,33 @@ describe('native preview', () => {
     })
     artifact.dispose()
     expect(urlApi.live.size).toBe(0)
+  })
+
+  it('sends the render mode, ramp and mode-forced sampling over IPC', async () => {
+    const bridge = new FakeBridge()
+      .on('import_demo', demoReply)
+      .on('start_preview', (args) => frameBody(Number(args?.generation), 2, 1))
+    const { adapter, s, source } = await withSource(bridge)
+    const ascii: StudioSettings = { ...artwork, mode: 'ascii', ramp: ' .#@' }
+    const artifact = await adapter.preview(s, source, ascii, context(2, 5), 'artwork')
+    artifact.dispose()
+    const block: StudioSettings = { ...artwork, mode: 'block' }
+    const second = await adapter.preview(s, source, block, context(3, 6), 'artwork')
+    second.dispose()
+    const calls = bridge.calls.filter((entry) => entry.command === 'start_preview')
+    expect(calls[0]?.args).toMatchObject({
+      settings: {
+        cellSize: 12,
+        fontSize: 16,
+        threshold: 128,
+        sampling: 'average',
+        mode: 'ascii',
+        ramp: ' .#@',
+      },
+    })
+    expect(calls[1]?.args).toMatchObject({
+      settings: { sampling: 'average', mode: 'block', ramp: DEFAULT_RAMP },
+    })
   })
 
   it('requests the original without settings', async () => {
@@ -413,6 +447,24 @@ describe('native export', () => {
     })
     expect(fractions).toEqual([0.5])
     expect(bridge.calls.at(-1)).toEqual({ command: 'release_handle', args: { id: 7 } })
+  })
+
+  it('sends the render mode and ramp with the native PNG export', async () => {
+    const bridge = new FakeBridge()
+      .on('import_demo', demoReply)
+      .on('save_image_dialog', () => ({ id: 7, name: 'out.png' }))
+      .on('export_png', () => ({ byteLength: 42 }))
+    const { adapter, s, source } = await ready(bridge)
+    await adapter.export(
+      s,
+      source,
+      'png',
+      { ...DEFAULT_SETTINGS, mode: 'ascii', ramp: ' .oO@' },
+      context(3, 4),
+    )
+    expect(bridge.calls.find((call) => call.command === 'export_png')?.args).toMatchObject({
+      settings: { sampling: 'average', mode: 'ascii', ramp: ' .oO@' },
+    })
   })
 
   it('treats a dismissed save dialog as ExportCancelledError with no export call', async () => {

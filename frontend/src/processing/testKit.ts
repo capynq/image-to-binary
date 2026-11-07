@@ -1,5 +1,6 @@
 import type { EngineFrame, EngineSession, ProcessingEngine } from './engine'
-import type { PreviewParameters } from './protocol'
+import { DEFAULT_RAMP } from './protocol'
+import type { PreviewParameters, PreviewSampling, RenderModeName } from './protocol'
 import { createProcessingClient } from './workerClient'
 import type { ClientEndpoint, ProcessingClient, RgbaImport } from './workerClient'
 import type { HeifDecoderEndpoint } from './heifDecodeJob'
@@ -13,6 +14,8 @@ export const PARAMS: PreviewParameters = {
   fontSize: 16,
   threshold: 128,
   sampling: 'classic',
+  mode: 'binary',
+  ramp: DEFAULT_RAMP,
 }
 
 export function rgba(name = 'test'): RgbaImport {
@@ -93,7 +96,25 @@ export class FakeSession implements EngineSession {
     readonly sourceChannels = 4,
   ) {}
 
-  startPreview(generation: number): number {
+  startPreview(
+    generation: number,
+    cellSize: number,
+    fontSize: number,
+    threshold: number,
+    sampling: PreviewSampling,
+    mode: RenderModeName,
+    ramp: string,
+  ): number {
+    this.engine.starts.push({
+      kind: 'preview',
+      generation,
+      cellSize,
+      fontSize,
+      threshold,
+      sampling,
+      mode,
+      ramp,
+    })
     this.engine.log.push(`start:${generation}`)
     this.original = false
     this.exporting = false
@@ -102,7 +123,25 @@ export class FakeSession implements EngineSession {
     return FAKE_STAGES.sampling
   }
 
-  startExport(generation: number): number {
+  startExport(
+    generation: number,
+    cellSize: number,
+    fontSize: number,
+    threshold: number,
+    sampling: PreviewSampling,
+    mode: RenderModeName,
+    ramp: string,
+  ): number {
+    this.engine.starts.push({
+      kind: 'export',
+      generation,
+      cellSize,
+      fontSize,
+      threshold,
+      sampling,
+      mode,
+      ramp,
+    })
     this.engine.log.push(`export:${generation}`)
     this.original = false
     this.exporting = true
@@ -206,11 +245,24 @@ export class FakeSession implements EngineSession {
   }
 }
 
+/** The render arguments one fake start received, in the order the engine signature names them. */
+export interface RecordedStart {
+  readonly kind: 'preview' | 'export'
+  readonly generation: number
+  readonly cellSize: number
+  readonly fontSize: number
+  readonly threshold: number
+  readonly sampling: PreviewSampling
+  readonly mode: RenderModeName
+  readonly ramp: string
+}
+
 /** Deterministic engine double with the same stage protocol as the WASM session. */
 export class FakeEngine implements ProcessingEngine {
   readonly readyStage = FAKE_STAGES.ready
   readonly failedStage = FAKE_STAGES.failed
   readonly log: string[] = []
+  readonly starts: RecordedStart[] = []
   readonly sessions: FakeSession[] = []
   readonly frames: FakeFrame[] = []
   /** Backing buffers of sub-view chunks, so tests can check that they were copied. */
