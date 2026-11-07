@@ -1451,9 +1451,22 @@ Proposed commit title: `refactor: share the processing session natively`
 
 Completion checklist:
 
-- [ ] WASM parity unchanged after extraction.
-- [ ] Native preview and export match references.
-- [ ] Off-thread and cancellation behavior passes.
+- [x] WASM parity unchanged after extraction.
+- [x] Native preview and export match references.
+- [x] Off-thread and cancellation behavior passes.
+
+Validation: the job state machine and the argument rules moved into
+`crates/adapters` and drive both the WASM binding and the desktop worker. The
+JS API files and `reference.json` stay byte-identical, with 75 WASM node tests,
+345 frontend tests and the root workspace passing; the desktop app passes 117
+tests in its default, smoke and native-codecs builds and the 24-check smoke
+run. Native previews and PNG exports match direct rendering for the reference
+cases, including the classic golden. The session lock is never held across an
+IPC send, launches are refused unless their generation is newer, and a
+committed export is always reported while a cancelled one leaves no file.
+Malformed IPC arguments return the same {code, message} as the browser, and
+the frontend's encoded, pixel and budget limits are checked against Rust in CI.
+The webview path of the new commands is exercised in 5.2.3.
 
 #### 5.2.3 Connect the studio to the native adapter
 

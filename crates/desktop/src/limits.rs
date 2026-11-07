@@ -1,5 +1,6 @@
 //! Resource ceilings for native processing and the engine bounds the UI reads.
 
+use image_to_binary_adapters::session::{MAX_DECODED_BYTES as SHARED_DECODED, MAX_ENCODED_BYTES};
 use image_to_binary_core::{
     ResourceLimits, MAX_CELL_SIZE, MAX_CONTRAST, MAX_FONT_SIZE, MAX_RAMP_LENGTH,
     MAX_SOURCE_CELL_HEIGHT, MAX_THRESHOLD, MIN_CELL_SIZE, MIN_CONTRAST, MIN_FONT_SIZE,
@@ -9,10 +10,10 @@ use serde::Serialize;
 
 use crate::error::{ErrorCode, IpcError};
 
-/// Encoded input ceiling; matches the processing crate's default decode limits.
-pub const MAX_ENCODED_INPUT_BYTES: u64 = 256 * 1024 * 1024;
-/// Decoded RGBA working-set ceiling; matches the processing crate's default decode limits.
-pub const MAX_DECODED_BYTES: u64 = 1024 * 1024 * 1024;
+/// Encoded input ceiling shared with the browser session.
+pub const MAX_ENCODED_INPUT_BYTES: u64 = MAX_ENCODED_BYTES;
+/// Decoded RGBA working-set ceiling shared with the browser session.
+pub const MAX_DECODED_BYTES: u64 = SHARED_DECODED;
 /// Pixel and encoded-output ceilings shared with the core contract.
 pub const NATIVE_RESOURCE_LIMITS: ResourceLimits = ResourceLimits::default();
 /// Largest raw body accepted by the smoke echo command.
@@ -159,13 +160,9 @@ mod tests {
     }
 
     #[test]
-    fn encoded_input_limit_matches_the_browser_session() {
-        let session = include_str!("../../wasm/src/session.rs");
-        assert!(
-            session.contains("const MAX_ENCODED_BYTES: u64 = 256 * 1024 * 1024;"),
-            "the browser encoded-input limit changed; update MAX_ENCODED_INPUT_BYTES"
-        );
+    fn encoded_input_limit_is_the_shared_session_limit() {
         assert_eq!(MAX_ENCODED_INPUT_BYTES, 256 * 1024 * 1024);
+        assert_eq!(MAX_DECODED_BYTES, 1024 * 1024 * 1024);
     }
 
     #[test]

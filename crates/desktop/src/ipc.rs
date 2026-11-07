@@ -3,11 +3,16 @@
 use std::sync::Arc;
 
 use serde::Serialize;
+use tauri::ipc::Channel;
 
 use crate::error::IpcError;
 use crate::files::dialog::{self, NativePicker};
 use crate::files::{FileId, FileRef, FileTable, SinkRef};
 use crate::limits::AppLimits;
+use crate::processing::{
+    self, ExportReport, ExportRequest, ImportedSource, PreviewKind, PreviewMode, PreviewRequest,
+    Processing, ProgressEvent,
+};
 
 /// Codecs compiled into this binary; the native codec path is enabled by the `native-codecs` feature.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -92,6 +97,97 @@ pub(crate) async fn save_image_dialog(
 #[tauri::command]
 pub(crate) fn release_handle(files: tauri::State<'_, Arc<FileTable>>, id: FileId) {
     files.release(id);
+}
+
+/// Imports the file behind `file_id` as the one source and returns its metadata. The file is read
+/// and decoded on the worker; the page never sends bytes. A rejected file keeps the previous source.
+///
+/// Failure contract: the read errors (`invalid_argument` for a non-regular file, `encoded_too_large`
+/// above the input ceiling) and the decoder's codes (`unsupported_format`, `decode_failed`,
+/// `codec_unavailable`), `cancelled` when superseded.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+pub(crate) async fn import_source(
+    processing: tauri::State<'_, Arc<Processing>>,
+    file_id: FileId,
+) -> Result<ImportedSource, IpcError> {
+    processing.import_source(file_id).await
+}
+
+/// Renders a preview of the source and returns the raw frame body described in
+/// `processing::frame`. `settings` is required for `artwork` and ignored for `original`. The
+/// generation and settings arrive as raw JSON and are converted with the shared argument
+/// contract, so a wrong type or value gives the browser's `{ code, message }`.
+///
+/// Failure contract: `invalid_argument` and `invalid_settings` from the contract, `no_job`
+/// without a source, `stale_generation`, `cancelled` when superseded, and the session's codes.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+pub(crate) async fn start_preview(
+    processing: tauri::State<'_, Arc<Processing>>,
+    kind: PreviewKind,
+    settings: Option<serde_json::Value>,
+    generation: Option<serde_json::Value>,
+    progress: Channel<ProgressEvent>,
+) -> Result<tauri::ipc::Response, IpcError> {
+    let generation = processing::generation_argument(generation.as_ref())?.value();
+    let mode = match kind {
+        PreviewKind::Original => PreviewMode::Original,
+        PreviewKind::Artwork => {
+            PreviewMode::Artwork(processing::settings_argument(settings.as_ref())?)
+        }
+    };
+    let frame = processing
+        .render_preview(PreviewRequest { generation, mode }, progress)
+        .await?;
+    Ok(tauri::ipc::Response::new(frame))
+}
+
+/// Exports the artwork as a PNG into the chosen sink and commits it atomically. Returns the
+/// committed byte length; the destination path never crosses IPC.
+///
+/// Failure contract: the shared argument codes for `settings` and `generation`,
+/// `invalid_argument` for an unavailable destination, `internal` for a write failure,
+/// `cancelled` or `stale_generation` when superseded before the commit.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+pub(crate) async fn export_png(
+    processing: tauri::State<'_, Arc<Processing>>,
+    settings: Option<serde_json::Value>,
+    sink_id: FileId,
+    generation: Option<serde_json::Value>,
+    progress: Channel<ProgressEvent>,
+) -> Result<ExportReport, IpcError> {
+    let generation = processing::generation_argument(generation.as_ref())?.value();
+    let settings = processing::settings_argument(settings.as_ref())?;
+    processing
+        .export_png(
+            ExportRequest {
+                generation,
+                settings,
+                sink: sink_id,
+            },
+            progress,
+        )
+        .await
+}
+
+/// Cancels the active preview or export when it belongs to `generation`. Idempotent.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+pub(crate) async fn cancel(
+    processing: tauri::State<'_, Arc<Processing>>,
+    generation: Option<serde_json::Value>,
+) -> Result<(), IpcError> {
+    processing.cancel(processing::generation_argument(generation.as_ref())?.value());
+    Ok(())
+}
+
+/// Cancels all work and releases the held source. Resolves once the release has run on the worker.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+pub(crate) async fn reset(processing: tauri::State<'_, Arc<Processing>>) -> Result<(), IpcError> {
+    processing.reset().await
 }
 
 #[cfg(feature = "smoke")]

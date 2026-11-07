@@ -9,7 +9,7 @@
 
 use std::fmt;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{
     channel, sync_channel, Receiver, RecvTimeoutError, SyncSender, TrySendError,
 };
@@ -76,6 +76,7 @@ pub struct JobContext {
     generation: Generation,
     cancellation: Cancellation,
     latest: Arc<AtomicU64>,
+    committed: AtomicBool,
 }
 
 impl JobContext {
@@ -96,6 +97,18 @@ impl JobContext {
             return Err(ContractError::StaleGeneration);
         }
         self.cancellation.check(self.generation)
+    }
+
+    /// Marks the job's side effect as committed. From this point the result is delivered even if
+    /// a newer job supersedes this one, because the effect cannot be undone; the consumer compares
+    /// the delivered generation with the newest one it submitted. Call it only after the last
+    /// checkpoint and never before the effect is complete.
+    pub fn commit_point(&self) {
+        self.committed.store(true, Ordering::Release);
+    }
+
+    fn is_committed(&self) -> bool {
+        self.committed.load(Ordering::Acquire)
     }
 
     fn is_superseded(&self) -> bool {
@@ -258,7 +271,7 @@ impl Worker {
         let job: Job = Box::new(move |context: &JobContext| {
             let outcome = catch_unwind(AssertUnwindSafe(|| run(context)))
                 .unwrap_or_else(|_| Err(E::from(WorkerError::JobPanicked)));
-            if context.is_current() {
+            if context.is_current() || context.is_committed() {
                 let _ = catch_unwind(AssertUnwindSafe(|| {
                     deliver(context.generation(), outcome);
                 }));
@@ -354,6 +367,7 @@ fn run_loop(shared: &Shared, wakeups: &Receiver<()>) {
                 generation,
                 cancellation,
                 latest: Arc::clone(&shared.latest),
+                committed: AtomicBool::new(false),
             };
             job(&context);
             lock(shared).active = None;

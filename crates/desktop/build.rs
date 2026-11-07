@@ -12,6 +12,11 @@ const APP_COMMANDS: &[&str] = &[
     "open_image_dialog",
     "save_image_dialog",
     "release_handle",
+    "import_source",
+    "start_preview",
+    "export_png",
+    "cancel",
+    "reset",
 ];
 const SMOKE_COMMANDS: &[&str] = &[
     "app_info",
@@ -19,6 +24,11 @@ const SMOKE_COMMANDS: &[&str] = &[
     "open_image_dialog",
     "save_image_dialog",
     "release_handle",
+    "import_source",
+    "start_preview",
+    "export_png",
+    "cancel",
+    "reset",
     "echo_binary",
     "smoke_page",
     "smoke_worker_probe",

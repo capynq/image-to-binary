@@ -7,6 +7,11 @@
     "allow-app-limits",
     "allow-open-image-dialog",
     "allow-save-image-dialog",
-    "allow-release-handle"
+    "allow-release-handle",
+    "allow-import-source",
+    "allow-start-preview",
+    "allow-export-png",
+    "allow-cancel",
+    "allow-reset"
   ]
 }

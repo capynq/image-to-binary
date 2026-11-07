@@ -8,14 +8,15 @@
 
 mod error;
 mod numbers;
-mod session;
 
+use image_to_binary_adapters::session::args;
+use image_to_binary_adapters::session::{EncodedPlan, Frame, JobKind, Session, SourcePlan, Stage};
+use image_to_binary_core::Generation;
 use js_sys::{Error as JsError, Reflect, Uint8Array};
 use wasm_bindgen::prelude::*;
 
 use crate::error::{BindingError, ErrorCode};
 use crate::numbers::js_count;
-use crate::session::{EncodedPlan, Frame, Session, SourcePlan, Stage};
 
 fn to_js(error: &BindingError) -> JsValue {
     let js_error = JsError::new(error.message());
@@ -29,8 +30,8 @@ fn to_js(error: &BindingError) -> JsValue {
     value
 }
 
-fn lift<T>(result: Result<T, BindingError>) -> Result<T, JsValue> {
-    result.map_err(|error| to_js(&error))
+fn lift<T, E: Into<BindingError>>(result: Result<T, E>) -> Result<T, JsValue> {
+    result.map_err(|error| to_js(&error.into()))
 }
 
 fn number(value: &JsValue) -> f64 {
@@ -48,10 +49,11 @@ fn copy_source(
             "pixels must be a Uint8Array",
         ));
     }
-    plan.check_len(usize::try_from(pixels.length()).unwrap_or(usize::MAX))?;
-    let mut buffer = plan.allocate()?;
+    plan.check_len(usize::try_from(pixels.length()).unwrap_or(usize::MAX))
+        .map_err(BindingError::from)?;
+    let mut buffer = plan.allocate().map_err(BindingError::from)?;
     pixels.copy_to(&mut buffer);
-    plan.into_session(buffer)
+    plan.into_session(buffer).map_err(BindingError::from)
 }
 
 fn build_session(
@@ -68,10 +70,55 @@ fn copy_encoded(bytes: &Uint8Array) -> Result<Session, BindingError> {
             "bytes must be a Uint8Array",
         ));
     }
-    let plan = EncodedPlan::new(usize::try_from(bytes.length()).unwrap_or(usize::MAX))?;
-    let mut buffer = plan.allocate()?;
+    let plan = EncodedPlan::new(usize::try_from(bytes.length()).unwrap_or(usize::MAX))
+        .map_err(BindingError::from)?;
+    let mut buffer = plan.allocate().map_err(BindingError::from)?;
     bytes.copy_to(&mut buffer);
-    EncodedPlan::decode_session(buffer)
+    EncodedPlan::decode_session(buffer).map_err(BindingError::from)
+}
+
+/// Checks the session is live before any argument is converted, so disposal wins over
+/// argument errors as the browser contract requires.
+fn generation_of(session: &Session, value: &JsValue) -> Result<Generation, BindingError> {
+    session.ensure_live().map_err(BindingError::from)?;
+    args::generation(number(value)).map_err(BindingError::from)
+}
+
+fn start_job(
+    session: &mut Session,
+    kind: JobKind,
+    generation: &JsValue,
+    cell_size: &JsValue,
+    font_size: &JsValue,
+    threshold: &JsValue,
+    sampling: &JsValue,
+) -> Result<Stage, BindingError> {
+    let generation = generation_of(session, generation)?;
+    let sampling = sampling.as_string();
+    let settings = args::preview_settings(
+        number(cell_size),
+        number(font_size),
+        number(threshold),
+        sampling.as_deref(),
+    )
+    .map_err(BindingError::from)?;
+    match kind {
+        JobKind::Preview => session.start_preview(generation, settings),
+        JobKind::Export => session.start_export(generation, settings),
+    }
+    .map_err(BindingError::from)
+}
+
+fn advance_job(
+    session: &mut Session,
+    generation: &JsValue,
+    pixel_budget: &JsValue,
+) -> Result<Stage, BindingError> {
+    let generation = generation_of(session, generation)?;
+    let budget = args::pixel_budget(number(pixel_budget)).map_err(BindingError::from)?;
+    session
+        .advance(generation, budget)
+        .map_err(BindingError::from)
 }
 
 /// Position of the current job in the sampling, then preview or encoding,
@@ -164,7 +211,10 @@ impl ImageSession {
         #[wasm_bindgen(unchecked_param_type = "number")] height: &JsValue,
         pixels: &Uint8Array,
     ) -> Result<ImageSession, JsValue> {
-        build_session(SourcePlan::new(number(width), number(height), None), pixels)
+        build_session(
+            args::source_plan(number(width), number(height), None).map_err(BindingError::from),
+            pixels,
+        )
     }
 
     /// Like `fromRgba` with a lower caller pixel ceiling (at most 50 MP).
@@ -180,7 +230,8 @@ impl ImageSession {
         pixels: &Uint8Array,
     ) -> Result<ImageSession, JsValue> {
         build_session(
-            SourcePlan::new(number(width), number(height), Some(number(max_pixels))),
+            args::source_plan(number(width), number(height), Some(number(max_pixels)))
+                .map_err(BindingError::from),
             pixels,
         )
     }
@@ -256,13 +307,14 @@ impl ImageSession {
         #[wasm_bindgen(unchecked_param_type = "number")] threshold: &JsValue,
         #[wasm_bindgen(unchecked_param_type = "\"classic\" | \"average\"")] sampling: &JsValue,
     ) -> Result<JobStage, JsValue> {
-        let sampling = sampling.as_string();
-        lift(self.inner.start_preview(
-            number(generation),
-            number(cell_size),
-            number(font_size),
-            number(threshold),
-            sampling.as_deref(),
+        lift(start_job(
+            &mut self.inner,
+            JobKind::Preview,
+            generation,
+            cell_size,
+            font_size,
+            threshold,
+            sampling,
         ))
         .map(JobStage::from)
     }
@@ -285,7 +337,13 @@ impl ImageSession {
         &mut self,
         #[wasm_bindgen(unchecked_param_type = "number")] generation: &JsValue,
     ) -> Result<JobStage, JsValue> {
-        lift(self.inner.start_original_preview(number(generation))).map(JobStage::from)
+        let generation = generation_of(&self.inner, generation);
+        lift(generation.and_then(|generation| {
+            self.inner
+                .start_original_preview(generation)
+                .map_err(BindingError::from)
+        }))
+        .map(JobStage::from)
     }
 
     /// Returns the current job stage, `Idle` when there is none.
@@ -338,7 +396,7 @@ impl ImageSession {
         #[wasm_bindgen(unchecked_param_type = "number")] generation: &JsValue,
         #[wasm_bindgen(unchecked_param_type = "number")] pixel_budget: &JsValue,
     ) -> Result<JobStage, JsValue> {
-        lift(self.inner.advance(number(generation), number(pixel_budget))).map(JobStage::from)
+        lift(advance_job(&mut self.inner, generation, pixel_budget)).map(JobStage::from)
     }
 
     /// Cancels the job and releases its partial work. Repeating it is a no-op.
@@ -350,7 +408,10 @@ impl ImageSession {
         &mut self,
         #[wasm_bindgen(unchecked_param_type = "number")] generation: &JsValue,
     ) -> Result<(), JsValue> {
-        lift(self.inner.cancel(number(generation)))
+        lift(
+            generation_of(&self.inner, generation)
+                .and_then(|generation| self.inner.cancel(generation).map_err(BindingError::from)),
+        )
     }
 
     /// Returns the finished frame once, and only when the job is a preview `Ready`.
@@ -363,7 +424,11 @@ impl ImageSession {
         &mut self,
         #[wasm_bindgen(unchecked_param_type = "number")] generation: &JsValue,
     ) -> Result<PreviewFrame, JsValue> {
-        lift(self.inner.finish(number(generation))).map(|inner| PreviewFrame { inner })
+        lift(
+            generation_of(&self.inner, generation)
+                .and_then(|generation| self.inner.finish(generation).map_err(BindingError::from)),
+        )
+        .map(|inner| PreviewFrame { inner })
     }
 
     /// Starts a PNG export superseding any current job. It takes the same
@@ -385,13 +450,14 @@ impl ImageSession {
         #[wasm_bindgen(unchecked_param_type = "number")] threshold: &JsValue,
         #[wasm_bindgen(unchecked_param_type = "\"classic\" | \"average\"")] sampling: &JsValue,
     ) -> Result<JobStage, JsValue> {
-        let sampling = sampling.as_string();
-        lift(self.inner.start_export(
-            number(generation),
-            number(cell_size),
-            number(font_size),
-            number(threshold),
-            sampling.as_deref(),
+        lift(start_job(
+            &mut self.inner,
+            JobKind::Export,
+            generation,
+            cell_size,
+            font_size,
+            threshold,
+            sampling,
         ))
         .map(JobStage::from)
     }
@@ -409,7 +475,14 @@ impl ImageSession {
         &mut self,
         #[wasm_bindgen(unchecked_param_type = "number")] generation: &JsValue,
     ) -> Result<Vec<JsValue>, JsValue> {
-        lift(self.inner.drain_export(number(generation))).map(|chunks| export_chunks(&chunks))
+        lift(
+            generation_of(&self.inner, generation).and_then(|generation| {
+                self.inner
+                    .drain_export(generation)
+                    .map_err(BindingError::from)
+            }),
+        )
+        .map(|chunks| export_chunks(&chunks))
     }
 
     /// Finalizes the PNG and returns every chunk not yet drained, in order. The
@@ -428,7 +501,14 @@ impl ImageSession {
         &mut self,
         #[wasm_bindgen(unchecked_param_type = "number")] generation: &JsValue,
     ) -> Result<Vec<JsValue>, JsValue> {
-        lift(self.inner.finish_export(number(generation))).map(|chunks| export_chunks(&chunks))
+        lift(
+            generation_of(&self.inner, generation).and_then(|generation| {
+                self.inner
+                    .finish_export(generation)
+                    .map_err(BindingError::from)
+            }),
+        )
+        .map(|chunks| export_chunks(&chunks))
     }
 
     /// Releases the source, caches, renderer and job. Idempotent.

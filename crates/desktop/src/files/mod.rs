@@ -108,7 +108,7 @@ pub(crate) fn sink_ref(table: &FileTable, path: PathBuf) -> Result<SinkRef, IpcE
 /// Returns the final component of a path as lossy UTF-8 with control and format characters
 /// replaced by `_`, so a bidi override cannot disguise the name. Only the display name changes;
 /// the stored path keeps its exact bytes.
-fn display_name(path: &Path) -> String {
+pub(crate) fn display_name(path: &Path) -> String {
     path.file_name().map_or_else(
         || FALLBACK_NAME.to_owned(),
         |name| {

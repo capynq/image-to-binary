@@ -7,6 +7,7 @@ pub mod error;
 mod files;
 mod ipc;
 pub mod limits;
+mod processing;
 #[cfg(feature = "smoke")]
 mod smoke;
 #[cfg(any(feature = "smoke", test))]
@@ -34,9 +35,15 @@ pub fn run() -> ExitCode {
     };
     let worker = Arc::new(worker);
     let exit_worker = Arc::clone(&worker);
+    let files = Arc::new(files::FileTable::default());
+    let processing = Arc::new(processing::Processing::new(
+        Arc::clone(&worker),
+        Arc::clone(&files),
+    ));
     let builder = tauri::Builder::default()
         .manage(worker)
-        .manage(Arc::new(files::FileTable::default()))
+        .manage(files)
+        .manage(processing)
         .setup(setup);
     #[cfg(feature = "smoke")]
     let builder = builder.invoke_handler(tauri::generate_handler![
@@ -45,6 +52,11 @@ pub fn run() -> ExitCode {
         ipc::open_image_dialog,
         ipc::save_image_dialog,
         ipc::release_handle,
+        ipc::import_source,
+        ipc::start_preview,
+        ipc::export_png,
+        ipc::cancel,
+        ipc::reset,
         ipc::echo_binary,
         smoke::smoke_page,
         smoke::smoke_worker_probe,
@@ -56,6 +68,11 @@ pub fn run() -> ExitCode {
         ipc::open_image_dialog,
         ipc::save_image_dialog,
         ipc::release_handle,
+        ipc::import_source,
+        ipc::start_preview,
+        ipc::export_png,
+        ipc::cancel,
+        ipc::reset,
     ]);
     let Ok(app) = builder.build(tauri::generate_context!()) else {
         return ExitCode::FAILURE;
