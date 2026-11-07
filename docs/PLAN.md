@@ -2089,9 +2089,39 @@ Proposed commit title: `test: cover responsive and accessible boundaries`
 
 Completion checklist:
 
-- [ ] Full viewport matrix passes.
-- [ ] Accessibility/content boundary checks pass.
-- [ ] Cross-browser evidence reviewed.
+- [x] Full viewport matrix passes.
+- [x] Accessibility/content boundary checks pass.
+- [x] Cross-browser evidence reviewed.
+
+Validation: a Chromium boundary run under ignored `docs/reports/boundaries/`
+passes 2651 checks:
+- the full width matrix, short landscape at device scales 1 to 3, light and
+  dark, Original and Split, with a full forward and reverse Tab walk;
+- 200% text through the browser font setting;
+- 320 px reflow and 400% zoom, emulated as 320×200 at device scale 4;
+- long names and full errors, ramp extremes with their exact messages,
+  loading and cancel, PNG and text downloads, the file chooser, scrolling,
+  focus retention, and forced colours.
+The run found and fixed five defects:
+- the root font size was fixed in pixels, so text ignored the browser
+  setting;
+- under forced colours the Source colour focus ring missed its option;
+- at 200% text the hex field clipped its value and choice chips overlapped or
+  split words; header chips now wrap as whole chips and inspector chips drop
+  columns;
+- at phone width a render started from the inspector left its progress and
+  Cancel out of view.
+Removing a fix fails its check: a fixed width at 320 px, the forced-colour
+ring, and the header and inspector word-split rules. Ten committed DOM tests
+cover long names, full errors, ramp extremes, progress labelling, and focus.
+785 frontend tests, 776 layout and 140 comparison checks, Chromium export
+sections a–i, 58 desktop interaction checks, forced-colour and focus checks,
+and the real app's 64 smoke checks pass. Firefox and WebKit were not run, by
+user decision. Also not exercised:
+- native OS dialogs, screen readers, real OS text-size settings, and real
+  browser zoom;
+- macOS 11–13, Windows, and Linux;
+- the Safari/WKWebView 14.1 and Chrome 100 floor engines.
 
 ### 8.1 Run final checks in CI only
 

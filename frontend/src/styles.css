@@ -7,7 +7,7 @@
 :root {
   color-scheme: dark;
   font-family: 'Segoe UI Variable', 'SF Pro Display', system-ui, sans-serif;
-  font-size: 16px;
+  font-size: 100%;
   font-synthesis: none;
   /* One source of values: raw palette per theme; role tokens below map to them. */
   --dark-base: #0e1118;
@@ -269,10 +269,14 @@ button:disabled {
   max-width: 100%;
 }
 .theme-choice .mode-options {
+  display: flex;
+  flex-wrap: wrap;
   gap: 6px;
 }
 .theme-choice .mode-option {
-  min-width: 0;
+  flex: 1 1 0;
+  flex-wrap: nowrap;
+  min-width: min-content;
   padding: 0 12px;
   font-size: 0.9rem;
 }
@@ -333,10 +337,14 @@ h2 {
   border-radius: 6px;
 }
 .view-toggle .mode-options {
+  display: flex;
+  flex-wrap: wrap;
   gap: 3px;
 }
 .view-toggle .mode-option {
-  min-width: 0;
+  flex: 1 1 0;
+  flex-wrap: nowrap;
+  min-width: min-content;
   min-height: 44px;
   padding: 6px 11px;
   border-color: transparent;
@@ -888,6 +896,8 @@ a.button {
 }
 .mode-option {
   display: flex;
+  flex-wrap: wrap;
+  overflow-wrap: break-word;
   min-height: 44px;
   align-items: center;
   justify-content: center;
@@ -989,14 +999,20 @@ a.button {
   margin-top: 4px;
 }
 .colour-controls {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  display: flex;
+  flex-wrap: wrap;
   gap: 12px;
-  align-items: start;
+  align-items: flex-start;
 }
 .colour-picker,
 .colour-hex {
   min-width: 0;
+}
+.colour-picker {
+  flex: 0 1 auto;
+}
+.colour-hex {
+  flex: 1 1 8rem;
 }
 .colour-picker .field-label,
 .colour-hex .field-label {
@@ -1017,6 +1033,12 @@ a.button {
 }
 .format-options {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.inspector .mode-options {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 5.25rem), 1fr));
+}
+.inspector .mode-options.segmented-columns-3 {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 4.375rem), 1fr));
 }
 .check-row {
   display: flex;
@@ -1146,6 +1168,11 @@ a.button {
     border: 3px solid ButtonText;
     padding: 5px 7px;
     font-weight: 700;
+  }
+  .mode-option input {
+    inset: -3px;
+    width: auto;
+    height: auto;
   }
   .choice-cue {
     forced-color-adjust: none;

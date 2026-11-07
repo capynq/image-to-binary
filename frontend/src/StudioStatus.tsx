@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react'
 import { Progress, ErrorMessage } from './ui'
 
 export interface StudioStatusProps {
@@ -9,7 +10,10 @@ export interface StudioStatusProps {
   readonly onChooseAnother: () => void
 }
 
-/** The canvas-level progress row and error panel, each with its visible text and actions. */
+/**
+ * The canvas-level progress row and error panel, each with its visible text and actions. The row is
+ * scrolled into view when work starts, so a render started from the inspector shows its progress.
+ */
 export function StudioStatus({
   busyLabel,
   onCancel,
@@ -17,10 +21,15 @@ export function StudioStatus({
   guidance,
   onChooseAnother,
 }: StudioStatusProps) {
+  const busyRef = useRef<HTMLDivElement>(null)
+  const isBusy = busyLabel !== null
+  useEffect(() => {
+    if (isBusy) busyRef.current?.scrollIntoView?.({ block: 'nearest' })
+  }, [isBusy])
   return (
     <>
       {busyLabel !== null && (
-        <div className="busy-row">
+        <div className="busy-row" ref={busyRef}>
           <Progress label={busyLabel} onCancel={onCancel} />
         </div>
       )}
