@@ -208,7 +208,6 @@ mod tests {
     use super::*;
     use crate::files::dropped::{drop_outcome, DropOutcome};
     use crate::files::test_support::TestDir;
-    use std::fs;
 
     const MARKER: &str = "SECRET-PATH-MARKER";
 
@@ -326,6 +325,7 @@ mod tests {
     #[test]
     fn a_non_utf8_file_is_read_through_its_exact_path_where_the_filesystem_allows_it() {
         use std::ffi::OsStr;
+        use std::fs;
         use std::os::unix::ffi::OsStrExt;
 
         let dir = TestDir::new("mod-non-utf8-disk");

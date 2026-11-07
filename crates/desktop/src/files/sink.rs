@@ -195,7 +195,10 @@ fn create_private(path: &Path) -> io::Result<File> {
 fn prepare_permissions(temp: &Path, destination: &Path) -> io::Result<()> {
     match fs::metadata(destination) {
         Ok(existing) => fs::set_permissions(temp, existing.permissions()),
+        #[cfg(unix)]
         Err(error) if error.kind() == io::ErrorKind::NotFound => set_new_file_permissions(temp),
+        #[cfg(not(unix))]
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     }
 }
@@ -204,11 +207,6 @@ fn prepare_permissions(temp: &Path, destination: &Path) -> io::Result<()> {
 fn set_new_file_permissions(temp: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(temp, fs::Permissions::from_mode(NEW_FILE_MODE))
-}
-
-#[cfg(not(unix))]
-fn set_new_file_permissions(_temp: &Path) -> io::Result<()> {
-    Ok(())
 }
 
 #[cfg(unix)]

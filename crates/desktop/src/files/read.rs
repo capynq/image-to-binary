@@ -4,7 +4,7 @@
 
 #![cfg_attr(not(test), allow(dead_code))]
 
-use std::fs::{self, File, Metadata, OpenOptions};
+use std::fs::{self, File, Metadata};
 use std::io::{self, Read};
 use std::path::Path;
 
@@ -57,6 +57,7 @@ pub(crate) fn read_regular_file(path: &Path, limit: u64) -> Result<Vec<u8>, IpcE
 fn open_for_read(path: &Path) -> io::Result<File> {
     #[cfg(unix)]
     {
+        use std::fs::OpenOptions;
         use std::os::unix::fs::OpenOptionsExt;
         OpenOptions::new()
             .read(true)
@@ -133,7 +134,9 @@ mod tests {
     use std::fs::OpenOptions;
     use std::io::Write;
     use std::path::PathBuf;
+    #[cfg(unix)]
     use std::sync::mpsc::channel;
+    #[cfg(unix)]
     use std::time::Duration;
 
     /// Counts the bytes pulled from the wrapped reader, so a test can see how far a read went.

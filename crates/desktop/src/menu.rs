@@ -190,22 +190,21 @@ fn label(action: MenuAction) -> &'static str {
 
 /// Builds the menu bar: the platform application menu on macOS, then File, Edit, View and Window.
 pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
-    let mut bar = MenuBuilder::new(app);
+    let bar = MenuBuilder::new(app);
     #[cfg(target_os = "macos")]
-    {
-        let application = SubmenuBuilder::new(app, "Image to Binary")
-            .about(None)
-            .separator()
-            .services()
-            .separator()
-            .hide()
-            .hide_others()
-            .show_all()
-            .separator()
-            .quit()
-            .build()?;
-        bar = bar.item(&application);
-    }
+    let application = SubmenuBuilder::new(app, "Image to Binary")
+        .about(None)
+        .separator()
+        .services()
+        .separator()
+        .hide()
+        .hide_others()
+        .show_all()
+        .separator()
+        .quit()
+        .build()?;
+    #[cfg(target_os = "macos")]
+    let bar = bar.item(&application);
     let open = item(app, &OPEN)?;
     let export = item(app, &EXPORT)?;
     let file = SubmenuBuilder::new(app, "File")

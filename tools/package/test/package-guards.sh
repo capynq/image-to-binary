@@ -212,23 +212,46 @@ test_no_overlays_in_repo() {
 }
 check "no tauri overlay config exists in crates/desktop" test_no_overlays_in_repo
 
-# 6. Unavailable exits name their cause.
+# 6. Unavailable exits name their cause. A packaging script reports the first check its host fails:
+# the host OS or architecture when it does not match, otherwise the missing cargo-tauri. The
+# pkg-config stub lets the Linux script reach the cargo-tauri check without installed WebKitGTK.
 test_unavailable_causes() {
+    local host machine macos_cause linux_cause linux_shim
+    host="$(uname -s)"
+    machine="$(uname -m)"
+    linux_shim="$SCRATCH/linux-shim"
+    mkdir -p "$linux_shim"
+    printf '#!/usr/bin/env bash\nexit 0\n' >"$linux_shim/pkg-config"
+    chmod +x "$linux_shim/pkg-config"
+
+    macos_cause="cargo-tauri is not at"
+    if [ "$host" != Darwin ]; then
+        macos_cause="host is $host, not macOS"
+    elif [ "$machine" != arm64 ]; then
+        macos_cause="host is $machine, not arm64"
+    fi
     run_script build-macos.sh "TAURI_CLI=$SCRATCH/no-such-cargo-tauri" "PACKAGE_OUTPUT_ROOT=$SCRATCH/unavailable-macos"
-    [ "$RUN_STATUS" -eq 69 ] || { echo "macos missing cargo-tauri: status $RUN_STATUS" >&2; return 1; }
-    grep -q "^UNAVAILABLE: macos-arm64: cargo-tauri is not at" "$SCRATCH/stderr.txt" \
-        || { echo "macos message does not name the missing cargo-tauri" >&2; return 1; }
+    [ "$RUN_STATUS" -eq 69 ] || { echo "macos: status $RUN_STATUS" >&2; return 1; }
+    grep -q "^UNAVAILABLE: macos-arm64: $macos_cause" "$SCRATCH/stderr.txt" \
+        || { echo "macos message does not name its cause: $macos_cause" >&2; return 1; }
     [ ! -e "$SCRATCH/unavailable-macos" ] || { echo "unavailable run created output" >&2; return 1; }
+
+    linux_cause="cargo-tauri is not at"
+    if [ "$host" != Linux ]; then
+        linux_cause="host is $host, not Linux"
+    elif [ "$machine" != x86_64 ]; then
+        linux_cause="host is $machine, not x86_64"
+    fi
+    run_script build-linux.sh "PATH=$linux_shim:$PATH" "TAURI_CLI=$SCRATCH/no-such-cargo-tauri" "PACKAGE_OUTPUT_ROOT=$SCRATCH/unavailable-linux"
+    [ "$RUN_STATUS" -eq 69 ] || { echo "linux: status $RUN_STATUS" >&2; return 1; }
+    grep -q "^UNAVAILABLE: linux-x86_64: $linux_cause" "$SCRATCH/stderr.txt" \
+        || { echo "linux message does not name its cause: $linux_cause" >&2; return 1; }
+    [ ! -e "$SCRATCH/unavailable-linux" ] || { echo "unavailable linux run created output" >&2; return 1; }
 
     run_script build-windows.sh "PACKAGE_OUTPUT_ROOT=$SCRATCH/unavailable-windows"
     [ "$RUN_STATUS" -eq 69 ] || { echo "windows: status $RUN_STATUS" >&2; return 1; }
-    grep -q "^UNAVAILABLE: windows-x86_64: host is $(uname -s), not Windows" "$SCRATCH/stderr.txt" \
+    grep -q "^UNAVAILABLE: windows-x86_64: host is $host, not Windows" "$SCRATCH/stderr.txt" \
         || { echo "windows message does not name the host" >&2; return 1; }
-
-    run_script build-linux.sh "PACKAGE_OUTPUT_ROOT=$SCRATCH/unavailable-linux"
-    [ "$RUN_STATUS" -eq 69 ] || { echo "linux: status $RUN_STATUS" >&2; return 1; }
-    grep -q "^UNAVAILABLE: linux-x86_64: host is $(uname -s), not Linux" "$SCRATCH/stderr.txt" \
-        || { echo "linux message does not name the host" >&2; return 1; }
 }
 check "unavailable messages name their actual cause" test_unavailable_causes
 
