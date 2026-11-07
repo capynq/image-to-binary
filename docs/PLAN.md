@@ -135,9 +135,11 @@ native targets in CI.
   aspirational reference-hardware targets are cached preview under 100 ms at
   12 MP and under 250 ms at 50 MP; these are not measured yet and are not
   flaky CI gates.
-- Browser checks cover Chromium, Firefox, and WebKit where available. Native
-  checks identify unavailable OS targets explicitly rather than implying they
-  passed.
+- Browser checks run in the already-downloaded Playwright Chromium only, by
+  user decision on 2026-11-07, to limit load on the development machine.
+  Firefox and WebKit are reported as not run, never as passed; earlier
+  evidence from them stays in the validation records. Native checks identify
+  unavailable OS targets explicitly rather than implying they passed.
 - Routing uses fresh-context Luna agents for reads/search/code/docs/tests and
   an independent Luna review. Findings return to the owning agent for fixes and
   retest; the root agent integrates, codes only when delegation is unavailable,
@@ -1784,8 +1786,8 @@ Ordered steps:
    1920, and 2560 widths plus short landscape, DPI, and light/dark cases.
 2. Test 200% text, 320 px reflow, 400% zoom, long names, full errors, ramp
    extrema, loading, exports, dialogs, scrolling, and focus.
-3. Run geometry assertions and screenshots in Chromium, Firefox, and WebKit;
-   mark unavailable native checks explicitly.
+3. Run geometry assertions and screenshots in Chromium; report Firefox and
+   WebKit as not run by decision, and mark unavailable native checks explicitly.
 
 Acceptance checks: all available browser projects pass with no overlap,
 trimming, masked overflow, or unreachable keyboard control; screenshots are
