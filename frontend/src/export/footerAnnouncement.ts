@@ -29,9 +29,9 @@ export interface FooterAnnouncementState {
 }
 
 /**
- * An export start, finish, failure or user cancel is spoken by the export panel, so it keeps the
- * previous label. Import, preview and supersession by a setting or source change are new work and
- * speak their own label.
+ * An export start, finish, failure or user cancel is spoken by the export panel, and an import or
+ * preview error is spoken by its role=alert panel, so both keep the previous label. Import, preview
+ * and supersession by a setting or source change are new work and speak their own label.
  */
 export function nextFooterAnnouncement(
   previous: FooterAnnouncementState,
@@ -41,10 +41,11 @@ export function nextFooterAnnouncement(
   const exportTransition =
     status === 'exporting' ||
     (previous.status === 'exporting' && (exportStatus !== 'idle' || status === 'cancelled'))
+  const spokenByAlert = status === 'error'
   return {
     status,
     exportStatus,
-    label: exportTransition ? previous.label : footerStatusLabel(status),
+    label: exportTransition || spokenByAlert ? previous.label : footerStatusLabel(status),
   }
 }
 

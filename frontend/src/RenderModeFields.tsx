@@ -1,6 +1,7 @@
 import { useId } from 'react'
 import { validateRamp } from './processing/protocol'
 import type { RenderModeName } from './processing/protocol'
+import { SegmentedChoice, TextField } from './ui'
 
 export interface RenderModeFieldsProps {
   readonly mode: RenderModeName
@@ -28,9 +29,9 @@ export function rampProblem(mode: RenderModeName, rampDraft: string): string | n
 }
 
 /**
- * Render mode choice and the custom ramp field. Native radio buttons and a text input keep the
- * controls keyboard operable; the ramp error is linked with `aria-describedby` and announced
- * politely through its live region.
+ * Render mode choice and the custom ramp field. The choice is a native radio group with a
+ * description per mode; the ramp field reports its problem through `TextField`, which links the
+ * error and the visible mode note with `aria-describedby`.
  */
 export function RenderModeFields({
   mode,
@@ -38,61 +39,36 @@ export function RenderModeFields({
   onModeChange,
   onRampDraftChange,
 }: RenderModeFieldsProps) {
-  const groupName = useId()
   const helpId = useId()
   const rampId = useId()
-  const errorId = useId()
   const problem = rampProblem(mode, rampDraft)
-  const describedBy = problem === null ? helpId : `${helpId} ${errorId}`
   return (
-    <fieldset className="mode-fieldset">
-      <legend className="field-label-legend">Render mode</legend>
-      <div className="mode-options">
-        {MODE_OPTIONS.map((option) => (
-          <label
-            key={option.value}
-            className={`mode-option ${mode === option.value ? 'is-selected' : ''}`}
-          >
-            <input
-              type="radio"
-              name={groupName}
-              value={option.value}
-              checked={mode === option.value}
-              aria-describedby={`${groupName}-${option.value}`}
-              onChange={() => onModeChange(option.value)}
-            />
-            <span>{option.label}</span>
-            <span className="visually-hidden" id={`${groupName}-${option.value}`}>
-              {MODE_HELP[option.value]}
-            </span>
-          </label>
-        ))}
-      </div>
+    <>
+      <SegmentedChoice
+        legend="Render mode"
+        options={MODE_OPTIONS.map((option) => ({
+          ...option,
+          description: MODE_HELP[option.value],
+        }))}
+        value={mode}
+        onChange={onModeChange}
+      />
       <p className="field-note" id={helpId}>
         {MODE_HELP[mode]}
       </p>
       {mode === 'ascii' && (
         <div className="ramp-field">
-          <label className="field-label" htmlFor={rampId}>
-            Ramp, least ink first
-          </label>
-          <input
+          <TextField
             id={rampId}
-            className="text-input"
             name="ramp"
-            type="text"
+            label="Ramp, least ink first"
             value={rampDraft}
-            autoComplete="off"
-            spellCheck={false}
-            aria-invalid={problem !== null}
-            aria-describedby={describedBy}
-            onChange={(event) => onRampDraftChange(event.target.value)}
+            onChange={onRampDraftChange}
+            error={problem === null ? null : `Not applied: ${problem}.`}
+            describedBy={helpId}
           />
-          <p className="field-error" id={errorId} aria-live="polite">
-            {problem === null ? '' : `Not applied: ${problem}.`}
-          </p>
         </div>
       )}
-    </fieldset>
+    </>
   )
 }

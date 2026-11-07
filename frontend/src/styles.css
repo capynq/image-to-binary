@@ -9,48 +9,99 @@
   font-family: 'Segoe UI Variable', 'SF Pro Display', system-ui, sans-serif;
   font-size: 16px;
   font-synthesis: none;
-  --base: #0e1118;
-  --surface: #171b23;
-  --panel: #222936;
-  --panel-raised: #2a3342;
-  --text: #f1f4fa;
-  --muted: #b8c0cf;
-  --faint: #818da2;
-  --accent: #7392ff;
-  --accent-strong: #a6b8ff;
-  --border: #303a4b;
-  --focus: #acc0ff;
+  /* One source of values: raw palette per theme; role tokens below map to them. */
+  --dark-base: #0e1118;
+  --dark-surface: #171b23;
+  --dark-panel: #222936;
+  --dark-panel-raised: #2a3342;
+  --dark-text: #f1f4fa;
+  --dark-muted: #b8c0cf;
+  --dark-faint: #939fb3;
+  --dark-accent: #7392ff;
+  --dark-accent-strong: #a6b8ff;
+  --dark-border: #303a4b;
+  --dark-control: #7a88a1;
+  --dark-focus: #acc0ff;
+  --dark-on-accent: #10152a;
+  --dark-danger: #f08a95;
+  --light-base: #f3f5fa;
+  --light-surface: #ffffff;
+  --light-panel: #e9edf5;
+  --light-panel-raised: #dde4f0;
+  --light-text: #182032;
+  --light-muted: #526075;
+  --light-faint: #4f5c73;
+  --light-accent: #244bc5;
+  --light-accent-strong: #18399f;
+  --light-border: #cad2e0;
+  --light-control: #66738a;
+  --light-focus: #244bc5;
+  --light-on-accent: #ffffff;
+  --light-danger: #a51d16;
+  --dark-muted-hc: #d9dfeb;
+  --dark-faint-hc: #b4bdcf;
+  --dark-border-hc: #7d8aa3;
+  --dark-control-hc: #9aa7bd;
+  --light-muted-hc: #2b3649;
+  --light-faint-hc: #3f4b60;
+  --light-border-hc: #66738a;
+  --light-control-hc: #4d5a70;
+  --base: var(--dark-base);
+  --surface: var(--dark-surface);
+  --panel: var(--dark-panel);
+  --panel-raised: var(--dark-panel-raised);
+  --text: var(--dark-text);
+  --muted: var(--dark-muted);
+  --faint: var(--dark-faint);
+  --accent: var(--dark-accent);
+  --accent-strong: var(--dark-accent-strong);
+  --border: var(--dark-border);
+  --control: var(--dark-control);
+  --focus: var(--dark-focus);
+  --on-accent: var(--dark-on-accent);
+  --danger: var(--dark-danger);
+  --dark-well: #0b0f16;
+  --light-well: #0b0f16;
+  --well: var(--dark-well);
 }
 
 :root[data-theme='light'] {
   color-scheme: light;
-  --base: #f3f5fa;
-  --surface: #ffffff;
-  --panel: #e9edf5;
-  --panel-raised: #dde4f0;
-  --text: #182032;
-  --muted: #526075;
-  --faint: #5f6d82;
-  --accent: #244bc5;
-  --accent-strong: #18399f;
-  --border: #cad2e0;
-  --focus: #244bc5;
+  --well: var(--light-well);
+  --base: var(--light-base);
+  --surface: var(--light-surface);
+  --panel: var(--light-panel);
+  --panel-raised: var(--light-panel-raised);
+  --text: var(--light-text);
+  --muted: var(--light-muted);
+  --faint: var(--light-faint);
+  --accent: var(--light-accent);
+  --accent-strong: var(--light-accent-strong);
+  --border: var(--light-border);
+  --control: var(--light-control);
+  --focus: var(--light-focus);
+  --on-accent: var(--light-on-accent);
+  --danger: var(--light-danger);
 }
 
 @media (prefers-color-scheme: light) {
   :root:not([data-theme='dark']) {
     color-scheme: light;
-    --base: #f3f5fa;
-    --surface: #ffffff;
-    --panel: #e9edf5;
-    --panel-raised: #dde4f0;
-    --text: #182032;
-    --muted: #526075;
-    --faint: #5f6d82;
-    --accent: #244bc5;
-    --accent-strong: #18399f;
-    --border: #cad2e0;
-    --focus: #244bc5;
+    --well: var(--light-well);
+    --base: var(--light-base);
+    --surface: var(--light-surface);
+    --panel: var(--light-panel);
+    --panel-raised: var(--light-panel-raised);
+    --text: var(--light-text);
+    --muted: var(--light-muted);
+    --faint: var(--light-faint);
+    --accent: var(--light-accent);
+    --accent-strong: var(--light-accent-strong);
+    --border: var(--light-border);
+    --control: var(--light-control);
+    --focus: var(--light-focus);
+    --on-accent: var(--light-on-accent);
+    --danger: var(--light-danger);
   }
 }
 
@@ -76,12 +127,26 @@ select {
 button {
   color: inherit;
 }
-button:focus-visible,
-input:focus-visible,
-select:focus-visible,
-a:focus-visible {
+button:focus,
+input:focus,
+select:focus,
+a:focus,
+.mode-option input:focus,
+[data-focus-fallback]:focus {
   outline: 3px solid var(--focus);
   outline-offset: 2px;
+}
+.export-section h2:focus,
+[data-focus-fallback]:focus {
+  outline-offset: 4px;
+}
+button:focus:not(:focus-visible),
+input:focus:not(:focus-visible),
+select:focus:not(:focus-visible),
+a:focus:not(:focus-visible),
+.mode-option input:focus:not(:focus-visible),
+[data-focus-fallback]:focus:not(:focus-visible) {
+  outline: none;
 }
 .skip-link {
   position: fixed;
@@ -99,7 +164,9 @@ a:focus-visible {
 }
 
 .app-shell {
+  height: 100vh;
   height: 100dvh;
+  min-height: 100vh;
   min-height: 100dvh;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
@@ -112,6 +179,7 @@ a:focus-visible {
   justify-content: space-between;
   gap: 16px;
   border-bottom: 1px solid var(--border);
+  background: var(--surface);
   background: color-mix(in srgb, var(--surface) 86%, transparent);
 }
 .brand {
@@ -142,8 +210,6 @@ a:focus-visible {
   gap: 8px;
 }
 .button,
-.icon-button,
-.view-toggle button,
 .inspector-toggle {
   min-height: 44px;
   border: 1px solid transparent;
@@ -153,21 +219,25 @@ a:focus-visible {
   padding: 9px 15px;
   border-radius: 5px;
   font-weight: 650;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
+}
+.button.is-busy {
+  cursor: progress;
 }
 .button-primary {
   background: var(--accent);
-  color: #10152a;
+  color: var(--on-accent);
   border-color: var(--accent);
-}
-:root[data-theme='light'] .button-primary {
-  color: #ffffff;
 }
 .button-primary:hover {
   background: var(--accent-strong);
 }
 .button-secondary {
   background: var(--panel-raised);
-  border-color: var(--border);
+  border-color: var(--control);
 }
 .button-quiet {
   background: transparent;
@@ -195,42 +265,15 @@ button:disabled {
   border: 0;
 }
 
-.theme-option {
-  display: inline-flex;
-  align-items: center;
+.theme-choice .mode-options {
+  display: flex;
+  flex-wrap: wrap;
   gap: 6px;
-  min-height: 44px;
+}
+.theme-choice .mode-option {
+  min-width: 96px;
   padding: 0 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  color: var(--muted);
-  cursor: pointer;
   font-size: 0.9rem;
-}
-
-.theme-option input {
-  width: 18px;
-  height: 18px;
-  margin: 0;
-}
-
-.theme-option.is-selected {
-  border-color: var(--accent);
-  color: var(--text);
-  background: var(--panel-raised);
-}
-
-.theme-option:has(input:focus-visible) {
-  outline: 3px solid var(--focus);
-  outline-offset: 2px;
-}
-
-.icon-button {
-  width: 44px;
-  border-radius: 5px;
-  background: transparent;
-  border-color: var(--border);
-  font-size: 20px;
 }
 
 .workspace {
@@ -280,20 +323,28 @@ h2 {
   letter-spacing: -0.02em;
 }
 .view-toggle {
+  min-width: 0;
+  margin: 0;
   padding: 3px;
   border: 1px solid var(--border);
   background: var(--surface);
   border-radius: 6px;
 }
-.view-toggle button {
+.view-toggle .mode-options {
+  display: flex;
+  gap: 3px;
+}
+.view-toggle .mode-option {
+  min-height: 44px;
   padding: 6px 11px;
-  border-radius: 3px;
+  border-color: transparent;
   background: transparent;
   color: var(--muted);
 }
-.view-toggle button.is-selected {
+.view-toggle .mode-option.is-selected {
   background: var(--panel-raised);
   color: var(--text);
+  border-color: var(--border);
 }
 .artifact-frame {
   min-width: 0;
@@ -303,7 +354,7 @@ h2 {
   padding: clamp(16px, 3vw, 42px);
   overflow: visible;
   border: 1px solid var(--border);
-  background: #0b0f16;
+  background: var(--well);
 }
 .fixture-preview[data-upscaled='true'] {
   image-rendering: pixelated;
@@ -318,17 +369,6 @@ h2 {
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
-}
-.artifact-output {
-  width: 100%;
-  max-width: 760px;
-  margin: 0;
-  overflow: auto;
-  color: #a6b8ff;
-  font:
-    clamp(0.55rem, 1.1vw, 0.86rem)/1.35 'IBM Plex Mono',
-    monospace;
-  white-space: pre;
 }
 .empty-canvas {
   display: grid;
@@ -376,6 +416,7 @@ h2 {
   min-width: 0;
 }
 .canvas-caption {
+  overflow-wrap: break-word;
   overflow-wrap: anywhere;
 }
 .app-shell.is-dragging::after {
@@ -394,19 +435,7 @@ h2 {
   gap: 8px;
 }
 .busy-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px 14px;
   min-width: 0;
-  color: var(--muted);
-  font-size: 0.9rem;
-}
-.busy-row progress {
-  flex: 0 1 220px;
-  min-width: 0;
-  height: 8px;
-  accent-color: var(--accent);
 }
 .error-panel {
   display: grid;
@@ -414,17 +443,15 @@ h2 {
   gap: 10px;
   min-width: 0;
   padding: 14px 16px;
-  border: 1px solid #e5737e;
+  border: 1px solid var(--danger);
   border-left-width: 4px;
   background: var(--surface);
-}
-:root[data-theme='light'] .error-panel {
-  border-color: #b3261e;
 }
 .error-text,
 .error-guidance {
   max-width: 100%;
   margin: 0;
+  overflow-wrap: break-word;
   overflow-wrap: anywhere;
 }
 .error-text {
@@ -473,12 +500,6 @@ h2 {
   gap: 16px;
   margin-bottom: 22px;
 }
-.section-index {
-  color: var(--faint);
-  font:
-    0.75rem 'IBM Plex Mono',
-    monospace;
-}
 .field-label {
   display: flex;
   justify-content: space-between;
@@ -507,7 +528,7 @@ select {
   width: 100%;
   min-height: 44px;
   padding: 8px 10px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--control);
   border-radius: 4px;
   background: var(--panel);
   color: var(--text);
@@ -538,6 +559,7 @@ select {
   flex: 1 1 11rem;
   min-width: 0;
   margin: 0;
+  overflow-wrap: break-word;
   overflow-wrap: anywhere;
   font:
     0.78rem 'IBM Plex Mono',
@@ -550,10 +572,6 @@ a.button {
   justify-content: center;
   box-sizing: border-box;
   text-decoration: none;
-}
-.export-section h2:focus-visible {
-  outline: 3px solid var(--focus);
-  outline-offset: 4px;
 }
 .export-actions,
 .export-error {
@@ -570,27 +588,6 @@ a.button {
   min-height: 1.5em;
   margin: 0;
 }
-.export-progress-head {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  color: var(--muted);
-  font-size: 0.9rem;
-}
-.export-percent {
-  color: var(--text);
-  font:
-    0.85rem 'IBM Plex Mono',
-    monospace;
-}
-.export-progress {
-  width: 100%;
-  height: 12px;
-  accent-color: var(--accent);
-}
-.export-error .error-text {
-  margin: 0;
-}
 .status-bar {
   min-height: 46px;
   display: flex;
@@ -604,6 +601,7 @@ a.button {
 }
 .status-bar span {
   min-width: 0;
+  overflow-wrap: break-word;
   overflow-wrap: anywhere;
 }
 .status-dot {
@@ -623,6 +621,7 @@ a.button {
 @media (max-width: 1199px) and (min-width: 768px) {
   .app-shell {
     height: auto;
+    min-height: 100vh;
     min-height: 100dvh;
   }
   .workspace {
@@ -660,6 +659,7 @@ a.button {
 @media (max-width: 767px) {
   .app-shell {
     height: auto;
+    min-height: 100vh;
     min-height: 100svh;
     display: block;
   }
@@ -704,27 +704,35 @@ a.button {
 
 @media (prefers-contrast: more) {
   :root {
-    --muted: #d9dfeb;
-    --faint: #b4bdcf;
-    --border: #7d8aa3;
+    --muted: var(--dark-muted-hc);
+    --faint: var(--dark-faint-hc);
+    --border: var(--dark-border-hc);
+    --control: var(--dark-control-hc);
   }
   :root[data-theme='light'] {
-    --muted: #2b3649;
-    --faint: #3f4b60;
-    --border: #66738a;
-  }
-  .button,
-  .icon-button,
-  .view-toggle button,
-  .inspector-toggle,
-  .text-input {
-    border-width: 2px;
+    --muted: var(--light-muted-hc);
+    --faint: var(--light-faint-hc);
+    --border: var(--light-border-hc);
+    --control: var(--light-control-hc);
   }
 }
 
-[data-focus-fallback]:focus-visible {
-  outline: 3px solid var(--focus);
-  outline-offset: 4px;
+@media (prefers-contrast: more) and (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) {
+    --muted: var(--light-muted-hc);
+    --faint: var(--light-faint-hc);
+    --border: var(--light-border-hc);
+    --control: var(--light-control-hc);
+  }
+}
+
+@media (prefers-contrast: more) {
+  .button,
+  .inspector-toggle,
+  .text-input,
+  .mode-option {
+    border-width: 2px;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -735,60 +743,30 @@ a.button {
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
   }
-}
-
-@media (forced-colors: active) {
   .button,
-  .icon-button,
-  .view-toggle button,
-  .inspector-toggle,
-  .text-input,
   .mode-option,
-  .check-row {
-    border: 1px solid ButtonText;
+  .choice-cue,
+  .progress-fill {
+    transition: none;
   }
-  button:focus-visible,
-  input:focus-visible,
-  a:focus-visible,
-  [data-focus-fallback]:focus-visible {
-    outline: 3px solid Highlight;
-  }
-  .button-primary,
-  .status-dot.is-active {
-    forced-color-adjust: auto;
-  }
-  .artifact-frame {
-    border: 2px solid CanvasText;
-  }
-  .error-panel {
-    border: 2px solid CanvasText;
-  }
-  .theme-option,
-  .mode-option,
-  .view-toggle button {
-    border: 1px solid ButtonText;
-  }
-  .theme-option.is-selected,
-  .mode-option.is-selected,
-  .view-toggle button.is-selected {
-    border: 3px solid ButtonText;
-    font-weight: 700;
-  }
-  .app-shell.is-dragging::after {
-    outline-color: Highlight;
+  .progress[data-state='indeterminate'] .progress-fill {
+    animation: none;
+    left: 0;
+    width: 100%;
+    opacity: 0.4;
   }
 }
 
 .field-label-legend {
   display: block;
-  margin: 17px 0 8px;
+  margin: 0 0 8px;
   padding: 0;
   color: var(--muted);
   font-size: 0.85rem;
 }
 .mode-fieldset {
   min-width: 0;
-  margin: 0;
+  margin: 17px 0 0;
   padding: 0;
   border: 0;
 }
@@ -802,27 +780,72 @@ a.button {
   min-height: 44px;
   align-items: center;
   justify-content: center;
+  gap: 6px;
   padding: 8px 10px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--control);
   border-radius: 4px;
   background: var(--panel);
   color: var(--text);
   font-size: 0.85rem;
   text-align: center;
   cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
+}
+.mode-option {
+  position: relative;
 }
 .mode-option input {
   position: absolute;
-  opacity: 0;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  appearance: none;
+  background: transparent;
+  border: 0;
   pointer-events: none;
 }
-.mode-option.is-selected {
-  border-color: var(--accent);
-  box-shadow: inset 0 0 0 1px var(--accent);
+.mode-option.is-disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
-.mode-option:has(input:focus-visible) {
-  outline: 3px solid var(--focus);
-  outline-offset: 2px;
+.mode-option.is-selected {
+  border: 2px solid var(--accent);
+  padding: 7px 9px;
+  font-weight: 650;
+}
+.choice-cue {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 1.15em;
+  height: 1.15em;
+  border: 1px solid var(--faint);
+  border-radius: 50%;
+  color: var(--on-accent);
+  font-size: 0.7rem;
+  font-weight: 800;
+  line-height: 1;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease;
+}
+.choice-cue[data-state='selected'] {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+.choice-check {
+  width: 0.8em;
+  height: 0.8em;
+}
+.segmented-columns-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.segmented-columns-3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 .ramp-field {
   margin-top: 4px;
@@ -831,20 +854,21 @@ a.button {
   width: 100%;
   min-height: 44px;
   padding: 8px 10px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--control);
   border-radius: 4px;
   background: var(--panel);
   color: var(--text);
   font-family: 'IBM Plex Mono', monospace;
 }
 .text-input[aria-invalid='true'] {
-  border-color: #e5737e;
+  border-color: var(--danger);
 }
 .field-error {
   min-height: 1.2em;
   margin: 8px 0 0;
-  color: #e5737e;
+  color: var(--danger);
   font-size: 0.8rem;
+  overflow-wrap: break-word;
   overflow-wrap: anywhere;
 }
 .style-fields {
@@ -872,7 +896,7 @@ a.button {
   width: 56px;
   min-height: 44px;
   padding: 4px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--control);
   border-radius: 4px;
   background: var(--panel);
   cursor: pointer;
@@ -882,11 +906,6 @@ a.button {
 }
 .format-options {
   grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-.choice-options {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
 }
 .check-row {
   display: flex;
@@ -904,9 +923,57 @@ a.button {
   margin: 0;
   accent-color: var(--accent);
 }
-.check-row:has(input:focus-visible) {
-  outline: 3px solid var(--focus);
-  outline-offset: 2px;
+.progress {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+.progress-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 12px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+  overflow-wrap: break-word;
+  overflow-wrap: anywhere;
+}
+.progress-percent {
+  flex: none;
+  color: var(--text);
+  font:
+    0.85rem 'IBM Plex Mono',
+    monospace;
+}
+.progress-track {
+  position: relative;
+  height: 12px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel);
+}
+.progress-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 0;
+  background: var(--accent);
+  transition: width 160ms ease;
+}
+.progress[data-state='indeterminate'] .progress-fill {
+  width: 35%;
+  animation: progress-sweep 1.4s ease-in-out infinite;
+}
+@keyframes progress-sweep {
+  from {
+    left: -35%;
+  }
+  to {
+    left: 100%;
+  }
 }
 
 .range-heading {
@@ -914,4 +981,60 @@ a.button {
   justify-content: space-between;
   align-items: baseline;
   gap: 12px;
+}
+
+.theme-choice,
+.view-toggle {
+  margin: 0;
+}
+
+/* Forced colours last: later base rules at equal specificity would otherwise override the system colours. */
+@media (forced-colors: active) {
+  .button,
+  .inspector-toggle,
+  .text-input,
+  .mode-option,
+  .check-row {
+    border: 1px solid ButtonText;
+  }
+  button:focus,
+  input:focus,
+  a:focus,
+  [data-focus-fallback]:focus {
+    outline: 3px solid Highlight;
+  }
+  button:focus:not(:focus-visible),
+  input:focus:not(:focus-visible),
+  a:focus:not(:focus-visible),
+  [data-focus-fallback]:focus:not(:focus-visible) {
+    outline: none;
+  }
+  .artifact-frame {
+    border: 2px solid CanvasText;
+  }
+  .error-panel {
+    border: 2px solid CanvasText;
+  }
+  .mode-option.is-selected {
+    border: 3px solid ButtonText;
+    padding: 5px 7px;
+    font-weight: 700;
+  }
+  .choice-cue {
+    forced-color-adjust: none;
+    border: 2px solid CanvasText;
+    background: Canvas;
+    color: CanvasText;
+  }
+  .choice-cue[data-state='selected'] {
+    background: Highlight;
+    border-color: Highlight;
+    color: HighlightText;
+  }
+  .progress-track {
+    border: 2px solid CanvasText;
+  }
+  .app-shell.is-dragging::after {
+    outline-color: Highlight;
+  }
 }

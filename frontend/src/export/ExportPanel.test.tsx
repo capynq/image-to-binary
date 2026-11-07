@@ -66,7 +66,7 @@ describe('ExportPanel states', () => {
     expect(html).not.toMatch(/<button[^>]*disabled=""[^>]*>Export PNG/)
     expect(html).not.toContain('aria-describedby')
     expect(html).not.toContain('Download PNG')
-    expect(html).not.toContain('<progress')
+    expect(html).not.toContain('role="progressbar"')
   })
 
   it('idle without a source: disables Export and shows the reason it is linked to', () => {
@@ -83,24 +83,24 @@ describe('ExportPanel states', () => {
 
   it('running: shows a labelled progressbar with percentage text and a Cancel control', () => {
     const html = render({ phase: 'running', progress: 0.42 })
-    expect(html).toContain('<progress')
-    expect(html).toContain('max="100"')
-    expect(html).toContain('value="42"')
-    expect(html).toMatch(/<span class="export-percent">42%<\/span>/)
-    expect(html).toMatch(/<label for="[^"]+">Rendering PNG<\/label>/)
+    expect(html).toContain('role="progressbar"')
+    expect(html).toContain('aria-valuemax="100"')
+    expect(html).toContain('aria-valuenow="42"')
+    expect(html).toMatch(/<span class="progress-percent">42%<\/span>/)
+    expect(html).toMatch(/<span id="[^"]+">Rendering PNG<\/span>/)
     expect(html).toContain('Cancel export')
     expect(html).not.toContain('Export PNG')
     expect(html).toContain('Rendering PNG export.')
   })
 
   it('running: clamps out-of-range progress into 0 to 100 percent', () => {
-    expect(render({ phase: 'running', progress: 1.7 })).toContain('value="100"')
-    expect(render({ phase: 'running', progress: -1 })).toContain('value="0"')
+    expect(render({ phase: 'running', progress: 1.7 })).toContain('aria-valuenow="100"')
+    expect(render({ phase: 'running', progress: -1 })).toContain('aria-valuenow="0"')
   })
 
   it('preparing: shows the completed progress without a Cancel control', () => {
     const html = render({ phase: 'preparing', progress: 1 })
-    expect(html).toContain('value="100"')
+    expect(html).toContain('aria-valuenow="100"')
     expect(html).toContain('Preparing download')
     expect(html).not.toContain('Cancel export')
     expect(html).toContain('Preparing PNG download.')

@@ -253,7 +253,7 @@
     await waitFor(() => metadata().includes('png23x17.png'), 'PNG import for menu checks')
     const settle = () => sleep(250)
     const activeLabel = () => (document.activeElement?.textContent ?? '').trim()
-    const selectedView = () => document.querySelector('.view-toggle button.is-selected')?.textContent.trim() ?? ''
+    const selectedView = () => document.querySelector('.view-toggle label.is-selected')?.textContent.trim() ?? ''
     const menu = {}
     menu.imported = await invoke('smoke_menu_snapshot')
     document.querySelector('input[type="radio"][value="ascii"]').click()

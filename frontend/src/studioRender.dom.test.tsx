@@ -62,6 +62,15 @@ function rampInput(): HTMLInputElement {
   return found
 }
 
+function viewOption(label: string): HTMLInputElement {
+  const found = [...container.querySelectorAll<HTMLLabelElement>('.view-toggle label')].find(
+    (candidate) => candidate.textContent?.trim() === label,
+  )
+  const input = found?.querySelector<HTMLInputElement>('input')
+  if (input === null || input === undefined) throw new Error(`no view option ${label}`)
+  return input
+}
+
 function button(label: string): HTMLButtonElement {
   const found = [...container.querySelectorAll<HTMLButtonElement>('button')].find(
     (candidate) => candidate.textContent?.trim() === label,
@@ -145,16 +154,16 @@ describe('studio render gates and requests', () => {
   it('disables the Artwork tab with a stated reason while the ramp is invalid', () => {
     act(() => radio('ascii').click())
     typeInto(rampInput(), '')
-    const tab = button('Artwork')
+    const tab = viewOption('Artwork')
     expect(tab.disabled).toBe(true)
     const reason = document.getElementById(tab.getAttribute('aria-describedby') ?? '')
     expect(reason?.textContent).toBe('Fix the ramp to show the artwork.')
     act(() => tab.click())
     expect(controller.getSnapshot().status).toBe('ready')
-    expect(button('Original').getAttribute('aria-pressed')).toBe('true')
+    expect(viewOption('Original').checked).toBe(true)
     typeInto(rampInput(), '#')
-    expect(button('Artwork').disabled).toBe(false)
-    expect(button('Artwork').hasAttribute('aria-describedby')).toBe(false)
+    expect(viewOption('Artwork').disabled).toBe(false)
+    expect(viewOption('Artwork').hasAttribute('aria-describedby')).toBe(false)
   })
 
   it('resyncs the ramp field when the applied ramp changes from outside', () => {
@@ -199,7 +208,7 @@ describe('studio render colour gates and style requests', () => {
     expect(button('Render artwork').disabled).toBe(true)
     expect(button('Export PNG').disabled).toBe(true)
     expect(container.textContent).toContain('Fix the colour to enable PNG export.')
-    const tab = button('Artwork')
+    const tab = viewOption('Artwork')
     expect(tab.disabled).toBe(true)
     const reason = document.getElementById(tab.getAttribute('aria-describedby') ?? '')
     expect(reason?.textContent).toBe('Fix the colour to show the artwork.')
@@ -224,7 +233,7 @@ describe('studio render colour gates and style requests', () => {
     expect(field('background').getAttribute('aria-invalid')).toBe('false')
     expect(button('Render artwork').disabled).toBe(false)
     expect(button('Export PNG').disabled).toBe(false)
-    expect(button('Artwork').disabled).toBe(false)
+    expect(viewOption('Artwork').disabled).toBe(false)
   })
 
   it('applies a valid typed colour and lifts the gate', () => {
@@ -232,7 +241,7 @@ describe('studio render colour gates and style requests', () => {
     expect(controller.getSnapshot().settings.foreground).toBe('#ffffff')
     expect(button('Render artwork').disabled).toBe(false)
     expect(button('Export PNG').disabled).toBe(false)
-    expect(button('Artwork').disabled).toBe(false)
+    expect(viewOption('Artwork').disabled).toBe(false)
   })
 
   it('applies a picker colour immediately and keeps the hex field in step', () => {

@@ -1,6 +1,4 @@
 import { useEffect, useId, useRef, useState } from 'react'
-import { RenderModeFields, rampProblem } from './RenderModeFields'
-import { RenderStyleFields, colourProblem } from './RenderStyleFields'
 import { ExportPanel } from './export/ExportPanel'
 import { PreviewImage } from './PreviewImage'
 import { exportFilename } from './export/downloadName'
@@ -8,14 +6,6 @@ import { EXPORT_FORMAT_WORDS } from './export/exportFormats'
 import type { ExportPhase } from './export/exportFocus'
 import { footerStatusLabel, useFooterAnnouncement } from './export/footerAnnouncement'
 import { useExportDownload } from './export/useExportDownload'
-import {
-  MAX_CELL_SIZE,
-  MAX_FONT_SIZE,
-  MAX_THRESHOLD,
-  MIN_CELL_SIZE,
-  MIN_FONT_SIZE,
-  MIN_THRESHOLD,
-} from './processing/bounds'
 import { defaultUrlApi } from './processing/demoAdapter'
 import type { NativeFiles } from './processing/nativeFiles'
 import type { MenuAction, NativeMenu } from './processing/nativeMenu'
@@ -23,7 +13,7 @@ import type { ExportFormat, ExportStatus } from './processing/types'
 import { validateRamp } from './processing/protocol'
 import type { ColorModeName, ColourRole, RenderModeName } from './processing/protocol'
 import type { StudioController } from './state/controller'
-import { IMPORT_ACCEPT, IMPORT_GUIDANCE, formatBytes, useImportFlow } from './useImportFlow'
+import { IMPORT_ACCEPT, IMPORT_GUIDANCE, useImportFlow } from './useImportFlow'
 import { useStudio } from './useStudio'
 import {
   focusReachable,
@@ -35,46 +25,30 @@ import {
 } from './studioActions'
 import type { StudioAction, StudioGates, StudioHandlers } from './studioActions'
 import { syncMenuState } from './processing/nativeMenu'
-
-type Theme = 'dark' | 'light'
-/** The appearance the user chose; `system` follows the operating system and is stored explicitly. */
-type ThemeChoice = 'system' | Theme
+import { Button, SegmentedChoice, StatusRegion } from './ui'
+import type { SegmentedOption } from './ui'
+import {
+  currentSystemTheme,
+  LIGHT_SCHEME_QUERY,
+  readThemeChoice,
+  writeThemeChoice,
+  THEME_COLOUR,
+} from './appearance'
+import type { Theme, ThemeChoice } from './appearance'
+import { EmptyCanvas } from './EmptyCanvas'
+import { MetadataSection } from './MetadataSection'
+import { RenderingSection } from './RenderingSection'
+import type { SizeSetting } from './RenderingSection'
+import { StudioStatus } from './StudioStatus'
+import { rampProblem } from './RenderModeFields'
+import { colourProblem } from './RenderStyleFields'
 
 const DOWNLOAD_URL_API = defaultUrlApi()
-const THEME_CHOICE_KEY = 'image-to-binary-theme-choice'
-const LIGHT_SCHEME_QUERY = '(prefers-color-scheme: light)'
-const THEME_OPTIONS: readonly { readonly value: ThemeChoice; readonly label: string }[] = [
+const THEME_OPTIONS: readonly SegmentedOption<ThemeChoice>[] = [
   { value: 'system', label: 'System' },
   { value: 'light', label: 'Light' },
   { value: 'dark', label: 'Dark' },
 ]
-
-/**
- * The stored appearance choice. Anything missing, unreadable or unknown means `system`. The
- * pre-5.3 key is never read: it was written on every load, so it cannot tell a real choice apart.
- */
-function readThemeChoice(): ThemeChoice {
-  try {
-    const stored = window.localStorage.getItem(THEME_CHOICE_KEY)
-    if (stored === 'light' || stored === 'dark' || stored === 'system') return stored
-  } catch {
-    return 'system'
-  }
-  return 'system'
-}
-
-function writeThemeChoice(choice: ThemeChoice): void {
-  try {
-    window.localStorage.setItem(THEME_CHOICE_KEY, choice)
-  } catch {
-    return
-  }
-}
-
-function currentSystemTheme(): Theme {
-  if (typeof window.matchMedia !== 'function') return 'dark'
-  return window.matchMedia(LIGHT_SCHEME_QUERY).matches ? 'light' : 'dark'
-}
 
 function activeHtmlElement(): HTMLElement | null {
   const active = document.activeElement
@@ -137,7 +111,6 @@ export default function App({ controller, native, menu = null }: AppProps) {
   const [themeChoice, setThemeChoice] = useState<ThemeChoice>(readThemeChoice)
   const [systemTheme, setSystemTheme] = useState<Theme>(currentSystemTheme)
   const theme: Theme = themeChoice === 'system' ? systemTheme : themeChoice
-  const themeGroupName = useId()
   const [exportSettled, setExportSettled] = useState(0)
   const openRef = useRef<HTMLButtonElement>(null)
   const headingRef = useRef<HTMLHeadingElement>(null)
@@ -159,9 +132,10 @@ export default function App({ controller, native, menu = null }: AppProps) {
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
+    const base = getComputedStyle(document.documentElement).getPropertyValue('--base').trim()
     document
       .querySelector('meta[name="theme-color"]')
-      ?.setAttribute('content', theme === 'dark' ? '#0e1118' : '#f3f5fa')
+      ?.setAttribute('content', base === '' ? THEME_COLOUR[theme] : base)
   }, [theme])
 
   const hasSource = snapshot.metadata !== null
@@ -220,8 +194,8 @@ export default function App({ controller, native, menu = null }: AppProps) {
     : exportBlockedBy(snapshot.status, hasSource, draftBlocker, exportFormat)
   const thresholdApplies = settings.mode === 'binary'
 
-  function updateSetting(key: 'cellSize' | 'fontSize' | 'threshold', value: string) {
-    controller.updateSettings({ ...settings, [key]: Number(value) })
+  function updateSetting(key: SizeSetting, value: number) {
+    controller.updateSettings({ ...settings, [key]: value })
   }
 
   function chooseTheme(choice: ThemeChoice) {
@@ -386,6 +360,17 @@ export default function App({ controller, native, menu = null }: AppProps) {
     focusReachable(origin, headingRef.current)
   }, [isBusy, snapshot.status])
 
+  const viewOptions: readonly SegmentedOption<'original' | 'artwork'>[] = [
+    { value: 'original', label: 'Original', disabled: !gates.original },
+    {
+      value: 'artwork',
+      label: 'Artwork',
+      disabled: !gates.artwork,
+      description: draftBlocker === null ? undefined : DRAFT_BLOCK_ARTWORK[draftBlocker],
+    },
+  ]
+  const statusBusyLabel = isBusy && snapshot.status !== 'exporting' ? busyLabel : null
+
   return (
     <div
       className={`app-shell ${flow.dragActive ? 'is-dragging' : ''}`}
@@ -416,33 +401,23 @@ export default function App({ controller, native, menu = null }: AppProps) {
           <span>Image to Binary</span>
         </a>
         <div className="header-actions">
-          <button ref={openRef} className="button button-primary" type="button" onClick={openImage}>
+          <Button ref={openRef} variant="primary" onClick={openImage}>
             Open image
-          </button>
-          <button className="button button-secondary" type="button" onClick={flow.loadDemo}>
+          </Button>
+          <Button variant="secondary" onClick={flow.loadDemo}>
             Load demo
-          </button>
-          <button className="button button-quiet" type="button" onClick={resetStudio}>
+          </Button>
+          <Button variant="quiet" onClick={resetStudio}>
             Reset
-          </button>
-          <fieldset className="theme-choice">
-            <legend className="visually-hidden">Appearance</legend>
-            {THEME_OPTIONS.map((option) => (
-              <label
-                key={option.value}
-                className={`theme-option ${themeChoice === option.value ? 'is-selected' : ''}`}
-              >
-                <input
-                  type="radio"
-                  name={themeGroupName}
-                  value={option.value}
-                  checked={themeChoice === option.value}
-                  onChange={() => chooseTheme(option.value)}
-                />
-                <span>{option.label}</span>
-              </label>
-            ))}
-          </fieldset>
+          </Button>
+          <SegmentedChoice
+            legend="Appearance"
+            legendHidden
+            className="theme-choice"
+            options={THEME_OPTIONS}
+            value={themeChoice}
+            onChange={chooseTheme}
+          />
         </div>
       </header>
 
@@ -456,55 +431,28 @@ export default function App({ controller, native, menu = null }: AppProps) {
                   {isOriginal ? 'Original image' : 'Artwork preview'}
                 </h1>
               </div>
-              <div className="view-toggle" role="group" aria-label="Preview view">
-                <button
-                  type="button"
-                  className={isOriginal ? 'is-selected' : undefined}
-                  aria-pressed={isOriginal}
-                  disabled={!gates.original}
-                  onClick={() => runAction('original')}
-                >
-                  Original
-                </button>
-                <button
-                  type="button"
-                  className={isOriginal ? undefined : 'is-selected'}
-                  aria-pressed={!isOriginal}
-                  disabled={!gates.artwork}
-                  aria-describedby={draftBlocked ? artworkReasonId : undefined}
-                  onClick={() => runAction('artwork')}
-                >
-                  Artwork
-                </button>
-              </div>
+              <SegmentedChoice
+                legend="Preview view"
+                legendHidden
+                className="view-toggle"
+                columns={2}
+                options={viewOptions}
+                value={isOriginal ? 'original' : 'artwork'}
+                onChange={(view) => runAction(view)}
+              />
             </div>
             {draftBlocker !== null && (
               <p className="field-note" id={artworkReasonId}>
                 {DRAFT_BLOCK_ARTWORK[draftBlocker]}
               </p>
             )}
-            {isBusy && snapshot.status !== 'exporting' && (
-              <div className="busy-row">
-                <progress aria-label={busyLabel} />
-                <span>{busyLabel}</span>
-                <button
-                  className="button button-secondary"
-                  type="button"
-                  onClick={() => runAction('cancel')}
-                >
-                  Cancel
-                </button>
-              </div>
-            )}
-            {errorMessage && (
-              <div className="error-panel" role="alert">
-                <p className="error-text">{errorMessage}</p>
-                <p className="error-guidance">{IMPORT_GUIDANCE}</p>
-                <button className="button button-secondary" type="button" onClick={openImage}>
-                  Choose another image
-                </button>
-              </div>
-            )}
+            <StudioStatus
+              busyLabel={statusBusyLabel}
+              onCancel={() => runAction('cancel')}
+              errorMessage={errorMessage}
+              guidance={IMPORT_GUIDANCE}
+              onChooseAnother={openImage}
+            />
           </div>
           <div className={`artifact-frame ${shown ? 'has-fixture' : ''}`}>
             {shown ? (
@@ -515,51 +463,17 @@ export default function App({ controller, native, menu = null }: AppProps) {
                 height={shown.height}
               />
             ) : (
-              <div className="empty-canvas">
-                <span className="empty-glyph" aria-hidden="true">
-                  ▦
-                </span>
-                <p>
-                  {!hasSource
-                    ? 'Open an image or drop one anywhere in this window.'
-                    : isBusy
-                      ? `Preparing the ${viewName}…`
-                      : `The ${viewName} has not been rendered yet.`}
-                </p>
-                {!hasSource && (
-                  <div className="empty-actions">
-                    <button className="button button-primary" type="button" onClick={openImage}>
-                      Open image
-                    </button>
-                    <button
-                      className="button button-secondary"
-                      type="button"
-                      onClick={flow.loadDemo}
-                    >
-                      Load demo
-                    </button>
-                  </div>
-                )}
-                {hasSource && !isBusy && isOriginal && (
-                  <button
-                    className="button button-secondary"
-                    type="button"
-                    onClick={() => flow.selectView('original')}
-                  >
-                    Show original
-                  </button>
-                )}
-                {hasSource && !isBusy && !isOriginal && (
-                  <button
-                    className="button button-secondary"
-                    type="button"
-                    onClick={() => runAction('render')}
-                    disabled={!gates.render}
-                  >
-                    Render artwork
-                  </button>
-                )}
-              </div>
+              <EmptyCanvas
+                hasSource={hasSource}
+                isBusy={isBusy}
+                isOriginal={isOriginal}
+                viewName={viewName}
+                renderEnabled={gates.render}
+                onOpen={openImage}
+                onLoadDemo={flow.loadDemo}
+                onShowOriginal={() => flow.selectView('original')}
+                onRender={() => runAction('render')}
+              />
             )}
           </div>
           <p className="canvas-caption" id={hintId}>
@@ -584,137 +498,29 @@ export default function App({ controller, native, menu = null }: AppProps) {
             <span aria-hidden="true">{inspectorOpen ? '−' : '+'}</span>
           </button>
           <div className="inspector-content" id="inspector-panel">
-            <section className="control-section" aria-labelledby="rendering-heading">
-              <div className="section-heading">
-                <h2 id="rendering-heading">Rendering</h2>
-              </div>
-              <div className="range-heading">
-                <label className="field-label" htmlFor="cell-size">
-                  Cell size
-                </label>
-                <output htmlFor="cell-size">{settings.cellSize}px</output>
-              </div>
-              <input
-                id="cell-size"
-                name="cellSize"
-                autoComplete="off"
-                type="range"
-                min={MIN_CELL_SIZE}
-                max={MAX_CELL_SIZE}
-                value={settings.cellSize}
-                onChange={(event) => updateSetting('cellSize', event.target.value)}
-              />
-              <div className="range-heading">
-                <label className="field-label" htmlFor="font-size">
-                  Font size
-                </label>
-                <output htmlFor="font-size">{settings.fontSize}px</output>
-              </div>
-              <input
-                id="font-size"
-                name="fontSize"
-                autoComplete="off"
-                type="range"
-                min={MIN_FONT_SIZE}
-                max={MAX_FONT_SIZE}
-                value={settings.fontSize}
-                onChange={(event) => updateSetting('fontSize', event.target.value)}
-              />
-              <RenderModeFields
-                mode={settings.mode}
-                rampDraft={rampDraft}
-                onModeChange={updateMode}
-                onRampDraftChange={updateRampDraft}
-              />
-              <div className="range-heading">
-                <label className="field-label" htmlFor="threshold">
-                  Threshold
-                </label>
-                <output htmlFor="threshold">{settings.threshold}</output>
-              </div>
-              <input
-                id="threshold"
-                name="threshold"
-                autoComplete="off"
-                type="range"
-                min={MIN_THRESHOLD}
-                max={MAX_THRESHOLD}
-                value={settings.threshold}
-                disabled={!thresholdApplies}
-                aria-describedby="threshold-note"
-                onChange={(event) => updateSetting('threshold', event.target.value)}
-              />
-              <p className="field-note" id="threshold-note">
-                {thresholdApplies
-                  ? 'The threshold splits cells into 0 and 1 in classic binary mode.'
-                  : 'The threshold has no effect in ASCII or block mode.'}
-              </p>
-              <RenderStyleFields
-                settings={settings}
-                foregroundDraft={foregroundDraft}
-                backgroundDraft={backgroundDraft}
-                onColourChange={updateColour}
-                onColourDraftChange={updateColourDraft}
-                onColorModeChange={updateColorMode}
-                onContrastChange={updateContrast}
-                onInvertChange={updateInvert}
-              />
-              <button
-                className="button button-primary button-wide"
-                type="button"
-                onClick={() => runAction('render')}
-                disabled={!gates.render}
-              >
-                {snapshot.status === 'processing' ? 'Rendering…' : 'Render artwork'}
-              </button>
-            </section>
-            <section className="control-section" aria-labelledby="metadata-heading">
-              <div className="section-heading">
-                <h2 id="metadata-heading">Metadata</h2>
-              </div>
-              {snapshot.metadata ? (
-                <dl className="metadata-list">
-                  <div>
-                    <dt>Filename</dt>
-                    <dd>{snapshot.metadata.name}</dd>
-                  </div>
-                  <div>
-                    <dt>Dimensions</dt>
-                    <dd>
-                      {snapshot.metadata.width} × {snapshot.metadata.height} px
-                    </dd>
-                  </div>
-                  {snapshot.metadata.inputBytes !== undefined && (
-                    <div>
-                      <dt>File size</dt>
-                      <dd>{formatBytes(snapshot.metadata.inputBytes)}</dd>
-                    </div>
-                  )}
-                  <div>
-                    <dt>Source</dt>
-                    <dd>{snapshot.metadata.source === 'demo' ? 'Built-in demo' : 'Local file'}</dd>
-                  </div>
-                  {snapshot.original && (
-                    <div>
-                      <dt>Original preview</dt>
-                      <dd>
-                        {snapshot.original.width} × {snapshot.original.height} px
-                      </dd>
-                    </div>
-                  )}
-                  {snapshot.preview && (
-                    <div>
-                      <dt>Artwork preview</dt>
-                      <dd>
-                        {snapshot.preview.width} × {snapshot.preview.height} px
-                      </dd>
-                    </div>
-                  )}
-                </dl>
-              ) : (
-                <p className="section-help">Open an image to inspect its metadata.</p>
-              )}
-            </section>
+            <RenderingSection
+              settings={settings}
+              rampDraft={rampDraft}
+              foregroundDraft={foregroundDraft}
+              backgroundDraft={backgroundDraft}
+              thresholdApplies={thresholdApplies}
+              renderEnabled={gates.render}
+              rendering={snapshot.status === 'processing'}
+              onSizeChange={updateSetting}
+              onModeChange={updateMode}
+              onRampDraftChange={updateRampDraft}
+              onColourChange={updateColour}
+              onColourDraftChange={updateColourDraft}
+              onColorModeChange={updateColorMode}
+              onContrastChange={updateContrast}
+              onInvertChange={updateInvert}
+              onRender={() => runAction('render')}
+            />
+            <MetadataSection
+              metadata={snapshot.metadata}
+              original={snapshot.original}
+              preview={snapshot.preview}
+            />
             <ExportPanel
               phase={exportPhase}
               canExport={canExport}
@@ -739,9 +545,7 @@ export default function App({ controller, native, menu = null }: AppProps) {
         <span className={`status-dot ${hasSource ? 'is-active' : ''}`} aria-hidden="true" />
         <span aria-hidden="true">{footerStatusLabel(snapshot.status)}</span>
         <span className="status-note">Images are processed locally in your browser.</span>
-        <span className="visually-hidden" role="status" aria-live="polite">
-          {footerAnnouncement}
-        </span>
+        <StatusRegion className="visually-hidden">{footerAnnouncement}</StatusRegion>
       </footer>
     </div>
   )

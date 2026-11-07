@@ -32,4 +32,9 @@ describe('nextFooterAnnouncement', () => {
     const importing = at('importing', 'idle')
     expect(nextFooterAnnouncement(importing, 'cancelled', 'idle').label).toBe('Operation cancelled')
   })
+
+  it('keeps the previous label on an error, which the role=alert panel announces alone', () => {
+    const importing = at('importing', 'idle')
+    expect(nextFooterAnnouncement(importing, 'error', 'idle').label).toBe(importing.label)
+  })
 })

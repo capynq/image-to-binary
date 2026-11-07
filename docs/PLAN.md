@@ -1950,9 +1950,31 @@ Proposed commit title: `feat: add accessible studio UI primitives`
 
 Completion checklist:
 
-- [ ] Primitive behavior reviewed.
-- [ ] Accessibility tests pass.
-- [ ] Theme and motion variants pass.
+- [x] Primitive behavior reviewed.
+- [x] Accessibility tests pass.
+- [x] Theme and motion variants pass.
+
+Validation: the studio is built from accessible primitives in `frontend/src/ui/`
+(buttons, native radio choices with a check-mark cue, sliders whose value sits
+outside the label, validated text and colour fields, checkbox, inspector
+sections, full-text metadata, determinate and indeterminate progress with
+cancel, status regions, and full-text errors with retry); no modal dialog is
+needed because file dialogs and menus are native. `App.tsx` shrank from 748 to
+550 lines with gates, focus, menus, and shortcuts unchanged. One palette defines
+the light and dark graphite and cobalt values without `light-dark()` or `:has()`
+for the Safari/WKWebView 14.1 and Chrome 100 floor; the system theme applies
+before JavaScript runs, and every text pairing meets 4.5:1 with controls and
+focus rings at 3:1, checked by token tests. Selected options carry a check
+mark and heavier border, and under forced colours they use Highlight and
+HighlightText, verified by pixel sampling against system-colour probes;
+keyboard focus shows a 3 px ring over the whole option while mouse clicks do
+not, and reduced motion removes transitions. 680 frontend tests, Chromium
+export sections a–i, 58 desktop interaction checks, forced-colour and focus
+checks, and the real app's 64 smoke checks pass, with mutations of the cue,
+slider label, error announcement, progress value, theme selector, and focus
+ring caught. The browser HEIF acceptance run was not repeated because its
+reference data was removed; Firefox, WebKit, macOS 11–13, and screen readers
+were not exercised.
 
 ### 7.2 Implement comparison canvas
 

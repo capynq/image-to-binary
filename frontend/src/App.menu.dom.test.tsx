@@ -130,6 +130,15 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+function viewOption(label: string): HTMLInputElement {
+  const found = [...container.querySelectorAll<HTMLLabelElement>('.view-toggle label')].find(
+    (candidate) => candidate.textContent?.trim() === label,
+  )
+  const input = found?.querySelector<HTMLInputElement>('input')
+  if (input === null || input === undefined) throw new Error(`no view option ${label}`)
+  return input
+}
+
 function buttonNamed(label: string): HTMLButtonElement {
   const found = [...container.querySelectorAll<HTMLButtonElement>('button')].find(
     (candidate) => candidate.textContent?.trim() === label,
@@ -418,7 +427,7 @@ describe('focus after a busy phase', () => {
     mount(demoController({ gatePreview: true }), new FakeMenu())
     await controller.loadDemo()
     await flush()
-    const original = buttonNamed('Original')
+    const original = viewOption('Original')
     act(() => original.focus())
     menu.emit('render')
     await flush()
@@ -434,7 +443,7 @@ describe('focus after a busy phase', () => {
     mount(demoController({ gatePreview: true }), new FakeMenu())
     await controller.loadDemo()
     await flush()
-    act(() => buttonNamed('Original').focus())
+    act(() => viewOption('Original').focus())
     menu.emit('render')
     await flush()
     const reset = buttonNamed('Reset')

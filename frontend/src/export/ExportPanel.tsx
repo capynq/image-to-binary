@@ -1,5 +1,13 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { focusReachable } from '../studioActions'
+import {
+  Button,
+  ErrorMessage,
+  InspectorSection,
+  Progress,
+  SegmentedChoice,
+  StatusRegion,
+} from '../ui'
 import type { ExportFormat } from '../processing/types'
 import { formatBytes } from '../useImportFlow'
 import { announceExportPhase } from './exportAnnouncement'
@@ -53,10 +61,7 @@ export function ExportPanel(props: ExportPanelProps) {
     phase,
     text: announceExportPhase(null, phase, byteLength, error, savedName, shown),
   }))
-  const headingId = useId()
   const reasonId = useId()
-  const formatGroupId = useId()
-  const progressId = useId()
   const panelRef = useRef<HTMLElement>(null)
   const headingRef = useRef<HTMLHeadingElement>(null)
   const exportRef = useRef<HTMLButtonElement>(null)
@@ -115,7 +120,6 @@ export function ExportPanel(props: ExportPanelProps) {
     setAnnounced(live)
   }
 
-  const percent = Math.round(Math.min(1, Math.max(0, progress)) * 100)
   const download = phase === 'ready' ? props.download : null
   const shownWords = EXPORT_FORMAT_WORDS[shown]
   const choiceWords = EXPORT_FORMAT_WORDS[choice]
@@ -123,46 +127,42 @@ export function ExportPanel(props: ExportPanelProps) {
   const showsFormatChoice = phase !== 'running' && phase !== 'preparing'
 
   return (
-    <section className="control-section export-section" aria-labelledby={headingId} ref={panelRef}>
-      <div className="section-heading">
-        <h2 id={headingId} ref={headingRef} tabIndex={-1}>
-          Export
-        </h2>
-      </div>
+    <InspectorSection
+      title="Export"
+      className="export-section"
+      sectionRef={panelRef}
+      headingRef={headingRef}
+      focusableHeading
+    >
       <p className="section-help">{choiceWords.help}</p>
 
       {formatChoice !== undefined && showsFormatChoice && (
-        <fieldset className="mode-fieldset format-fieldset">
-          <legend className="field-label-legend">Format</legend>
-          <div className="mode-options format-options">
-            {EXPORT_FORMATS.map((value) => (
-              <label key={value} className={`mode-option ${choice === value ? 'is-selected' : ''}`}>
-                <input
-                  type="radio"
-                  name={formatGroupId}
-                  value={value}
-                  checked={choice === value}
-                  onChange={() => formatChoice(value)}
-                />
-                <span>{EXPORT_FORMAT_WORDS[value].choice}</span>
-              </label>
-            ))}
-          </div>
-        </fieldset>
+        <SegmentedChoice
+          legend="Format"
+          columns={2}
+          className="format-fieldset"
+          optionsClassName="format-options"
+          options={EXPORT_FORMATS.map((value) => ({
+            value,
+            label: EXPORT_FORMAT_WORDS[value].choice,
+          }))}
+          value={choice}
+          onChange={formatChoice}
+        />
       )}
 
       {phase === 'idle' && (
         <div className="export-actions">
-          <button
+          <Button
             ref={exportRef}
-            className="button button-primary button-wide"
-            type="button"
+            variant="primary"
+            wide
             disabled={!canExport}
             aria-describedby={disabledReason === null ? undefined : reasonId}
             onClick={props.onExport}
           >
             Export {choiceWords.name}
-          </button>
+          </Button>
           {disabledReason !== null && (
             <p className="section-help export-reason" id={reasonId}>
               {disabledReason}
@@ -173,28 +173,13 @@ export function ExportPanel(props: ExportPanelProps) {
 
       {(phase === 'running' || phase === 'preparing') && (
         <div className="export-actions">
-          <div className="export-progress-head">
-            <label htmlFor={progressId}>
-              {phase === 'running' ? `Rendering ${shownWords.name}` : 'Preparing download'}
-            </label>
-            <span className="export-percent">{phase === 'preparing' ? 100 : percent}%</span>
-          </div>
-          <progress
-            id={progressId}
-            className="export-progress"
-            max={100}
-            value={phase === 'preparing' ? 100 : percent}
+          <Progress
+            label={phase === 'running' ? `Rendering ${shownWords.name}` : 'Preparing download'}
+            fraction={phase === 'preparing' ? 1 : progress}
+            onCancel={phase === 'running' ? props.onCancel : undefined}
+            cancelLabel="Cancel export"
+            cancelRef={cancelRef}
           />
-          {phase === 'running' && (
-            <button
-              ref={cancelRef}
-              className="button button-secondary button-wide"
-              type="button"
-              onClick={props.onCancel}
-            >
-              Cancel export
-            </button>
-          )}
         </div>
       )}
 
@@ -219,36 +204,34 @@ export function ExportPanel(props: ExportPanelProps) {
               Download {shownWords.name}
             </a>
           )}
-          <button
+          <Button
             ref={againRef}
-            className="button button-secondary button-wide"
-            type="button"
+            variant="secondary"
+            wide
             disabled={!canExport}
             onClick={props.onExport}
           >
             Export again
-          </button>
+          </Button>
         </div>
       )}
 
       {phase === 'failed' && (
-        <div className="error-panel export-error">
-          <p className="error-text">{error ?? `The ${shownWords.name} export failed.`}</p>
-          <button
-            ref={retryRef}
-            className="button button-secondary button-wide"
-            type="button"
-            disabled={!canExport}
-            onClick={props.onExport}
-          >
-            Retry {choiceWords.name} export
-          </button>
+        <div className="export-error">
+          <ErrorMessage
+            announce={false}
+            message={error ?? `The ${shownWords.name} export failed.`}
+            retry={{
+              label: `Retry ${choiceWords.name} export`,
+              onRetry: props.onExport,
+              disabled: !canExport,
+              ref: retryRef,
+            }}
+          />
         </div>
       )}
 
-      <p className="section-help export-status" role="status" aria-live="polite">
-        {live.text}
-      </p>
-    </section>
+      <StatusRegion className="section-help export-status">{live.text}</StatusRegion>
+    </InspectorSection>
   )
 }
