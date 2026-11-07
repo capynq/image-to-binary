@@ -1269,9 +1269,9 @@ Proposed commit title: `test: complete image format coverage`
 
 Completion checklist:
 
-- [ ] Format matrix reviewed.
-- [ ] Pixel-depth/orientation tests pass.
-- [ ] Limit behavior is consistent.
+- [x] Format matrix reviewed.
+- [x] Pixel-depth/orientation tests pass.
+- [x] Limit behavior is consistent.
 
 #### 4.3.1 Verify native format coverage
 
@@ -1325,9 +1325,21 @@ Proposed commit title: `test: complete image format coverage`
 
 Completion checklist:
 
-- [ ] Browser matrix column reviewed.
-- [ ] Browser limit behavior is consistent with native.
-- [ ] Parent 4.3 checklist reflects verified evidence.
+- [x] Browser matrix column reviewed.
+- [x] Browser limit behavior is consistent with native.
+- [x] Parent 4.3 checklist reflects verified evidence.
+
+Validation: in Chromium 154 all 56 browser inputs export byte-identically to
+native with equal decoded pixels, and limit rows reject above 50 MP with a typed,
+readable error. The browser keeps the 50 MP limit by decision; a lower browser
+limit is allowed, not required, so its cells are not applicable and the core's
+lowered-limit support stays proven natively. Animated PNG decodes its first
+frame exactly, natively and in the browser. Known risk, accepted: for animated
+WebP with alpha-blended frames, the upstream image-webp compositor returns the
+first frame one level low per opaque channel; a test pins that deviation so an
+upstream fix is noticed, and the cell stays not verified. 151 default-build and
+173 `heif`-build processing tests pass. HEIC 10-bit remains unavailable on this
+host, and Firefox and WebKit were not run by decision.
 
 ### 5.1 Add the Tauri shell
 

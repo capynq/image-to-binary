@@ -762,6 +762,139 @@ fn orientation_six_output_passes_an_exact_product_pixel_limit() {
     assert_dimensions(&decode(&bytes, swapped).unwrap(), HEIGHT, WIDTH);
 }
 
+const ANIMATION_FRAMES: usize = 2;
+
+fn animation_frames() -> (Vec<u8>, Vec<u8>) {
+    let first = as_rgba(Layout::Rgb, &block_pixels(Layout::Rgb, PARTIAL_ALPHAS));
+    let second = first
+        .iter()
+        .enumerate()
+        .map(|(index, &byte)| if index % 4 == 3 { 255 } else { 255 - byte })
+        .collect();
+    (first, second)
+}
+
+fn encode_apng(first: &[u8], second: &[u8]) -> TestResult<Vec<u8>> {
+    let mut output = Vec::new();
+    let mut encoder = png::Encoder::new(&mut output, WIDTH, HEIGHT);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.set_animated(2, 0)?;
+    let mut writer = encoder.write_header()?;
+    writer.write_image_data(first)?;
+    writer.write_image_data(second)?;
+    writer.finish()?;
+    Ok(output)
+}
+
+fn lossless_frame(rgba: &[u8]) -> TestResult<Vec<u8>> {
+    let mut output = Cursor::new(Vec::new());
+    WebPEncoder::new_lossless(&mut output).write_image(rgba, WIDTH, HEIGHT, ExtendedColorType::Rgba8)?;
+    let bytes = output.into_inner();
+    let mut offset = 12;
+    while offset + 8 <= bytes.len() {
+        let size = usize::try_from(u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into()?))?;
+        let padded = size + (size & 1);
+        if &bytes[offset..offset + 4] == b"VP8L" {
+            return Ok(bytes[offset..offset + 8 + padded].to_vec());
+        }
+        offset += 8 + padded;
+    }
+    Err("the lossless WebP encoder wrote no VP8L chunk".into())
+}
+
+fn riff_chunk(fourcc: &[u8; 4], payload: &[u8]) -> TestResult<Vec<u8>> {
+    let mut chunk = fourcc.to_vec();
+    chunk.extend_from_slice(&u32::try_from(payload.len())?.to_le_bytes());
+    chunk.extend_from_slice(payload);
+    if payload.len() % 2 == 1 {
+        chunk.push(0);
+    }
+    Ok(chunk)
+}
+
+fn u24(value: u32) -> [u8; 3] {
+    let bytes = value.to_le_bytes();
+    [bytes[0], bytes[1], bytes[2]]
+}
+
+/// Wraps lossless VP8L frames in the extended WebP container (VP8X, ANIM, one ANMF per frame).
+fn animated_webp(frames: &[Vec<u8>], blend: u8) -> TestResult<Vec<u8>> {
+    let mut canvas = vec![0x12, 0, 0, 0];
+    canvas.extend_from_slice(&u24(WIDTH - 1));
+    canvas.extend_from_slice(&u24(HEIGHT - 1));
+    let mut body = b"WEBP".to_vec();
+    body.extend(riff_chunk(b"VP8X", &canvas)?);
+    body.extend(riff_chunk(b"ANIM", &[0; 6])?);
+    for frame in frames {
+        let mut anmf = Vec::new();
+        anmf.extend_from_slice(&u24(0));
+        anmf.extend_from_slice(&u24(0));
+        anmf.extend_from_slice(&u24(WIDTH - 1));
+        anmf.extend_from_slice(&u24(HEIGHT - 1));
+        anmf.extend_from_slice(&u24(100));
+        anmf.push(blend);
+        anmf.extend_from_slice(frame);
+        body.extend(riff_chunk(b"ANMF", &anmf)?);
+    }
+    let mut output = b"RIFF".to_vec();
+    output.extend_from_slice(&u32::try_from(body.len())?.to_le_bytes());
+    output.extend(body);
+    Ok(output)
+}
+
+#[test]
+fn animated_png_decodes_its_first_frame_and_the_second_frame_is_a_sensitive_control() {
+    let (first, second) = animation_frames();
+    let bytes = encode_apng(&first, &second).unwrap();
+    let frames = image::codecs::png::PngDecoder::new(Cursor::new(bytes.as_slice()))
+        .unwrap()
+        .apng()
+        .unwrap()
+        .into_frames()
+        .collect_frames()
+        .unwrap();
+    assert_eq!(frames.len(), ANIMATION_FRAMES, "the fixture must contain two frames");
+    assert_eq!(frames[1].buffer().as_raw(), &second);
+    let decoded = decode_default(&bytes);
+    assert_dimensions(&decoded, WIDTH, HEIGHT);
+    assert_eq!(decoded.pixels(), first.as_slice(), "APNG must decode to its first frame");
+    assert_ne!(decoded.pixels(), second.as_slice(), "the second frame must differ from the first");
+}
+
+/// The ANMF blend bit set (do not blend): a full-canvas opaque frame is stored as-is.
+const NO_BLEND: u8 = 0x02;
+
+#[test]
+fn animated_webp_without_blending_decodes_its_first_frame_exactly() {
+    let (first, second) = animation_frames();
+    let bytes = animated_webp(&[lossless_frame(&first).unwrap(), lossless_frame(&second).unwrap()], NO_BLEND).unwrap();
+    let frames = image::codecs::webp::WebPDecoder::new(Cursor::new(bytes.as_slice()))
+        .unwrap()
+        .into_frames()
+        .collect_frames()
+        .unwrap();
+    assert_eq!(frames.len(), ANIMATION_FRAMES, "the fixture must contain two frames");
+    assert_eq!(frames[1].buffer().as_raw(), &second);
+    let decoded = decode_default(&bytes);
+    assert_dimensions(&decoded, WIDTH, HEIGHT);
+    assert_eq!(decoded.pixels(), first.as_slice(), "animated WebP must decode to its first frame");
+    assert_ne!(decoded.pixels(), second.as_slice(), "the second frame must differ from the first");
+}
+
+/// Known deviation, pinned: with the alpha-blend flag (the default), the decoder returns the
+/// first frame one level low on each opaque channel. Recorded as a finding in format-coverage.md.
+#[test]
+fn animated_webp_with_alpha_blending_is_within_one_level_of_its_first_frame() {
+    let (first, second) = animation_frames();
+    let bytes = animated_webp(&[lossless_frame(&first).unwrap(), lossless_frame(&second).unwrap()], 0).unwrap();
+    let decoded = decode_default(&bytes);
+    assert_dimensions(&decoded, WIDTH, HEIGHT);
+    assert_rgba_within(decoded.pixels(), &first, 1, "animated WebP alpha-blended first frame");
+    assert_ne!(decoded.pixels(), first.as_slice(), "the deviation is pinned until the decoder changes");
+    assert_ne!(decoded.pixels(), second.as_slice(), "the second frame must differ from the first");
+}
+
 #[cfg(feature = "heif")]
 mod heif_native {
     use super::*;
@@ -1107,3 +1240,4 @@ mod heif_native {
         ));
     }
 }
+

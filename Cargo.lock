@@ -276,6 +276,7 @@ dependencies = [
  "image-to-binary-core",
  "image-to-binary-export",
  "libheif-rs",
+ "png",
  "tiff",
 ]
 
