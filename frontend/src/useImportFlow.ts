@@ -23,7 +23,8 @@ export interface ImportFlow {
   readonly view: PreviewKind
   readonly localError: string | null
   readonly dragActive: boolean
-  openPicker(): void
+  /** Resolves once the picker has settled: at once in the browser, after the dialog in the shell. */
+  openPicker(): Promise<void>
   onInputChange(event: ChangeEvent<HTMLInputElement>): void
   loadDemo(): void
   selectView(kind: PreviewKind): void
@@ -105,14 +106,15 @@ export function useImportFlow(
     [controller, runImport],
   )
 
-  const openPicker = useCallback((): void => {
+  const openPicker = useCallback((): Promise<void> => {
     if (native === null) {
       inputRef.current?.click()
-      return
+      return Promise.resolve()
     }
-    native.openImage().then(
+    return native.openImage().then(
       (file) => {
-        if (file !== null) void runImport(() => importNativeFile(controller, native, file))
+        if (file !== null) return runImport(() => importNativeFile(controller, native, file))
+        return undefined
       },
       (error: unknown) => setLocalError(error instanceof Error ? error.message : String(error)),
     )

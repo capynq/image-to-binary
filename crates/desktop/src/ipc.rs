@@ -5,7 +5,7 @@ use std::sync::Arc;
 use serde::Serialize;
 use tauri::ipc::Channel;
 
-use crate::error::IpcError;
+use crate::error::{ErrorCode, IpcError};
 use crate::files::dialog::{self, NativePicker};
 use crate::files::{FileId, FileRef, FileTable, SinkRef};
 use crate::limits::AppLimits;
@@ -241,6 +241,25 @@ pub(crate) fn echo_binary(
     validate_payload_length(bytes.len(), SMOKE_ECHO_MAX_BYTES)?;
     state.record_echo(bytes);
     Ok(tauri::ipc::Response::new(bytes.clone()))
+}
+
+/// Applies the page's enabled state to the menu bar. The argument is validated by
+/// [`crate::menu::parse_menu_state`] before any item changes, so a malformed state changes nothing.
+///
+/// Failure contract: `invalid_argument` for any shape other than the five required booleans.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+pub(crate) fn set_menu_state(
+    app: tauri::AppHandle,
+    state: serde_json::Value,
+) -> Result<(), IpcError> {
+    let state = crate::menu::parse_menu_state(state)?;
+    crate::menu::apply_state(&app, state).map_err(|error| {
+        IpcError::new(
+            ErrorCode::Internal,
+            format!("the menu could not be updated: {error}"),
+        )
+    })
 }
 
 #[cfg(test)]

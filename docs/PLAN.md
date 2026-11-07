@@ -1525,9 +1525,31 @@ Proposed commit title: `feat: finish desktop interaction and accessibility`
 
 Completion checklist:
 
-- [ ] Menu and shortcut matrix passes.
-- [ ] DPI/theme checks pass where available.
-- [ ] Focus and accessibility review complete.
+- [x] Menu and shortcut matrix passes.
+- [x] DPI/theme checks pass where available.
+- [x] Focus and accessibility review complete.
+
+Validation: the desktop app has native File, Edit, View, and Window menus with
+Open (CmdOrCtrl+O), Export (CmdOrCtrl+E), Original and Artwork (CmdOrCtrl+1 and
+2), Render (CmdOrCtrl+R), and Cancel; the page cancels with Escape outside text
+fields, while the browser keeps its own shortcuts and relies on buttons. Menu
+actions reach the page as events and run through the same gate functions as the
+buttons, read from the controller at action time, so an invalid draft, a missing
+source, or a running export blocks them even if the menu state is stale; the
+page reports enabled state through one strictly validated command, and studio
+items start disabled. Focus returns to the originating or a reachable fallback
+control after dialogs, exports, cancels, resets, busy phases, and menu actions,
+never to body, and the browser's 3.4.5 export focus is unchanged. A three-way
+System, Light, and Dark choice follows live system changes; reduced motion,
+increased contrast, and forced colours are honoured, with selected options
+marked by border weight and not colour alone; every target is at least 44 px.
+The preview stays crisp across device pixel ratios 1, 2, and 3 and fractional
+ratios without changing export bytes. The real app passes 63 smoke checks with
+menu actions dispatched by ID, Chromium passes 58 interaction checks and export
+sections a–i, and root (292), desktop (142 per build), and frontend (629) tests
+pass, with ten mutations of gates, shortcuts, focus, DPI, and listeners caught.
+Real OS menu clicks, a real appearance switch, multi-display moves, Windows,
+Linux, and screen readers were not exercised.
 
 ### 5.4 Build local packages for three operating systems
 

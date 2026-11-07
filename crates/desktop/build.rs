@@ -18,6 +18,7 @@ const APP_COMMANDS: &[&str] = &[
     "export_file",
     "cancel",
     "reset",
+    "set_menu_state",
 ];
 const SMOKE_COMMANDS: &[&str] = &[
     "app_info",
@@ -31,12 +32,15 @@ const SMOKE_COMMANDS: &[&str] = &[
     "export_file",
     "cancel",
     "reset",
+    "set_menu_state",
     "echo_binary",
     "smoke_page",
     "smoke_worker_probe",
     "smoke_queue_open",
     "smoke_queue_save",
     "smoke_e2e",
+    "smoke_menu_action",
+    "smoke_menu_snapshot",
 ];
 /// Permission files generated only for smoke commands. Removing them keeps a default build's
 /// ACL free of smoke identifiers, because stale gitignored files would otherwise be embedded.
@@ -47,6 +51,8 @@ const SMOKE_PERMISSION_FILES: &[&str] = &[
     "smoke_queue_open",
     "smoke_queue_save",
     "smoke_e2e",
+    "smoke_menu_action",
+    "smoke_menu_snapshot",
 ];
 
 fn main() -> Result<(), Box<dyn Error>> {

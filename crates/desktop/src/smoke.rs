@@ -215,6 +215,46 @@ pub(crate) fn smoke_queue_save(
         .push_back(answer);
 }
 
+/// Dispatches one menu id through the same path a real menu selection takes, so the smoke run can
+/// drive menu actions without a pointer. Returns whether the id carried an action.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+pub(crate) fn smoke_menu_action(app: AppHandle, id: String) -> bool {
+    crate::menu::dispatch(&app, &id)
+}
+
+/// Reports the enabled flag of every studio menu item, keyed by item id, so the smoke run can check
+/// what the page last sent through `set_menu_state`.
+///
+/// Failure contract: `internal` when the menu is missing or an item cannot report its state.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+pub(crate) fn smoke_menu_snapshot(app: AppHandle) -> Result<Value, IpcError> {
+    let menu = app
+        .menu()
+        .ok_or_else(|| IpcError::new(ErrorCode::Internal, "the menu bar is not installed"))?;
+    let items = menu.items().map_err(|error| {
+        IpcError::new(
+            ErrorCode::Internal,
+            format!("the menu is unreadable: {error}"),
+        )
+    })?;
+    let mut flags = serde_json::Map::new();
+    for entry in crate::menu::ENTRIES {
+        let Some(item) = crate::menu::find_item(items.clone(), entry.id) else {
+            continue;
+        };
+        let enabled = item.is_enabled().map_err(|error| {
+            IpcError::new(
+                ErrorCode::Internal,
+                format!("the menu state is unreadable: {error}"),
+            )
+        })?;
+        flags.insert(entry.id.to_owned(), Value::Bool(enabled));
+    }
+    Ok(Value::Object(flags))
+}
+
 /// Receives the JSON report of one in-page end-to-end phase.
 #[allow(clippy::needless_pass_by_value)]
 #[tauri::command]

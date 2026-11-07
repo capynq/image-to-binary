@@ -7,6 +7,7 @@ pub mod error;
 mod files;
 mod ipc;
 pub mod limits;
+mod menu;
 mod processing;
 #[cfg(feature = "smoke")]
 mod smoke;
@@ -44,6 +45,10 @@ pub fn run() -> ExitCode {
         .manage(worker)
         .manage(files)
         .manage(processing)
+        .menu(menu::build)
+        .on_menu_event(|app, event| {
+            menu::dispatch(app, event.id().as_ref());
+        })
         .setup(setup);
     #[cfg(feature = "smoke")]
     let builder = builder.invoke_handler(tauri::generate_handler![
@@ -58,12 +63,15 @@ pub fn run() -> ExitCode {
         ipc::export_file,
         ipc::cancel,
         ipc::reset,
+        ipc::set_menu_state,
         ipc::echo_binary,
         smoke::smoke_page,
         smoke::smoke_worker_probe,
         smoke::smoke_queue_open,
         smoke::smoke_queue_save,
         smoke::smoke_e2e,
+        smoke::smoke_menu_action,
+        smoke::smoke_menu_snapshot,
     ]);
     #[cfg(not(feature = "smoke"))]
     let builder = builder.invoke_handler(tauri::generate_handler![
@@ -78,6 +86,7 @@ pub fn run() -> ExitCode {
         ipc::export_file,
         ipc::cancel,
         ipc::reset,
+        ipc::set_menu_state,
     ]);
     let Ok(app) = builder.build(tauri::generate_context!()) else {
         return ExitCode::FAILURE;

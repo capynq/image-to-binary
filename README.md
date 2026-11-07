@@ -15,6 +15,26 @@ browser references, and the largest frame gap during a 1200 by 1200 export is
 18 ms. Real OS dialogs and drag and drop are not automated, and Windows and
 Linux have not been run.
 
+### Desktop keyboard, menus and appearance
+
+The native menu bar (macOS arm64 verified) binds these accelerators, where
+`CmdOrCtrl` is Cmd on macOS:
+
+- `CmdOrCtrl+O` opens an image; `CmdOrCtrl+E` exports; `CmdOrCtrl+1` shows the
+  original and `CmdOrCtrl+2` the artwork; `CmdOrCtrl+R` renders.
+- `Escape` cancels a running job. It is handled by the page, not the menu, and
+  never fires while focus is in a text field, so it cannot take a typed key.
+- Menu accelerators fire while a modifier is held even in text fields, because
+  the menu consumes the key before the field sees it. Typing a plain letter in
+  the ramp field is never intercepted.
+- Windows and Linux shortcut behaviour is unverified. On those systems the
+  webview may claim `Ctrl+R` as a reload before the menu sees it.
+
+The header System, Light and Dark control stores the choice under
+`image-to-binary-theme-choice`, and `System` is stored explicitly. The earlier
+`image-to-binary-theme` key is deliberately not migrated: it was written on every
+load, so it cannot tell a real choice from the default.
+
 ## Rust migration status
 
 The Rust workspace currently provides normalized RGBA8 decoding for six image

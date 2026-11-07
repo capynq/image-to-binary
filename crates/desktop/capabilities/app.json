@@ -14,6 +14,7 @@
     "allow-export-file",
     "allow-cancel",
     "allow-reset",
+    "allow-set-menu-state",
     "core:event:allow-listen",
     "core:event:allow-unlisten"
   ]

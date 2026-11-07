@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react'
+import { focusReachable } from '../studioActions'
 import type { ExportFormat } from '../processing/types'
 import { formatBytes } from '../useImportFlow'
 import { announceExportPhase } from './exportAnnouncement'
@@ -26,6 +27,11 @@ export interface ExportPanelProps {
   readonly shownFormat?: ExportFormat
   readonly onExport: () => void
   readonly onCancel: () => void
+  /**
+   * Bumped by the owner each time an export settles, whatever the outcome. A change moves focus
+   * to the phase's control when focus was lost, so a cancelled save never leaves it on body.
+   */
+  readonly focusRequest?: number
 }
 
 /**
@@ -59,6 +65,7 @@ export function ExportPanel(props: ExportPanelProps) {
   const retryRef = useRef<HTMLButtonElement>(null)
   const againRef = useRef<HTMLButtonElement>(null)
   const previousPhase = useRef<ExportPhase>(phase)
+  const lastFocusRequest = useRef(props.focusRequest)
 
   useEffect(() => {
     const from = previousPhase.current
@@ -71,6 +78,23 @@ export function ExportPanel(props: ExportPanelProps) {
     const insidePanel =
       panelRef.current !== null && active !== null && panelRef.current.contains(active)
     if (!shouldMoveExportFocus(onBody, insidePanel)) return
+    focusExportTarget(target)
+  }, [phase, canExport, savedName])
+
+  useEffect(() => {
+    if (props.focusRequest === lastFocusRequest.current) return
+    lastFocusRequest.current = props.focusRequest
+    const target = exportFocusTarget(phase, canExport, savedName !== null)
+    if (target === null) return
+    const active = document.activeElement
+    const onBody = active === null || active === document.body
+    const insidePanel =
+      panelRef.current !== null && active !== null && panelRef.current.contains(active)
+    if (!shouldMoveExportFocus(onBody, insidePanel)) return
+    focusExportTarget(target)
+  }, [props.focusRequest, phase, canExport, savedName])
+
+  function focusExportTarget(target: ExportFocusTarget): void {
     const elements: Record<ExportFocusTarget, HTMLElement | null> = {
       export: exportRef.current,
       cancel: cancelRef.current,
@@ -79,8 +103,8 @@ export function ExportPanel(props: ExportPanelProps) {
       retry: retryRef.current,
       heading: headingRef.current,
     }
-    elements[target]?.focus()
-  }, [phase, canExport, savedName])
+    focusReachable(elements[target], headingRef.current)
+  }
 
   let live = announced
   if (announced.phase !== phase) {

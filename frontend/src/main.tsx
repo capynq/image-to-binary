@@ -13,10 +13,10 @@ if (!root) {
 
 const studioRoot = createRoot(root)
 
-function show({ controller, native }: AppRuntime): void {
+function show({ controller, native, menu }: AppRuntime): void {
   studioRoot.render(
     <StrictMode>
-      <App controller={controller} native={native} />
+      <App controller={controller} native={native} menu={menu ?? null} />
     </StrictMode>,
   )
 }

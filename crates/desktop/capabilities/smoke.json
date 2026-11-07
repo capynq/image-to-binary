@@ -8,6 +8,8 @@
     "allow-smoke-worker-probe",
     "allow-smoke-queue-open",
     "allow-smoke-queue-save",
-    "allow-smoke-e2e"
+    "allow-smoke-e2e",
+    "allow-smoke-menu-action",
+    "allow-smoke-menu-snapshot"
   ]
 }

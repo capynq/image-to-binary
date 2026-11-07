@@ -2,6 +2,7 @@ import type { AppRuntime } from './runtime'
 import { createNativeProcessingAdapter } from './processing/nativeAdapter'
 import { tauriBridge } from './processing/nativeBridge'
 import { createNativeFiles } from './processing/nativeFiles'
+import { createNativeMenu } from './processing/nativeMenu'
 import { createStudioController } from './state/controller'
 
 /**
@@ -13,5 +14,6 @@ export function createNativeRuntime(): AppRuntime {
   return {
     controller: createStudioController({ adapter: createNativeProcessingAdapter({ bridge }) }),
     native: createNativeFiles(bridge),
+    menu: createNativeMenu(bridge),
   }
 }

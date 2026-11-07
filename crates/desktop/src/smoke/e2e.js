@@ -121,7 +121,7 @@
     setRange('cell-size', 5)
     setRange('font-size', 10)
     await waitFor(
-      () => document.querySelector('label[for="font-size"] output')?.textContent === '10px',
+      () => document.querySelector('output[for="font-size"]')?.textContent === '10px',
       'font setting',
     )
     await invoke('smoke_queue_save', { path: `${cfg.outDir}/large.png` })
@@ -154,7 +154,7 @@
     setRange('cell-size', 6)
     setRange('font-size', 10)
     await waitFor(
-      () => document.querySelector('label[for="font-size"] output')?.textContent === '10px',
+      () => document.querySelector('output[for="font-size"]')?.textContent === '10px',
       'mode font setting',
     )
     document.querySelector('input[type="radio"][value="ascii"]').click()
@@ -249,6 +249,91 @@
     out.saveCancel = { status: status(), alerts: alerts(), errorPanel: document.querySelector('.export-error') !== null }
     headerButton('Reset').click()
     await waitFor(() => document.querySelector('.metadata-list') === null, 'final reset')
+    await openNative(cfg.pngFixture)
+    await waitFor(() => metadata().includes('png23x17.png'), 'PNG import for menu checks')
+    const settle = () => sleep(250)
+    const activeLabel = () => (document.activeElement?.textContent ?? '').trim()
+    const selectedView = () => document.querySelector('.view-toggle button.is-selected')?.textContent.trim() ?? ''
+    const menu = {}
+    menu.imported = await invoke('smoke_menu_snapshot')
+    document.querySelector('input[type="radio"][value="ascii"]').click()
+    const menuRamp = await waitFor(() => document.querySelector('input[name="ramp"]'), 'ASCII ramp for menu checks')
+    setValue(menuRamp, 'café')
+    await waitFor(() => menuRamp.getAttribute('aria-invalid') === 'true', 'invalid ramp for menu checks')
+    await settle()
+    menu.draftSnapshot = await invoke('smoke_menu_snapshot')
+    const blockedStatus = status()
+    const blockedPreview = document.querySelector('img.fixture-preview')?.getAttribute('src') ?? null
+    await invoke('smoke_queue_save', { path: null })
+    menu.blockedDispatched = [
+      await invoke('smoke_menu_action', { id: 'file.export' }),
+      await invoke('smoke_menu_action', { id: 'view.render' }),
+    ]
+    await settle()
+    menu.blocked = {
+      statusUnchanged: status() === blockedStatus,
+      previewUnchanged: (document.querySelector('img.fixture-preview')?.getAttribute('src') ?? null) === blockedPreview,
+    }
+    setValue(menuRamp, ' .:-=+*#%@')
+    await waitFor(() => menuRamp.getAttribute('aria-invalid') === 'false', 'valid ramp restored for menu checks')
+    await settle()
+    menu.validSnapshot = await invoke('smoke_menu_snapshot')
+    document.querySelector('input[type="radio"][value="binary"]').click()
+    await waitFor(() => document.querySelector('input[name="ramp"]') === null, 'classic mode for menu checks')
+    document.activeElement?.blur()
+    await invoke('smoke_menu_action', { id: 'file.export' })
+    await waitFor(() => status() === 'PNG export cancelled.', 'menu export cancelled by the save dialog', 20000)
+    await settle()
+    menu.cancelledSave = { status: status(), focus: activeLabel() }
+    await invoke('smoke_menu_action', { id: 'view.original' })
+    await waitFor(() => selectedView() === 'Original', 'menu original view')
+    menu.original = selectedView()
+    await invoke('smoke_menu_action', { id: 'view.artwork' })
+    await waitFor(() => selectedView() === 'Artwork', 'menu artwork view')
+    menu.artwork = selectedView()
+    await invoke('smoke_menu_action', { id: 'view.render' })
+    await waitFor(previewImage, 'menu render preview')
+    menu.rendered = true
+    await invoke('smoke_queue_open', { path: null })
+    await invoke('smoke_menu_action', { id: 'file.open' })
+    await settle()
+    menu.openCancel = {
+      focusIsBody: document.activeElement === document.body || document.activeElement === null,
+      focus: activeLabel(),
+      metadataKept: metadata().includes('png23x17.png'),
+      alerts: alerts(),
+    }
+    const idleStatus = status()
+    await invoke('smoke_menu_action', { id: 'view.cancel' })
+    await settle()
+    menu.cancelIdle = { unchanged: status() === idleStatus, snapshot: (await invoke('smoke_menu_snapshot'))['view.cancel'] }
+    await invoke('smoke_queue_save', { path: `${cfg.outDir}/menu.png` })
+    document.activeElement?.blur()
+    await invoke('smoke_menu_action', { id: 'file.export' })
+    await waitFor(() => status().startsWith('Saved '), 'menu PNG export to the chosen file')
+    await settle()
+    menu.savedExport = { status: status(), focus: activeLabel() }
+    await openNative(cfg.largeFixture)
+    await waitFor(() => metadata().includes('large1200.png'), 'large import for menu cancel')
+    await waitFor(() => enabledButton('Export PNG') ?? enabledButton('Export again'), 'large import ready to export', 60000)
+    await invoke('smoke_queue_save', { path: `${cfg.outDir}/menu-cancelled.png` })
+    document.activeElement?.blur()
+    await invoke('smoke_menu_action', { id: 'file.export' })
+    await waitFor(() => enabledButton('Cancel export'), 'running export before menu cancel', 10000)
+    const running = await invoke('smoke_menu_snapshot')
+    await invoke('smoke_menu_action', { id: 'view.cancel' })
+    await waitFor(() => status() === 'PNG export cancelled.', 'menu cancel of a running export', 60000)
+    await settle()
+    menu.cancelRunning = {
+      status: status(),
+      exportDisabled: running['file.export'] === false,
+      cancelEnabled: running['view.cancel'] === true,
+      focus: activeLabel(),
+    }
+    headerButton('Reset').click()
+    await waitFor(() => document.querySelector('.metadata-list') === null, 'menu checks reset')
+    menu.resetFocus = activeLabel()
+    out.menu = menu
     out.cspViolations = window.__imageToBinarySmoke?.violations ?? -1
     out.loads = [
       ...performance.getEntriesByType('resource').map((entry) => entry.name),

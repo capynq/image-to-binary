@@ -1,5 +1,6 @@
 import { createWorkerProcessingAdapter } from './processing/browserWorker'
 import type { NativeFiles } from './processing/nativeFiles'
+import type { NativeMenu } from './processing/nativeMenu'
 import { createStudioController } from './state/controller'
 import type { StudioController } from './state/controller'
 
@@ -7,6 +8,8 @@ import type { StudioController } from './state/controller'
 export interface AppRuntime {
   readonly controller: StudioController
   readonly native: NativeFiles | null
+  /** Present only inside the desktop shell, where the menu bar exists. */
+  readonly menu?: NativeMenu | null
 }
 
 /**

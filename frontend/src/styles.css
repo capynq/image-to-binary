@@ -37,6 +37,23 @@
   --focus: #244bc5;
 }
 
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) {
+    color-scheme: light;
+    --base: #f3f5fa;
+    --surface: #ffffff;
+    --panel: #e9edf5;
+    --panel-raised: #dde4f0;
+    --text: #182032;
+    --muted: #526075;
+    --faint: #5f6d82;
+    --accent: #244bc5;
+    --accent-strong: #18399f;
+    --border: #cad2e0;
+    --focus: #244bc5;
+  }
+}
+
 * {
   box-sizing: border-box;
 }
@@ -101,6 +118,7 @@ a:focus-visible {
   display: inline-flex;
   align-items: center;
   gap: 10px;
+  min-height: 44px;
   color: var(--text);
   text-decoration: none;
   font-weight: 660;
@@ -167,6 +185,46 @@ button:disabled {
   cursor: not-allowed;
   opacity: 0.5;
 }
+.theme-choice {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.theme-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.theme-option input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+}
+
+.theme-option.is-selected {
+  border-color: var(--accent);
+  color: var(--text);
+  background: var(--panel-raised);
+}
+
+.theme-option:has(input:focus-visible) {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
 .icon-button {
   width: 44px;
   border-radius: 5px;
@@ -247,6 +305,10 @@ h2 {
   border: 1px solid var(--border);
   background: #0b0f16;
 }
+.fixture-preview[data-upscaled='true'] {
+  image-rendering: pixelated;
+}
+
 .fixture-preview {
   display: block;
   width: 100%;
@@ -640,6 +702,31 @@ a.button {
   }
 }
 
+@media (prefers-contrast: more) {
+  :root {
+    --muted: #d9dfeb;
+    --faint: #b4bdcf;
+    --border: #7d8aa3;
+  }
+  :root[data-theme='light'] {
+    --muted: #2b3649;
+    --faint: #3f4b60;
+    --border: #66738a;
+  }
+  .button,
+  .icon-button,
+  .view-toggle button,
+  .inspector-toggle,
+  .text-input {
+    border-width: 2px;
+  }
+}
+
+[data-focus-fallback]:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 4px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -651,6 +738,21 @@ a.button {
 }
 
 @media (forced-colors: active) {
+  .button,
+  .icon-button,
+  .view-toggle button,
+  .inspector-toggle,
+  .text-input,
+  .mode-option,
+  .check-row {
+    border: 1px solid ButtonText;
+  }
+  button:focus-visible,
+  input:focus-visible,
+  a:focus-visible,
+  [data-focus-fallback]:focus-visible {
+    outline: 3px solid Highlight;
+  }
   .button-primary,
   .status-dot.is-active {
     forced-color-adjust: auto;
@@ -661,8 +763,16 @@ a.button {
   .error-panel {
     border: 2px solid CanvasText;
   }
+  .theme-option,
+  .mode-option,
+  .view-toggle button {
+    border: 1px solid ButtonText;
+  }
+  .theme-option.is-selected,
+  .mode-option.is-selected,
   .view-toggle button.is-selected {
-    border-color: Highlight;
+    border: 3px solid ButtonText;
+    font-weight: 700;
   }
   .app-shell.is-dragging::after {
     outline-color: Highlight;

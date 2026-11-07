@@ -1,7 +1,8 @@
-import { useEffect, useId, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { RenderModeFields, rampProblem } from './RenderModeFields'
 import { RenderStyleFields, colourProblem } from './RenderStyleFields'
 import { ExportPanel } from './export/ExportPanel'
+import { PreviewImage } from './PreviewImage'
 import { exportFilename } from './export/downloadName'
 import { EXPORT_FORMAT_WORDS } from './export/exportFormats'
 import type { ExportPhase } from './export/exportFocus'
@@ -17,25 +18,68 @@ import {
 } from './processing/bounds'
 import { defaultUrlApi } from './processing/demoAdapter'
 import type { NativeFiles } from './processing/nativeFiles'
+import type { MenuAction, NativeMenu } from './processing/nativeMenu'
 import type { ExportFormat, ExportStatus } from './processing/types'
 import { validateRamp } from './processing/protocol'
 import type { ColorModeName, ColourRole, RenderModeName } from './processing/protocol'
 import type { StudioController } from './state/controller'
 import { IMPORT_ACCEPT, IMPORT_GUIDANCE, formatBytes, useImportFlow } from './useImportFlow'
 import { useStudio } from './useStudio'
+import {
+  focusReachable,
+  isFocusLost,
+  menuStateOf,
+  runStudioAction,
+  shortcutAction,
+  studioGates,
+} from './studioActions'
+import type { StudioAction, StudioGates, StudioHandlers } from './studioActions'
+import { syncMenuState } from './processing/nativeMenu'
 
 type Theme = 'dark' | 'light'
+/** The appearance the user chose; `system` follows the operating system and is stored explicitly. */
+type ThemeChoice = 'system' | Theme
 
 const DOWNLOAD_URL_API = defaultUrlApi()
+const THEME_CHOICE_KEY = 'image-to-binary-theme-choice'
+const LIGHT_SCHEME_QUERY = '(prefers-color-scheme: light)'
+const THEME_OPTIONS: readonly { readonly value: ThemeChoice; readonly label: string }[] = [
+  { value: 'system', label: 'System' },
+  { value: 'light', label: 'Light' },
+  { value: 'dark', label: 'Dark' },
+]
 
-function getInitialTheme(): Theme {
+/**
+ * The stored appearance choice. Anything missing, unreadable or unknown means `system`. The
+ * pre-5.3 key is never read: it was written on every load, so it cannot tell a real choice apart.
+ */
+function readThemeChoice(): ThemeChoice {
   try {
-    const storedTheme = window.localStorage.getItem('image-to-binary-theme')
-    if (storedTheme === 'light' || storedTheme === 'dark') return storedTheme
+    const stored = window.localStorage.getItem(THEME_CHOICE_KEY)
+    if (stored === 'light' || stored === 'dark' || stored === 'system') return stored
   } catch {
-    return 'dark'
+    return 'system'
   }
-  return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'
+  return 'system'
+}
+
+function writeThemeChoice(choice: ThemeChoice): void {
+  try {
+    window.localStorage.setItem(THEME_CHOICE_KEY, choice)
+  } catch {
+    return
+  }
+}
+
+function currentSystemTheme(): Theme {
+  if (typeof window.matchMedia !== 'function') return 'dark'
+  return window.matchMedia(LIGHT_SCHEME_QUERY).matches ? 'light' : 'dark'
+}
+
+function activeHtmlElement(): HTMLElement | null {
+  const active = document.activeElement
+  if (!(active instanceof HTMLElement) || active === document.body) return null
+  return active
 }
 
 function exportPhaseOf(status: ExportStatus, hasDownload: boolean): ExportPhase {
@@ -82,13 +126,21 @@ export interface AppProps {
   readonly controller: StudioController
   /** Present only inside the desktop shell, where dialogs and drops are native. */
   readonly native: NativeFiles | null
+  /** Present only inside the desktop shell; the menu bar's actions and enabled state. */
+  readonly menu?: NativeMenu | null
 }
 
-export default function App({ controller, native }: AppProps) {
+export default function App({ controller, native, menu = null }: AppProps) {
   const { snapshot } = useStudio(controller)
   const flow = useImportFlow(controller, native)
   const hintId = useId()
-  const [theme, setTheme] = useState<Theme>(getInitialTheme)
+  const [themeChoice, setThemeChoice] = useState<ThemeChoice>(readThemeChoice)
+  const [systemTheme, setSystemTheme] = useState<Theme>(currentSystemTheme)
+  const theme: Theme = themeChoice === 'system' ? systemTheme : themeChoice
+  const themeGroupName = useId()
+  const [exportSettled, setExportSettled] = useState(0)
+  const openRef = useRef<HTMLButtonElement>(null)
+  const headingRef = useRef<HTMLHeadingElement>(null)
   const [inspectorOpen, setInspectorOpen] = useState(true)
   const [rampDraft, setRampDraft] = useState(() => snapshot.settings.ramp)
   const [foregroundDraft, setForegroundDraft] = useState(() => snapshot.settings.foreground)
@@ -98,15 +150,18 @@ export default function App({ controller, native }: AppProps) {
   const artworkReasonId = useId()
 
   useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return undefined
+    const query = window.matchMedia(LIGHT_SCHEME_QUERY)
+    const follow = () => setSystemTheme(query.matches ? 'light' : 'dark')
+    query.addEventListener('change', follow)
+    return () => query.removeEventListener('change', follow)
+  }, [])
+
+  useEffect(() => {
     document.documentElement.dataset.theme = theme
     document
       .querySelector('meta[name="theme-color"]')
       ?.setAttribute('content', theme === 'dark' ? '#0e1118' : '#f3f5fa')
-    try {
-      window.localStorage.setItem('image-to-binary-theme', theme)
-    } catch {
-      return
-    }
   }, [theme])
 
   const hasSource = snapshot.metadata !== null
@@ -158,7 +213,8 @@ export default function App({ controller, native }: AppProps) {
     colourProblem(backgroundDraft, 'background') !== null
   const draftBlocker: DraftBlocker | null = rampBlocked ? 'ramp' : colourBlocked ? 'colour' : null
   const draftBlocked = draftBlocker !== null
-  const canExport = hasSource && !isBusy && !draftBlocked
+  const gates = studioGates({ hasSource, busy: isBusy, draftBlocked })
+  const canExport = gates.export
   const exportBlock = canExport
     ? null
     : exportBlockedBy(snapshot.status, hasSource, draftBlocker, exportFormat)
@@ -166,6 +222,11 @@ export default function App({ controller, native }: AppProps) {
 
   function updateSetting(key: 'cellSize' | 'fontSize' | 'threshold', value: string) {
     controller.updateSettings({ ...settings, [key]: Number(value) })
+  }
+
+  function chooseTheme(choice: ThemeChoice) {
+    setThemeChoice(choice)
+    writeThemeChoice(choice)
   }
 
   function updateMode(mode: RenderModeName) {
@@ -204,15 +265,126 @@ export default function App({ controller, native }: AppProps) {
     controller.updateSettings({ ...settings, invert })
   }
 
-  function renderArtwork() {
-    if (!draftBlocked) flow.renderArtwork()
+  function currentGates(): StudioGates {
+    const current = controller.getSnapshot()
+    const busyNow =
+      current.status === 'importing' ||
+      current.status === 'processing' ||
+      current.status === 'exporting'
+    return studioGates({
+      hasSource: current.metadata !== null,
+      busy: busyNow,
+      draftBlocked: latest.current.draftBlocked,
+    })
   }
 
   function startExport() {
-    if (!canExport) return
+    if (!currentGates().export) return
     setRunFormat(exportFormat)
-    controller.startExport(exportFormat).catch(() => undefined)
+    controller
+      .startExport(exportFormat)
+      .catch(() => undefined)
+      .finally(() => setExportSettled((count) => count + 1))
   }
+
+  /** Opens the picker and returns focus to the control that opened it once the dialog settles. */
+  function openImage() {
+    const origin = activeHtmlElement()
+    void flow.openPicker().finally(() => {
+      focusReachable(origin, openRef.current)
+    })
+  }
+
+  function resetStudio() {
+    flow.reset()
+    focusReachable(openRef.current, headingRef.current)
+  }
+
+  const handlers: StudioHandlers = {
+    open: openImage,
+    export: startExport,
+    original: () => flow.selectView('original'),
+    artwork: () => flow.selectView('artwork'),
+    render: () => flow.renderArtwork(),
+    cancel: () => flow.cancel(),
+  }
+  const latest = useRef({ draftBlocked, handlers })
+  useEffect(() => {
+    latest.current = { draftBlocked, handlers }
+  })
+
+  /**
+   * Gates are read from the controller at the moment of the action, not from the last render, so a
+   * shortcut pressed before React commits the new busy state cannot start a second export.
+   */
+  function runAction(action: StudioAction): boolean {
+    return runStudioAction(action, currentGates(), latest.current.handlers)
+  }
+
+  const menuState = menuStateOf(gates)
+  useEffect(() => {
+    if (menu === null) return undefined
+    return syncMenuState(menu, menuState)
+  }, [
+    menu,
+    menuState.export,
+    menuState.render,
+    menuState.original,
+    menuState.artwork,
+    menuState.cancel,
+  ])
+
+  useEffect(() => {
+    if (menu === null) return undefined
+    let active = true
+    const stops: Array<() => void> = []
+    const onAction = (action: MenuAction) => {
+      if (!active) return
+      const ran = runAction(action)
+      const focusOnBody =
+        document.activeElement === null || document.activeElement === document.body
+      if ((!ran || action !== 'export') && focusOnBody) headingRef.current?.focus()
+    }
+    menu
+      .listen(onAction)
+      .then((stop) => {
+        if (active) stops.push(stop)
+        else stop()
+      })
+      .catch(() => undefined)
+    return () => {
+      active = false
+      for (const stop of stops) stop()
+    }
+  }, [menu, controller])
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.defaultPrevented) return
+      const action = shortcutAction(event)
+      if (action === null) return
+      if (runAction(action)) event.preventDefault()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [controller])
+
+  const wasBusy = useRef(isBusy)
+  const busyOrigin = useRef<HTMLElement | null>(null)
+  const busyWasExport = useRef(false)
+  useEffect(() => {
+    const previous = wasBusy.current
+    wasBusy.current = isBusy
+    if (!previous && isBusy) {
+      busyOrigin.current = activeHtmlElement()
+      busyWasExport.current = snapshot.status === 'exporting'
+    }
+    if (!previous || isBusy) return
+    const origin = busyOrigin.current
+    busyOrigin.current = null
+    if (busyWasExport.current || !isFocusLost(document.activeElement)) return
+    focusReachable(origin, headingRef.current)
+  }, [isBusy, snapshot.status])
 
   return (
     <div
@@ -244,23 +416,33 @@ export default function App({ controller, native }: AppProps) {
           <span>Image to Binary</span>
         </a>
         <div className="header-actions">
-          <button className="button button-primary" type="button" onClick={flow.openPicker}>
+          <button ref={openRef} className="button button-primary" type="button" onClick={openImage}>
             Open image
           </button>
           <button className="button button-secondary" type="button" onClick={flow.loadDemo}>
             Load demo
           </button>
-          <button className="button button-quiet" type="button" onClick={flow.reset}>
+          <button className="button button-quiet" type="button" onClick={resetStudio}>
             Reset
           </button>
-          <button
-            className="icon-button"
-            type="button"
-            aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
-            onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-          >
-            <span aria-hidden="true">{theme === 'dark' ? '☼' : '☾'}</span>
-          </button>
+          <fieldset className="theme-choice">
+            <legend className="visually-hidden">Appearance</legend>
+            {THEME_OPTIONS.map((option) => (
+              <label
+                key={option.value}
+                className={`theme-option ${themeChoice === option.value ? 'is-selected' : ''}`}
+              >
+                <input
+                  type="radio"
+                  name={themeGroupName}
+                  value={option.value}
+                  checked={themeChoice === option.value}
+                  onChange={() => chooseTheme(option.value)}
+                />
+                <span>{option.label}</span>
+              </label>
+            ))}
+          </fieldset>
         </div>
       </header>
 
@@ -270,15 +452,17 @@ export default function App({ controller, native }: AppProps) {
             <div className="canvas-toolbar">
               <div>
                 <p className="eyebrow">Artifact workspace</p>
-                <h1 id="canvas-heading">{isOriginal ? 'Original image' : 'Artwork preview'}</h1>
+                <h1 id="canvas-heading" ref={headingRef} tabIndex={-1} data-focus-fallback="true">
+                  {isOriginal ? 'Original image' : 'Artwork preview'}
+                </h1>
               </div>
               <div className="view-toggle" role="group" aria-label="Preview view">
                 <button
                   type="button"
                   className={isOriginal ? 'is-selected' : undefined}
                   aria-pressed={isOriginal}
-                  disabled={!hasSource}
-                  onClick={() => flow.selectView('original')}
+                  disabled={!gates.original}
+                  onClick={() => runAction('original')}
                 >
                   Original
                 </button>
@@ -286,9 +470,9 @@ export default function App({ controller, native }: AppProps) {
                   type="button"
                   className={isOriginal ? undefined : 'is-selected'}
                   aria-pressed={!isOriginal}
-                  disabled={!hasSource || draftBlocked}
+                  disabled={!gates.artwork}
                   aria-describedby={draftBlocked ? artworkReasonId : undefined}
-                  onClick={() => flow.selectView('artwork')}
+                  onClick={() => runAction('artwork')}
                 >
                   Artwork
                 </button>
@@ -303,7 +487,11 @@ export default function App({ controller, native }: AppProps) {
               <div className="busy-row">
                 <progress aria-label={busyLabel} />
                 <span>{busyLabel}</span>
-                <button className="button button-secondary" type="button" onClick={flow.cancel}>
+                <button
+                  className="button button-secondary"
+                  type="button"
+                  onClick={() => runAction('cancel')}
+                >
                   Cancel
                 </button>
               </div>
@@ -312,7 +500,7 @@ export default function App({ controller, native }: AppProps) {
               <div className="error-panel" role="alert">
                 <p className="error-text">{errorMessage}</p>
                 <p className="error-guidance">{IMPORT_GUIDANCE}</p>
-                <button className="button button-secondary" type="button" onClick={flow.openPicker}>
+                <button className="button button-secondary" type="button" onClick={openImage}>
                   Choose another image
                 </button>
               </div>
@@ -320,8 +508,7 @@ export default function App({ controller, native }: AppProps) {
           </div>
           <div className={`artifact-frame ${shown ? 'has-fixture' : ''}`}>
             {shown ? (
-              <img
-                className="fixture-preview"
+              <PreviewImage
                 src={shown.url}
                 alt={isOriginal ? 'Original image' : 'Binary artwork preview'}
                 width={shown.width}
@@ -341,11 +528,7 @@ export default function App({ controller, native }: AppProps) {
                 </p>
                 {!hasSource && (
                   <div className="empty-actions">
-                    <button
-                      className="button button-primary"
-                      type="button"
-                      onClick={flow.openPicker}
-                    >
+                    <button className="button button-primary" type="button" onClick={openImage}>
                       Open image
                     </button>
                     <button
@@ -370,8 +553,8 @@ export default function App({ controller, native }: AppProps) {
                   <button
                     className="button button-secondary"
                     type="button"
-                    onClick={renderArtwork}
-                    disabled={draftBlocked}
+                    onClick={() => runAction('render')}
+                    disabled={!gates.render}
                   >
                     Render artwork
                   </button>
@@ -405,9 +588,12 @@ export default function App({ controller, native }: AppProps) {
               <div className="section-heading">
                 <h2 id="rendering-heading">Rendering</h2>
               </div>
-              <label className="field-label" htmlFor="cell-size">
-                Cell size <output>{settings.cellSize}px</output>
-              </label>
+              <div className="range-heading">
+                <label className="field-label" htmlFor="cell-size">
+                  Cell size
+                </label>
+                <output htmlFor="cell-size">{settings.cellSize}px</output>
+              </div>
               <input
                 id="cell-size"
                 name="cellSize"
@@ -418,9 +604,12 @@ export default function App({ controller, native }: AppProps) {
                 value={settings.cellSize}
                 onChange={(event) => updateSetting('cellSize', event.target.value)}
               />
-              <label className="field-label" htmlFor="font-size">
-                Font size <output>{settings.fontSize}px</output>
-              </label>
+              <div className="range-heading">
+                <label className="field-label" htmlFor="font-size">
+                  Font size
+                </label>
+                <output htmlFor="font-size">{settings.fontSize}px</output>
+              </div>
               <input
                 id="font-size"
                 name="fontSize"
@@ -437,9 +626,12 @@ export default function App({ controller, native }: AppProps) {
                 onModeChange={updateMode}
                 onRampDraftChange={updateRampDraft}
               />
-              <label className="field-label" htmlFor="threshold">
-                Threshold <output>{settings.threshold}</output>
-              </label>
+              <div className="range-heading">
+                <label className="field-label" htmlFor="threshold">
+                  Threshold
+                </label>
+                <output htmlFor="threshold">{settings.threshold}</output>
+              </div>
               <input
                 id="threshold"
                 name="threshold"
@@ -470,8 +662,8 @@ export default function App({ controller, native }: AppProps) {
               <button
                 className="button button-primary button-wide"
                 type="button"
-                onClick={renderArtwork}
-                disabled={!hasSource || isBusy || draftBlocked}
+                onClick={() => runAction('render')}
+                disabled={!gates.render}
               >
                 {snapshot.status === 'processing' ? 'Rendering…' : 'Render artwork'}
               </button>
@@ -536,7 +728,8 @@ export default function App({ controller, native }: AppProps) {
               onFormatChange={setExportFormat}
               shownFormat={runFormat}
               onExport={startExport}
-              onCancel={flow.cancel}
+              onCancel={() => runAction('cancel')}
+              focusRequest={exportSettled}
             />
           </div>
         </aside>

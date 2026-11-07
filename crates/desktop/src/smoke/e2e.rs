@@ -292,6 +292,96 @@ fn check_main(recorder: &mut Recorder, main: &Value, assets: &Assets, scratch: &
     );
 
     check_cancel_and_outputs(recorder, main, scratch);
+    check_menu(recorder, main);
+}
+
+/// The menu phase drives every studio menu item through the smoke-only dispatch path and checks
+/// the page's response: the enabled state the page sent, the draft and source gates, focus after
+/// cancelled and completed saves, view switches, and cancellation of a running export.
+fn check_menu(recorder: &mut Recorder, main: &Value) {
+    let menu = &main["menu"];
+    let flag = |value: &Value, key: &str| value[key] == json!(true);
+    let imported = &menu["imported"];
+    recorder.check(
+        "e2e_menu_import_enables_studio_items",
+        flag(imported, "file.export")
+            && flag(imported, "view.render")
+            && flag(imported, "view.original")
+            && flag(imported, "view.artwork")
+            && imported["view.cancel"] == json!(false),
+        format!("imported menu state {imported}"),
+    );
+    let draft = &menu["draftSnapshot"];
+    recorder.check(
+        "e2e_menu_invalid_draft_disables_render_and_export",
+        draft["file.export"] == json!(false)
+            && draft["view.render"] == json!(false)
+            && draft["view.artwork"] == json!(false)
+            && draft["view.original"] == json!(true),
+        format!("draft menu state {draft}"),
+    );
+    recorder.check(
+        "e2e_menu_render_and_export_refused_while_draft_invalid",
+        menu["blockedDispatched"] == json!([true, true])
+            && menu["blocked"]["statusUnchanged"] == json!(true)
+            && menu["blocked"]["previewUnchanged"] == json!(true),
+        format!(
+            "blocked {} dispatched {}",
+            menu["blocked"], menu["blockedDispatched"]
+        ),
+    );
+    recorder.check(
+        "e2e_menu_valid_draft_reenables_export",
+        menu["validSnapshot"]["file.export"] == json!(true),
+        format!("valid menu state {}", menu["validSnapshot"]),
+    );
+    let cancelled = text(&menu["cancelledSave"], "status");
+    let focus = text(&menu["cancelledSave"], "focus");
+    recorder.check(
+        "e2e_menu_cancelled_save_restores_focus_to_export",
+        cancelled == "PNG export cancelled." && focus == "Export PNG",
+        format!("status {cancelled:?} focus {focus:?}"),
+    );
+    recorder.check(
+        "e2e_menu_view_items_switch_views_and_render",
+        text(menu, "original") == "Original"
+            && text(menu, "artwork") == "Artwork"
+            && menu["rendered"] == json!(true),
+        format!("original {} artwork {}", menu["original"], menu["artwork"]),
+    );
+    recorder.check(
+        "e2e_menu_cancelled_open_keeps_source_and_focus_on_a_control",
+        menu["openCancel"]["focusIsBody"] == json!(false)
+            && menu["openCancel"]["metadataKept"] == json!(true)
+            && number(&menu["openCancel"]["alerts"]) == 0,
+        format!("openCancel {}", menu["openCancel"]),
+    );
+    recorder.check(
+        "e2e_menu_cancel_is_a_no_op_while_idle",
+        menu["cancelIdle"]["unchanged"] == json!(true)
+            && menu["cancelIdle"]["snapshot"] == json!(false),
+        format!("cancelIdle {}", menu["cancelIdle"]),
+    );
+    let saved = text(&menu["savedExport"], "status");
+    recorder.check(
+        "e2e_menu_export_saves_and_focuses_export_again",
+        saved.starts_with("Saved ") && text(&menu["savedExport"], "focus") == "Export again",
+        format!("savedExport {}", menu["savedExport"]),
+    );
+    let stopped = &menu["cancelRunning"];
+    recorder.check(
+        "e2e_menu_cancel_stops_running_export",
+        text(stopped, "status") == "PNG export cancelled."
+            && stopped["exportDisabled"] == json!(true)
+            && stopped["cancelEnabled"] == json!(true)
+            && text(stopped, "focus") == "Export PNG",
+        format!("cancelRunning {stopped}"),
+    );
+    recorder.check(
+        "e2e_menu_reset_focus_lands_on_open_image",
+        text(menu, "resetFocus") == "Open image",
+        format!("resetFocus {:?}", text(menu, "resetFocus")),
+    );
 }
 
 /// The ASCII phase drives the mode and the custom ramp through the studio; its preview and PNG
@@ -476,6 +566,7 @@ fn check_cancel_and_outputs(recorder: &mut Recorder, main: &Value, scratch: &Pat
     let expected: BTreeSet<String> = [
         "png.png",
         "large.png",
+        "menu.png",
         "mode-ascii.png",
         "style-mono.png",
         "classic.txt",
