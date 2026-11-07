@@ -2147,9 +2147,33 @@ Proposed commit title: `ci: consolidate migration validation`
 
 Completion checklist:
 
-- [ ] Required CI checks pass.
-- [ ] Unavailable environments are explicit.
-- [ ] No release side effects exist.
+- [x] Required CI checks pass.
+- [x] Unavailable environments are explicit.
+- [x] No release side effects exist.
+
+Validation: five check-only workflows run on every push and pull request:
+- Python baseline;
+- Rust: workspace format, lint, tests and the WASM target; the WASM package
+  and its Node tests; a 1 MP core benchmark smoke that is not a timing gate;
+- Frontend: typecheck, tests, format and build;
+- Desktop: format, lint and tests for the default and smoke features on
+  Linux, macOS and Windows; package guard tests on Linux and macOS; the real
+  app's smoke run under Xvfb on Linux;
+- Repository hygiene: generated outputs are ignored, fixtures, notices and
+  lockfiles are tracked, and the worktree stays clean after builds.
+Every workflow reads contents only, pins actions to full commit SHAs, keeps
+credentials out of checkouts, scopes caches by OS and lockfile, cancels
+superseded runs, and has a timeout; none publishes, deploys, signs or
+releases. The first remote run exposed the first Linux and Windows desktop
+builds: the Linux dialog backend was missing, macOS-only imports failed the
+Windows lint, a package guard test assumed a macOS host, and two file tests
+assumed Unix behaviour. Their fixes made every required job green. Not
+covered by CI:
+- the Chromium browser harnesses, which stay local by decision;
+- the `native-codecs` build;
+- the desktop smoke run on macOS and Windows;
+- packaging and signing, by design;
+- Firefox, WebKit and screen readers.
 
 ### 8.2 Complete README and contributor documentation
 
