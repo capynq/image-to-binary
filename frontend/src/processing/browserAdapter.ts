@@ -2,6 +2,8 @@ import { createDemoImage } from './demoImage'
 import { defaultUrlApi, isDemoFixture, UnsupportedInputError } from './demoAdapter'
 import { createExportAccumulator } from './exportAccumulator'
 import type { ExportAccumulator, ExportAccumulatorOptions } from './exportAccumulator'
+import { startHeifDecode } from './heifDecodeJob'
+import type { DecodedRgba, HeifDecodeJob, HeifDecoderEndpoint } from './heifDecodeJob'
 import { validateEncodedImport } from './protocol'
 import { renderPreviewPng } from './previewRenderer'
 import type { PreviewRenderer } from './previewRenderer'
@@ -11,6 +13,7 @@ import type {
   ImportInput,
   ImportedResult,
   ImportedSource,
+  ImportStageListener,
   PreviewArtifact,
   PreviewKind,
   ProcessingAdapter,
@@ -19,6 +22,7 @@ import type {
   UrlApi,
 } from './types'
 import { validateSettings } from './types'
+import { ProcessingWorkerError } from './workerClient'
 import type { PreviewPixels, ProcessingClient, RgbaImport, SourceHandle } from './workerClient'
 
 export class ExportUnavailableError extends Error {
@@ -34,6 +38,11 @@ export interface BrowserAdapterOptions {
   readonly renderPreview?: PreviewRenderer
   readonly urlApi?: UrlApi
   readonly createDemoImage?: () => RgbaImport
+  /**
+   * Creates one dedicated decoder worker per HEIC/AVIF fallback, which runs only after the
+   * processing worker reports `codec_unavailable`. Omitted, that error propagates unchanged.
+   */
+  readonly createHeifDecoderEndpoint?: () => HeifDecoderEndpoint
 }
 
 interface SourceRecord {
@@ -45,6 +54,7 @@ interface SessionState {
   disposed: boolean
   client: ProcessingClient | null
   readonly sources: WeakMap<ImportedSource, SourceRecord>
+  readonly decodes: Map<number, HeifDecodeJob>
 }
 
 /**
@@ -115,6 +125,49 @@ export function createAdapterWithAccumulator(
       },
     }
   }
+  const cancelDecodes = (state: SessionState): void => {
+    const jobs = [...state.decodes.values()]
+    state.decodes.clear()
+    for (const job of jobs) job.cancel()
+  }
+  const importWithHeifDecoder = async (
+    state: SessionState,
+    file: File,
+    operationId: number,
+    createEndpoint: () => HeifDecoderEndpoint,
+    onStage: ImportStageListener | undefined,
+  ): Promise<ImportedResult> => {
+    onStage?.('heifDecoder')
+    const job = startHeifDecode(file, createEndpoint)
+    state.decodes.set(operationId, job)
+    let decoded: DecodedRgba
+    try {
+      decoded = await job.result
+    } catch (error) {
+      if (state.decodes.get(operationId) === job) state.decodes.delete(operationId)
+      throw error
+    }
+    if (state.decodes.get(operationId) !== job) {
+      throw new ProcessingWorkerError('cancelled', 'HEIC and AVIF decoding was cancelled.')
+    }
+    state.decodes.delete(operationId)
+    const handle = await clientOf(state).importRgba(
+      {
+        name: file.name,
+        width: decoded.width,
+        height: decoded.height,
+        pixels: decoded.pixels,
+      },
+      operationId,
+    )
+    return retain(state, handle, {
+      name: handle.name,
+      width: handle.width,
+      height: handle.height,
+      source: 'file',
+      inputBytes: file.size,
+    })
+  }
   const createArtifact = async (pixels: PreviewPixels): Promise<PreviewArtifact> => {
     const blob = await renderPreview(pixels)
     const url = urlApi.createObjectURL(blob)
@@ -139,10 +192,11 @@ export function createAdapterWithAccumulator(
         disposed: false,
         client: null,
         sources: new WeakMap<ImportedSource, SourceRecord>(),
+        decodes: new Map<number, HeifDecodeJob>(),
       })
       return session
     },
-    async import(session, input, context): Promise<ImportedResult> {
+    async import(session, input, context, onStage?: ImportStageListener): Promise<ImportedResult> {
       const state = assertSession(session)
       assertActive(state)
       if (isDemoFixture(input)) {
@@ -162,10 +216,17 @@ export function createAdapterWithAccumulator(
       const inputBytes = file.size
       const invalid = validateEncodedImport(name, inputBytes)
       if (invalid !== null) throw new RangeError(invalid.message)
-      const handle = await clientOf(state).importEncoded(
-        async () => ({ name, bytes: await file.arrayBuffer() }),
-        context.operationId,
-      )
+      let handle: SourceHandle
+      try {
+        handle = await clientOf(state).importEncoded(
+          async () => ({ name, bytes: await file.arrayBuffer() }),
+          context.operationId,
+        )
+      } catch (error) {
+        const createEndpoint = options.createHeifDecoderEndpoint
+        if (!isCodecUnavailable(error) || createEndpoint === undefined) throw error
+        return importWithHeifDecoder(state, file, context.operationId, createEndpoint, onStage)
+      }
       return retain(state, handle, {
         name: handle.name,
         width: handle.width,
@@ -237,7 +298,13 @@ export function createAdapterWithAccumulator(
       }
     },
     cancel(session, operationId): void {
-      assertSession(session).client?.cancel(operationId)
+      const state = assertSession(session)
+      const job = state.decodes.get(operationId)
+      if (job !== undefined) {
+        state.decodes.delete(operationId)
+        job.cancel()
+      }
+      state.client?.cancel(operationId)
     },
     dispose(session): void {
       const state = assertSession(session)
@@ -245,9 +312,14 @@ export function createAdapterWithAccumulator(
       state.disposed = true
       const client = state.client
       state.client = null
+      cancelDecodes(state)
       client?.dispose()
     },
   }
+}
+
+function isCodecUnavailable(error: unknown): boolean {
+  return error instanceof ProcessingWorkerError && error.code === 'codec_unavailable'
 }
 
 /** Narrows an import input to a real `File`; MIME type and extension are never consulted. */

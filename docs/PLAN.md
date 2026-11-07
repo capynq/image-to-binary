@@ -1230,9 +1230,23 @@ Proposed commit title: `feat: add lazy browser HEIF AVIF decoding`
 
 Completion checklist:
 
-- [ ] Browser codec fixtures pass where supported.
-- [ ] Worker lifecycle and cancellation pass.
-- [ ] Startup/memory behavior measured.
+- [x] Browser codec fixtures pass where supported.
+- [x] Worker lifecycle and cancellation pass.
+- [x] Startup/memory behavior measured.
+
+Validation: 345 frontend tests, formatting, type checking and 11 decoder smoke
+cases pass. Chromium 154, WebKit 26.6 and Firefox 156 imported all 13 HEIC and
+AVIF fixtures through a temporary decoder worker with RGBA and classic PNG
+exports byte-identical to native; the worker is terminated after success,
+failure and cancellation, and PNG or JPEG imports start no decoder and fetch no
+codec asset. libheif's Emscripten branch disabled HEVC deblocking and SAO; the
+build now keeps both filters and fails if that upstream code changes. libheif's
+ceiling is twice the caller limit, as natively. In Chromium a HEIC reaches
+preview in a 98 ms median against 67 ms for a PNG; 49 MP HEIC and AVIF decode in
+about 1 s with 452 and 676 MiB of decoder heap under the 1 GiB maximum, and an
+over-50 MP file is rejected in about 0.15 s. There is no decode timeout; Cancel
+always terminates the worker. The LGPL and HEVC distribution review remains a
+human decision.
 
 ### 4.3 Complete format coverage, 8-bit paths, limits, and orientation
 

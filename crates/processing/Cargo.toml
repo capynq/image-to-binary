@@ -23,3 +23,8 @@ image-to-binary-export = { path = "../export" }
 
 [lints]
 workspace = true
+
+[[example]]
+name = "heif_reference"
+path = "examples/heif_reference.rs"
+required-features = ["heif"]

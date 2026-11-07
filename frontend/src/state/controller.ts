@@ -90,6 +90,7 @@ export function createStudioController(options: StudioControllerOptions = {}): S
     progress: 0,
     settings: cloneSettings(options.settings ?? DEFAULT_SETTINGS),
     metadata: null,
+    importStage: null,
     preview: null,
     original: null,
     export: IDLE_EXPORT,
@@ -160,6 +161,7 @@ export function createStudioController(options: StudioControllerOptions = {}): S
     commit(
       {
         ...exportIdleIf(cancelled),
+        importStage: null,
         ...extra,
         generation: operation.generation,
         status,
@@ -189,7 +191,7 @@ export function createStudioController(options: StudioControllerOptions = {}): S
       ownedImport === null || message === ''
         ? message
         : `${message}${separator}Previous image remains available.`
-    commit({ status: 'error', error: text, progress: 0, ...extra }, [])
+    commit({ status: 'error', error: text, progress: 0, importStage: null, ...extra }, [])
   }
 
   /** Swaps the source and clears every source-derived artifact in one commit. */
@@ -204,7 +206,10 @@ export function createStudioController(options: StudioControllerOptions = {}): S
     artifacts.original = null
     ownedImport = next
     readyExport = null
-    commit({ ...patch, preview: null, original: null, export: IDLE_EXPORT }, discards)
+    commit(
+      { ...patch, importStage: null, preview: null, original: null, export: IDLE_EXPORT },
+      discards,
+    )
   }
 
   const importSource = async (input: ImportInput): Promise<void> => {
@@ -214,7 +219,9 @@ export function createStudioController(options: StudioControllerOptions = {}): S
     const operation = beginOperation('importing', 'import')
     let imported: ImportedResult
     try {
-      imported = await adapter.import(session, input, operation)
+      imported = await adapter.import(session, input, operation, (stage) => {
+        if (isCurrent(operation)) commit({ importStage: stage }, [])
+      })
     } catch (error) {
       const current = isCurrent(operation)
       fail(operation, error)
@@ -354,6 +361,7 @@ export function createStudioController(options: StudioControllerOptions = {}): S
           {
             generation: snapshot.generation + 1,
             ...exportIdleIf(cancelled),
+            importStage: null,
             status: 'error',
             error: error instanceof Error ? error.message : String(error),
           },
@@ -370,6 +378,7 @@ export function createStudioController(options: StudioControllerOptions = {}): S
           settings: cloneSettings(settings),
           generation: snapshot.generation + 1,
           status: ownedImport === null ? 'idle' : 'ready',
+          importStage: null,
           preview: null,
           export: IDLE_EXPORT,
           error: null,
@@ -427,6 +436,7 @@ export function createStudioController(options: StudioControllerOptions = {}): S
         {
           generation: snapshot.generation + 1,
           status: 'cancelled',
+          importStage: null,
           progress: 0,
           error: null,
           ...exportIdleIf(cancelled),

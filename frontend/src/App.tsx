@@ -74,7 +74,12 @@ export default function App() {
   const exportFailed = snapshot.export.status === 'failed'
   const errorMessage =
     flow.localError ?? (snapshot.status === 'error' && !exportFailed ? snapshot.error : null)
-  const busyLabel = snapshot.status === 'importing' ? 'Importing image…' : 'Rendering preview…'
+  const busyLabel =
+    snapshot.status !== 'importing'
+      ? 'Rendering preview…'
+      : snapshot.importStage === 'heifDecoder'
+        ? 'Loading HEIC/AVIF decoder…'
+        : 'Importing image…'
   const exportArtifact = snapshot.export.status === 'ready' ? controller.readyExport() : null
   const downloadName = exportFilename(snapshot.metadata?.name ?? '')
   const download = useExportDownload(exportArtifact, downloadName, DOWNLOAD_URL_API)
@@ -252,7 +257,7 @@ export default function App() {
           <p className="canvas-caption" id={hintId}>
             {flow.dragActive
               ? 'Release to open this image.'
-              : 'Drop one BMP, GIF, JPEG, PNG, TIFF or WebP image anywhere in this window, or use Open image.'}
+              : 'Drop one AVIF, BMP, GIF, HEIC, HEIF, JPEG, PNG, TIFF or WebP image anywhere in this window, or use Open image.'}
           </p>
         </section>
 

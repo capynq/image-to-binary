@@ -24,8 +24,16 @@ renders are capped at a 1600-pixel longest edge and reuse the export source
 grid. Glyph-mask cache accounting is bounded to mask payload capacity and
 excludes font, metadata, and external allocations.
 
-HEIC/AVIF decoding, browser adapters, and the native/browser replacement are
-not current guarantees; those remain later migration phases. The Python
+The browser app decodes HEIC, HEIF and AVIF through a lazily loaded decoder
+worker (phase 4.2). That path exists only in builds made with
+`tools/wasm-codecs/build.sh`; other builds report that HEIC and AVIF are not
+available. On the 13 repository HEIC/AVIF fixtures, the browser RGBA and exported
+PNG bytes match the native decoder exactly in Chromium 154.0.8037.0, WebKit 26.6
+and Firefox 156.0, and the Node glue matches on the same fixtures with Node
+v24.15.0. These runs used the local probe `docs/reports/playwright/heif-acceptance.mjs`;
+their JSON reports are local evidence, not a CI gate. Orientation and fixture
+acceptance (phase 4.3) and the native/browser replacement remain later migration
+phases. The Python
 application remains the supported reference UI until the documented acceptance
 gates pass.
 

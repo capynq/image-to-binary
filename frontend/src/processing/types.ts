@@ -49,6 +49,11 @@ export interface ImportedResult {
   dispose(): void
 }
 
+/** Sub-phase of a running import; `heifDecoder` while the lazy HEIC/AVIF worker decodes. */
+export type ImportStage = 'heifDecoder'
+
+export type ImportStageListener = (stage: ImportStage) => void
+
 export interface PreviewSnapshot {
   readonly url: string
   readonly width: number
@@ -62,6 +67,7 @@ export interface StudioSnapshot {
   readonly progress: number
   readonly settings: StudioSettings
   readonly metadata: StudioMetadata | null
+  readonly importStage: ImportStage | null
   readonly preview: PreviewSnapshot | null
   readonly original: PreviewSnapshot | null
   readonly export: ExportSnapshot
@@ -108,6 +114,7 @@ export interface ProcessingAdapter {
     session: ProcessingSession,
     input: ImportInput,
     context: JobContext,
+    onStage?: ImportStageListener,
   ): Promise<ImportedResult>
   preview(
     session: ProcessingSession,

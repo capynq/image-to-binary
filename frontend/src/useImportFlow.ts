@@ -4,10 +4,10 @@ import type { PreviewKind } from './processing/types'
 import type { StudioController } from './state/controller'
 
 export const IMPORT_ACCEPT =
-  '.bmp,.gif,.jpg,.jpeg,.png,.tif,.tiff,.webp,image/bmp,image/gif,image/jpeg,image/png,image/tiff,image/webp'
+  '.avif,.bmp,.gif,.heic,.heif,.jpg,.jpeg,.png,.tif,.tiff,.webp,image/avif,image/bmp,image/gif,image/heic,image/heif,image/jpeg,image/png,image/tiff,image/webp'
 
 export const IMPORT_GUIDANCE =
-  'Use one BMP, GIF, JPEG, PNG, TIFF or WebP image up to 256 MiB and 50 megapixels, with a file name of at most 256 characters.'
+  'Use one AVIF, BMP, GIF, HEIC, HEIF, JPEG, PNG, TIFF or WebP image up to 256 MiB and 50 megapixels, with a file name of at most 256 characters.'
 
 /** Formats an encoded byte count for display using binary units. */
 export function formatBytes(bytes: number): string {

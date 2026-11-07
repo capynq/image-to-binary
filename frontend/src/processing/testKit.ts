@@ -2,6 +2,7 @@ import type { EngineFrame, EngineSession, ProcessingEngine } from './engine'
 import type { PreviewParameters } from './protocol'
 import { createProcessingClient } from './workerClient'
 import type { ClientEndpoint, ProcessingClient, RgbaImport } from './workerClient'
+import type { HeifDecoderEndpoint } from './heifDecodeJob'
 import { createWorkerHost } from './workerHost'
 import type { HostEndpoint, WorkerHost } from './workerHost'
 
@@ -407,4 +408,72 @@ export async function importViaEndpoint(
     height: 1,
   })
   return pending
+}
+
+/**
+ * Fake decoder worker. Events reach listeners only while the endpoint is alive, as in a browser:
+ * `terminate()` detaches every listener, so a late reply is never observed.
+ */
+export class FakeHeifEndpoint implements HeifDecoderEndpoint {
+  terminations = 0
+  postError: Error | null = null
+  readonly requests: unknown[] = []
+  private readonly listeners = new Map<string, Set<(event: Event) => void>>()
+
+  constructor(private readonly onRequest: ((message: unknown) => void) | null = null) {}
+
+  postMessage(message: unknown): void {
+    if (this.postError !== null) throw this.postError
+    this.requests.push(message)
+    this.onRequest?.(message)
+  }
+
+  addEventListener(type: string, listener: (event: Event) => void): void {
+    const set = this.listeners.get(type) ?? new Set<(event: Event) => void>()
+    set.add(listener)
+    this.listeners.set(type, set)
+  }
+
+  removeEventListener(type: string, listener: (event: Event) => void): void {
+    this.listeners.get(type)?.delete(listener)
+  }
+
+  terminate(): void {
+    this.terminations += 1
+    this.listeners.clear()
+  }
+
+  deliver(type: string, event: unknown): void {
+    for (const listener of [...(this.listeners.get(type) ?? [])]) {
+      listener(event as Event)
+    }
+  }
+
+  reply(data: unknown): void {
+    this.deliver('message', { data })
+  }
+
+  crash(): void {
+    this.deliver('error', { message: 'decoder worker crashed' })
+  }
+}
+
+export interface FakeHeifFactory {
+  readonly endpoints: FakeHeifEndpoint[]
+  create(): FakeHeifEndpoint
+}
+
+/** Creates one `FakeHeifEndpoint` per call and records each, so tests can count workers. */
+export function fakeHeifFactory(
+  onRequest: ((message: unknown) => void) | null = null,
+): FakeHeifFactory {
+  const endpoints: FakeHeifEndpoint[] = []
+  return {
+    endpoints,
+    create(): FakeHeifEndpoint {
+      const endpoint = new FakeHeifEndpoint(onRequest)
+      endpoints.push(endpoint)
+      return endpoint
+    },
+  }
 }
