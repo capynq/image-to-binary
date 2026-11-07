@@ -2289,6 +2289,206 @@ Accepted in writing as known risks:
   a follow-up.
 - The old Tkinter interface was never launched in this environment.
 
+## Phase 9: automatic render and animated GIF
+
+User decisions (2026-11-08): artwork renders automatically after a short
+pause in edits; the Render action stays as a manual "render now" override
+(button and Cmd/Ctrl+R). Animated GIF sources play in the studio and export
+as an animated GIF; PNG and text export the frame currently shown. APNG and
+animated WebP keep first-frame decoding.
+
+### 9.1 Keep stale artwork during settings changes
+
+Objective: a settings change keeps the last artwork on screen, marked stale,
+instead of clearing it.
+
+Ordered steps:
+
+1. Add `settingsRevision` and `previewRevision` to the snapshot; stale means
+   they differ.
+2. `updateSettings` supersedes in-flight work but keeps the artwork until a
+   newer one replaces it.
+3. Add a quiet preview that keeps `ready` status and sets `artworkUpdating`;
+   supersede and new operations clear it in the same commit.
+
+Acceptance checks: controller tests cover revisions, stale artwork retention
+and disposal on replacement, quiet preview status, and export consistency.
+
+Proposed commit title: `feat: keep stale artwork while settings change`
+
+Completion checklist:
+
+- [ ] Revisions and stale artwork implemented.
+- [ ] Quiet preview implemented.
+- [ ] Controller tests updated and passing.
+
+### 9.2 Render automatically after edits
+
+Objective: artwork refreshes about 250 ms after the last change without
+blocking the studio.
+
+Ordered steps:
+
+1. Add a trailing-debounce hook keyed on `settingsRevision` that runs a
+   quiet artwork preview when a source exists, status is ready, and no draft
+   is invalid; render artwork automatically after import.
+2. Manual Render and Cmd/Ctrl+R flush immediately; export clears the pending
+   timer; Escape cancels a quiet render and does not re-arm until the next
+   change.
+3. Add an `updating` gate fact (cancel allowed), an "Updating…" live badge
+   with a dimmed stale artwork, and a single busy-status helper.
+
+Acceptance checks: fake-timer tests cover coalescing, flush, Escape,
+invalid drafts, export and import; existing render and menu tests pass.
+
+Proposed commit title: `feat: render artwork automatically after edits`
+
+Completion checklist:
+
+- [ ] Debounced auto-render implemented.
+- [ ] Manual override, Escape and export interactions tested.
+- [ ] Updating indicator accessible.
+
+### 9.3 Update smoke run and docs for automatic render
+
+Objective: the desktop smoke run and README describe automatic render.
+
+Ordered steps:
+
+1. Desktop smoke waits for auto-render and keeps one explicit Render click.
+2. Update README controls and shortcut text.
+
+Acceptance checks: desktop smoke passes on macOS; README matches behaviour.
+
+Proposed commit title: `test: cover automatic render in the desktop smoke run`
+
+Completion checklist:
+
+- [ ] Smoke run updated and passing.
+- [ ] README updated.
+
+### 9.4 Decode animated GIF frames
+
+Objective: decode composited GIF frames with delays and loop count within
+resource limits.
+
+Ordered steps:
+
+1. Add `decode_animation` for GIF returning frames, normalised delays (0–1 cs
+   become 10 cs) and loop count; single-frame GIFs keep the still path.
+2. Enforce at most 1000 frames and the decoded-byte budget across frames
+   with checked arithmetic.
+
+Acceptance checks: tests cover frame count, compositing, delays, loop count,
+frame and byte limits, and the still fallback.
+
+Proposed commit title: `feat: decode animated GIF frames`
+
+Completion checklist:
+
+- [ ] Frame decode and limits implemented.
+- [ ] Format matrix and decode tests updated.
+
+### 9.5 Preview animated sources in the browser
+
+Objective: browser sessions render original and artwork previews for every
+frame, current frame first, cancellably.
+
+Ordered steps:
+
+1. Session and WASM API expose frame count, delays, per-frame preview steps
+   and frame-indexed export; preview frames share a 512 MiB budget.
+2. Worker protocol, browser adapter artifacts (per-frame object URLs) and a
+   JSON-safe animation snapshot in the controller.
+
+Acceptance checks: WASM node tests and adapter/controller tests cover
+frames, cancellation, budget errors and disposal.
+
+Proposed commit title: `feat: preview animated sources in the browser`
+
+Completion checklist:
+
+- [ ] WASM session frames implemented.
+- [ ] Worker, adapter and controller wiring tested.
+
+### 9.6 Preview animated sources on the desktop
+
+Objective: the desktop path matches the browser path for animated sources.
+
+Ordered steps:
+
+1. Native session and job kinds render all frames with cancellation
+   checkpoints and stream frames over the progress channel.
+2. Commands carry the frame index; a length-prefixed frame packet parser.
+
+Acceptance checks: desktop tests cover jobs, cancellation and packet parsing.
+
+Proposed commit title: `feat: preview animated sources on the desktop`
+
+Completion checklist:
+
+- [ ] Native animation jobs implemented.
+- [ ] Packet parser tested.
+
+### 9.7 Play animations in the comparison canvas
+
+Objective: synchronised playback of original and artwork with controls.
+
+Ordered steps:
+
+1. A frame clock drives one index for both views, pauses when hidden, and
+   starts paused under reduced motion.
+2. Play/Pause and an accessible frame scrubber.
+
+Acceptance checks: tests cover the clock, scrubber, reduced motion and split
+sync; Chromium screenshots show controls without clipping.
+
+Proposed commit title: `feat: play animations in the comparison canvas`
+
+Completion checklist:
+
+- [ ] Playback and controls implemented.
+- [ ] Tests and screenshots reviewed.
+
+### 9.8 Export animated GIF
+
+Objective: export the artwork as an animated GIF with source timing.
+
+Ordered steps:
+
+1. Add the GIF output format and a bounded, cancellable frame encoder;
+   monochrome uses an exact two-colour palette, source colour uses
+   deterministic per-frame quantisation.
+2. Offer GIF only for animated sources; PNG and text export the shown frame;
+   desktop `.gif` save filter and browser `image/gif` download.
+
+Acceptance checks: round-trip tests (frame count, delays, monochrome pixels,
+determinism), cancellation and output-limit errors, notices check.
+
+Proposed commit title: `feat: export animated GIF`
+
+Completion checklist:
+
+- [ ] Encoder and format wiring implemented.
+- [ ] Round-trip and limit tests passing.
+
+### 9.9 Document animation support
+
+Objective: docs describe animated GIF support and limits.
+
+Ordered steps:
+
+1. Update README formats, exports and controls, and the format coverage
+   matrix.
+
+Acceptance checks: docs match the code's limits and behaviour.
+
+Proposed commit title: `docs: document animated GIF support`
+
+Completion checklist:
+
+- [ ] README and format coverage updated.
+
 ## Subphase 0.1 validation record
 
 - Inspected `main.py`, `image_processor.py`, and `.gitignore`.
