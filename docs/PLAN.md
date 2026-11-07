@@ -2199,9 +2199,32 @@ Proposed commit title: `docs: document accepted application`
 
 Completion checklist:
 
-- [ ] README and screenshots reviewed.
-- [ ] Format/privacy/limits documentation matches code.
-- [ ] Notices and measured performance retained.
+- [x] README and screenshots reviewed.
+- [x] Format/privacy/limits documentation matches code.
+- [x] Notices and measured performance retained.
+
+Validation: the README covers users and maintainers:
+- setup with the pinned toolchains; browser, desktop and package builds;
+- studio controls and shortcuts; formats per browser, default desktop and
+  `native-codecs`;
+- the PNG and text export contract; limits taken from the Rust constants;
+- architecture, project layout, privacy, measured performance,
+  browser–desktop differences, licences and notices;
+- troubleshooting, and contribution checks mirroring CI.
+Each documented check command was run. Not run: `npm run dev`, packaging on
+Windows and Linux, and the codec build scripts. The privacy claims come from a
+Chromium network audit (all eight requests stayed same-origin or local
+`blob:`), from source and dependency searches, and from the desktop CSP;
+the desktop has no traffic capture. The studio footer now says images are
+processed "on this device", which is true for the desktop as well.
+Performance was measured once per size on an Apple M1 Pro with 32 GiB: 12 MP
+decodes in 117 ms and renders in 93 ms; 50 MP decodes in 483 ms. Warm
+previews take 41 ms and 29 ms, under the aspirational targets for that
+benchmark's definition; studio end-to-end timing is not measured. Six
+screenshots in `docs/images/` show dark, light, Block, tablet, phone and
+forced-colour states without clipping; native window capture was unavailable,
+so the differences are described in text. License, font, codec and generated
+third-party notices are kept and linked.
 
 ### 8.3 Retire Python only after acceptance
 

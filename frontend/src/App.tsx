@@ -575,7 +575,7 @@ export default function App({ controller, native, menu = null }: AppProps) {
       <footer className="status-bar">
         <span className={`status-dot ${hasSource ? 'is-active' : ''}`} aria-hidden="true" />
         <span aria-hidden="true">{footerStatusLabel(snapshot.status)}</span>
-        <span className="status-note">Images are processed locally in your browser.</span>
+        <span className="status-note">Images are processed locally on this device.</span>
         <StatusRegion className="visually-hidden">{footerAnnouncement}</StatusRegion>
       </footer>
     </div>
