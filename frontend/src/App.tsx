@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react'
+import { ComparisonCanvas } from './ComparisonCanvas'
+import type { ViewMode } from './comparisonGeometry'
 import { ExportPanel } from './export/ExportPanel'
-import { PreviewImage } from './PreviewImage'
 import { exportFilename } from './export/downloadName'
 import { EXPORT_FORMAT_WORDS } from './export/exportFormats'
 import type { ExportPhase } from './export/exportFocus'
@@ -156,9 +157,19 @@ export default function App({ controller, native, menu = null }: AppProps) {
   useEffect(() => {
     setBackgroundDraft(settings.background)
   }, [settings.background])
-  const isOriginal = flow.view === 'original'
-  const shown = isOriginal ? snapshot.original : snapshot.preview
-  const viewName = isOriginal ? 'original image' : 'artwork'
+  const view = flow.view
+  const isOriginal = view === 'original'
+  const viewReady =
+    view === 'original'
+      ? snapshot.original !== null
+      : view === 'artwork'
+        ? snapshot.preview !== null
+        : snapshot.original !== null && snapshot.preview !== null
+  const viewName = isOriginal
+    ? 'original image'
+    : view === 'artwork'
+      ? 'artwork'
+      : 'split comparison'
   const exportFailed = snapshot.export.status === 'failed'
   const errorMessage =
     flow.localError ?? (snapshot.status === 'error' && !exportFailed ? snapshot.error : null)
@@ -279,6 +290,7 @@ export default function App({ controller, native, menu = null }: AppProps) {
     export: startExport,
     original: () => flow.selectView('original'),
     artwork: () => flow.selectView('artwork'),
+    split: () => flow.selectView('split'),
     render: () => flow.renderArtwork(),
     cancel: () => flow.cancel(),
   }
@@ -305,6 +317,7 @@ export default function App({ controller, native, menu = null }: AppProps) {
     menuState.render,
     menuState.original,
     menuState.artwork,
+    menuState.split,
     menuState.cancel,
   ])
 
@@ -360,13 +373,20 @@ export default function App({ controller, native, menu = null }: AppProps) {
     focusReachable(origin, headingRef.current)
   }, [isBusy, snapshot.status])
 
-  const viewOptions: readonly SegmentedOption<'original' | 'artwork'>[] = [
+  const draftBlockedText = draftBlocker === null ? undefined : DRAFT_BLOCK_ARTWORK[draftBlocker]
+  const viewOptions: readonly SegmentedOption<ViewMode>[] = [
     { value: 'original', label: 'Original', disabled: !gates.original },
     {
       value: 'artwork',
       label: 'Artwork',
       disabled: !gates.artwork,
-      description: draftBlocker === null ? undefined : DRAFT_BLOCK_ARTWORK[draftBlocker],
+      description: draftBlockedText,
+    },
+    {
+      value: 'split',
+      label: 'Split',
+      disabled: !gates.split,
+      description: draftBlockedText,
     },
   ]
   const statusBusyLabel = isBusy && snapshot.status !== 'exporting' ? busyLabel : null
@@ -428,17 +448,21 @@ export default function App({ controller, native, menu = null }: AppProps) {
               <div>
                 <p className="eyebrow">Artifact workspace</p>
                 <h1 id="canvas-heading" ref={headingRef} tabIndex={-1} data-focus-fallback="true">
-                  {isOriginal ? 'Original image' : 'Artwork preview'}
+                  {isOriginal
+                    ? 'Original image'
+                    : view === 'artwork'
+                      ? 'Artwork preview'
+                      : 'Split comparison'}
                 </h1>
               </div>
               <SegmentedChoice
                 legend="Preview view"
                 legendHidden
                 className="view-toggle"
-                columns={2}
+                columns={3}
                 options={viewOptions}
-                value={isOriginal ? 'original' : 'artwork'}
-                onChange={(view) => runAction(view)}
+                value={view}
+                onChange={(next) => runAction(next)}
               />
             </div>
             {draftBlocker !== null && (
@@ -454,15 +478,22 @@ export default function App({ controller, native, menu = null }: AppProps) {
               onChooseAnother={openImage}
             />
           </div>
-          <div className={`artifact-frame ${shown ? 'has-fixture' : ''}`}>
-            {shown ? (
-              <PreviewImage
-                src={shown.url}
-                alt={isOriginal ? 'Original image' : 'Binary artwork preview'}
-                width={shown.width}
-                height={shown.height}
-              />
-            ) : (
+          <div className={`artifact-frame ${viewReady ? 'has-fixture' : ''}`}>
+            {snapshot.metadata !== null && (
+              <div hidden={!viewReady}>
+                <ComparisonCanvas
+                  view={view}
+                  source={{ width: snapshot.metadata.width, height: snapshot.metadata.height }}
+                  sourceToken={snapshot.metadata}
+                  original={snapshot.original}
+                  artwork={snapshot.preview}
+                  originalAlt="Original image"
+                  artworkAlt="Binary artwork preview"
+                  visible={viewReady}
+                />
+              </div>
+            )}
+            {!viewReady && (
               <EmptyCanvas
                 hasSource={hasSource}
                 isBusy={isBusy}

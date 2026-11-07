@@ -180,6 +180,7 @@ describe('menu state', () => {
       render: true,
       original: true,
       artwork: true,
+      split: true,
       cancel: false,
     })
   })
@@ -192,6 +193,7 @@ describe('menu state', () => {
       render: false,
       original: false,
       artwork: false,
+      split: false,
       cancel: false,
     })
   })

@@ -22,6 +22,7 @@ pub enum MenuAction {
     Export,
     Original,
     Artwork,
+    Split,
     Render,
     Cancel,
 }
@@ -42,6 +43,7 @@ impl MenuAction {
             Self::Export => "export",
             Self::Original => "original",
             Self::Artwork => "artwork",
+            Self::Split => "split",
             Self::Render => "render",
             Self::Cancel => "cancel",
         }
@@ -87,6 +89,12 @@ pub const ARTWORK: Entry = Entry {
     action: MenuAction::Artwork,
     accelerator: Some("CmdOrCtrl+2"),
 };
+/// Split view; `CmdOrCtrl+3` continues the 1 and 2 views and shares their gate with Artwork.
+pub const SPLIT: Entry = Entry {
+    id: "view.split",
+    action: MenuAction::Split,
+    accelerator: Some("CmdOrCtrl+3"),
+};
 /// Render. Uses `CmdOrCtrl+R`, not `CmdOrCtrl+Enter`, so Enter keeps its meaning in fields and buttons.
 pub const RENDER: Entry = Entry {
     id: "view.render",
@@ -101,7 +109,7 @@ pub const CANCEL: Entry = Entry {
 };
 
 /// Every studio item, in menu order.
-pub const ENTRIES: &[Entry] = &[OPEN, EXPORT, ORIGINAL, ARTWORK, RENDER, CANCEL];
+pub const ENTRIES: &[Entry] = &[OPEN, EXPORT, ORIGINAL, ARTWORK, SPLIT, RENDER, CANCEL];
 
 /// Maps a menu item id to its studio action, or `None` for predefined or unknown ids.
 #[must_use]
@@ -127,18 +135,20 @@ pub struct MenuState {
     pub render: bool,
     pub original: bool,
     pub artwork: bool,
+    pub split: bool,
     pub cancel: bool,
 }
 
 impl MenuState {
     /// Pairs each controllable item id with its requested enabled flag.
     #[must_use]
-    pub const fn items(self) -> [(&'static str, bool); 5] {
+    pub const fn items(self) -> [(&'static str, bool); 6] {
         [
             ("file.export", self.export),
             ("view.render", self.render),
             ("view.original", self.original),
             ("view.artwork", self.artwork),
+            ("view.split", self.split),
             ("view.cancel", self.cancel),
         ]
     }
@@ -172,6 +182,7 @@ fn label(action: MenuAction) -> &'static str {
         MenuAction::Export => "Export…",
         MenuAction::Original => "Original",
         MenuAction::Artwork => "Artwork",
+        MenuAction::Split => "Split",
         MenuAction::Render => "Render",
         MenuAction::Cancel => "Cancel",
     }
@@ -216,11 +227,13 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .build()?;
     let original = item(app, &ORIGINAL)?;
     let artwork = item(app, &ARTWORK)?;
+    let split = item(app, &SPLIT)?;
     let render = item(app, &RENDER)?;
     let cancel = item(app, &CANCEL)?;
     let view = SubmenuBuilder::new(app, "View")
         .item(&original)
         .item(&artwork)
+        .item(&split)
         .separator()
         .item(&render)
         .item(&cancel)
@@ -289,7 +302,14 @@ mod tests {
     use serde_json::json;
 
     fn valid() -> serde_json::Value {
-        json!({ "export": true, "render": false, "original": true, "artwork": false, "cancel": true })
+        json!({
+            "export": true,
+            "render": false,
+            "original": true,
+            "artwork": false,
+            "split": false,
+            "cancel": true
+        })
     }
 
     #[test]
@@ -332,6 +352,45 @@ mod tests {
     }
 
     #[test]
+    fn split_is_a_view_item_with_the_third_view_accelerator() {
+        assert_eq!(SPLIT.id, "view.split");
+        assert_eq!(SPLIT.accelerator, Some("CmdOrCtrl+3"));
+        assert_eq!(action_for_id("view.split"), Some(MenuAction::Split));
+        assert_eq!(MenuAction::Split.name(), "split");
+        assert!(ENTRIES
+            .iter()
+            .filter(|entry| entry.accelerator == Some("CmdOrCtrl+3"))
+            .all(|entry| entry.action == MenuAction::Split));
+    }
+
+    #[test]
+    fn split_shares_the_artwork_gate_and_starts_disabled() {
+        assert!(!MenuAction::Split.starts_enabled());
+        let state = parse_menu_state(json!({
+            "export": true,
+            "render": true,
+            "original": true,
+            "artwork": true,
+            "split": true,
+            "cancel": false
+        }))
+        .expect("valid state");
+        let items = state.items();
+        assert_eq!(items[3], ("view.artwork", true));
+        assert_eq!(items[4], ("view.split", true));
+    }
+
+    #[test]
+    fn a_state_without_split_is_refused() {
+        let mut value = valid();
+        value.as_object_mut().expect("object").remove("split");
+        assert_eq!(
+            parse_menu_state(value).unwrap_err().code(),
+            ErrorCode::InvalidArgument
+        );
+    }
+
+    #[test]
     fn a_complete_state_is_accepted_and_maps_each_item() {
         let state = parse_menu_state(valid()).expect("valid state");
         assert_eq!(
@@ -341,6 +400,7 @@ mod tests {
                 ("view.render", false),
                 ("view.original", true),
                 ("view.artwork", false),
+                ("view.split", false),
                 ("view.cancel", true),
             ]
         );

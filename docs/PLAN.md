@@ -1995,9 +1995,29 @@ Proposed commit title: `feat: add comparison canvas controls`
 
 Completion checklist:
 
-- [ ] Geometry assertions pass.
-- [ ] Keyboard/pointer viewport tests pass.
-- [ ] Export-state separation reviewed.
+- [x] Geometry assertions pass.
+- [x] Keyboard/pointer viewport tests pass.
+- [x] Export-state separation reviewed.
+
+Validation: the studio shows Original, Artwork, and Split views (native menu
+`CmdOrCtrl+1/2/3`) in one comparison canvas with zoom, pan, fit, and 100%
+controls, wheel and pinch zoom, pointer drag, arrow-key panning, and a
+keyboard-operable split divider with value text. Viewport state is UI-only: it
+survives settings changes of the same dimensions, refits on a new source or
+size change, and never reaches the controller, so the exported PNG hash is
+identical with and without viewport use. In a split, the artwork is mapped
+linearly over the whole source, matching the sampler's cell centres at
+`(k + 0.5) * W / gw`, and stretched by `(W / gw) / c`; 100% means the original
+is 1:1. The artwork view shows its natural pixels unstretched. Chromium
+checks at 320, 768, 1280, and 1920 px confirm centred fit and that the drawn
+bitmaps reach their boxes within 1 CSS px. Synthetic edge sources show the
+classic artwork boundary within half a cell of the original edge (+6.8 source
+px against 13.2) and the average boundary within one cell (-1.5 against 23.9);
+reverting to the old `floor(W / c) * c` extent fails the half-cell check.
+771 frontend tests, 140 comparison checks, Chromium export sections a–i, 58
+desktop interaction checks, the real app's 64 smoke checks, 292 workspace
+tests, and 145 desktop tests per feature set pass. Firefox, WebKit, real
+trackpad gestures, and screen readers were not exercised.
 
 ### 7.3 Implement adaptive layout
 

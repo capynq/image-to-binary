@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
+import type { CSSProperties } from 'react'
 
 export interface PreviewImageProps {
   readonly src: string
   readonly alt: string
   readonly width: number
   readonly height: number
+  /** Inline sizing for callers that place the image in a scaled stage; the box is measured from it. */
+  readonly style?: CSSProperties
 }
 
 /**
@@ -70,7 +73,7 @@ export function isUpscaledOnDevice(
  * with a ResizeObserver, and the sampling mode is recomputed when the ratio changes, so a display
  * move re-renders the same image with no state loss.
  */
-export function PreviewImage({ src, alt, width, height }: PreviewImageProps) {
+export function PreviewImage({ src, alt, width, height, style }: PreviewImageProps) {
   const ref = useRef<HTMLImageElement>(null)
   const ratio = useDevicePixelRatio()
   const [box, setBox] = useState<{ width: number; height: number } | null>(null)
@@ -96,6 +99,8 @@ export function PreviewImage({ src, alt, width, height }: PreviewImageProps) {
       width={width}
       height={height}
       data-upscaled={upscaled ? 'true' : undefined}
+      draggable={false}
+      style={style}
     />
   )
 }

@@ -16,6 +16,7 @@ function handlers(): Record<StudioAction, ReturnType<typeof vi.fn>> {
     export: vi.fn(),
     original: vi.fn(),
     artwork: vi.fn(),
+    split: vi.fn(),
     render: vi.fn(),
     cancel: vi.fn(),
   }
@@ -38,6 +39,13 @@ describe('studio gates', () => {
     expect(gates.export).toBe(false)
     expect(gates.artwork).toBe(false)
     expect(gates.original).toBe(true)
+  })
+
+  it('gates split exactly as artwork: a source and a valid draft', () => {
+    expect(studioGates(READY).split).toBe(true)
+    expect(studioGates({ ...READY, draftBlocked: true }).split).toBe(false)
+    expect(studioGates({ ...READY, hasSource: false }).split).toBe(false)
+    expect(studioGates({ ...READY, busy: true }).split).toBe(true)
   })
 
   it('disables every source-dependent action without a source', () => {
@@ -65,6 +73,7 @@ describe('studio gates', () => {
       render: false,
       original: true,
       artwork: false,
+      split: false,
       cancel: false,
     })
   })

@@ -13,6 +13,7 @@ const STATE: MenuState = {
   render: false,
   original: true,
   artwork: false,
+  split: false,
   cancel: true,
 }
 
@@ -39,6 +40,7 @@ describe('readMenuAction', () => {
   it('accepts only the known studio actions', () => {
     expect(readMenuAction({ action: 'export' })).toBe('export')
     expect(readMenuAction({ action: 'cancel' })).toBe('cancel')
+    expect(readMenuAction({ action: 'split' })).toBe('split')
     expect(readMenuAction({ action: 'quit' })).toBeNull()
     expect(readMenuAction({ action: 7 })).toBeNull()
     expect(readMenuAction(null)).toBeNull()
@@ -47,7 +49,7 @@ describe('readMenuAction', () => {
 })
 
 describe('createNativeMenu', () => {
-  it('sends exactly the five enabled flags to the shell', async () => {
+  it('sends exactly the six enabled flags to the shell', async () => {
     const calls: Call[] = []
     const { fake } = bridge(calls)
     await createNativeMenu(fake).setState(STATE)

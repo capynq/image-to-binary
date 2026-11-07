@@ -308,6 +308,7 @@ fn check_menu(recorder: &mut Recorder, main: &Value) {
             && flag(imported, "view.render")
             && flag(imported, "view.original")
             && flag(imported, "view.artwork")
+            && flag(imported, "view.split")
             && imported["view.cancel"] == json!(false),
         format!("imported menu state {imported}"),
     );
@@ -348,6 +349,15 @@ fn check_menu(recorder: &mut Recorder, main: &Value) {
             && text(menu, "artwork") == "Artwork"
             && menu["rendered"] == json!(true),
         format!("original {} artwork {}", menu["original"], menu["artwork"]),
+    );
+    let split = &menu["split"];
+    recorder.check(
+        "e2e_menu_split_item_shows_the_comparison_divider_at_half",
+        text(split, "view") == "Split"
+            && text(split, "divider") == "50"
+            && number(&split["images"]) == 2
+            && split["focusIsBody"] == json!(false),
+        format!("split {split}"),
     );
     recorder.check(
         "e2e_menu_cancelled_open_keeps_source_and_focus_on_a_control",

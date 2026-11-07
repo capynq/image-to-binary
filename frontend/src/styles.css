@@ -370,6 +370,107 @@ h2 {
   max-height: 100%;
   object-fit: contain;
 }
+.artifact-frame.has-fixture {
+  display: flex;
+  flex-direction: column;
+  padding: 12px;
+  background: var(--base);
+}
+.comparison-canvas {
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.viewport-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.zoom-readout {
+  min-width: 7.5em;
+  padding: 0 4px;
+  font-size: 0.85rem;
+}
+.comparison-viewport {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 14rem;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--well);
+}
+.comparison-viewport {
+  user-select: none;
+}
+.comparison-viewport[data-pannable='true'] {
+  touch-action: none;
+  cursor: grab;
+}
+.comparison-viewport[data-dragging='true'] {
+  cursor: grabbing;
+}
+.comparison-stage {
+  position: absolute;
+  left: 0;
+  top: 0;
+}
+.comparison-clip {
+  position: absolute;
+  top: 0;
+  overflow: hidden;
+}
+.comparison-stage[data-view='split'] img,
+.comparison-stage[data-view='artwork'] img {
+  object-fit: fill;
+}
+.comparison-divider {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 44px;
+  margin-left: -22px;
+  cursor: ew-resize;
+}
+.comparison-divider::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--dark-text);
+  box-shadow: 0 0 0 1px var(--dark-base);
+}
+.comparison-divider::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 22px;
+  height: 22px;
+  margin: -11px 0 0 -11px;
+  border: 2px solid var(--dark-base);
+  border-radius: 50%;
+  background: var(--dark-text);
+}
+.comparison-viewport:focus,
+.comparison-divider:focus {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+.comparison-divider:focus {
+  outline-offset: -3px;
+}
+.comparison-viewport:focus:not(:focus-visible),
+.comparison-divider:focus:not(:focus-visible) {
+  outline: none;
+}
 .empty-canvas {
   display: grid;
   justify-items: center;
@@ -1011,6 +1112,22 @@ a.button {
   }
   .artifact-frame {
     border: 2px solid CanvasText;
+  }
+  .comparison-viewport {
+    border: 2px solid CanvasText;
+  }
+  .comparison-divider::before {
+    forced-color-adjust: none;
+    background: CanvasText;
+  }
+  .comparison-divider::after {
+    forced-color-adjust: none;
+    background: Canvas;
+    border-color: CanvasText;
+  }
+  .comparison-viewport:focus,
+  .comparison-divider:focus {
+    outline-color: Highlight;
   }
   .error-panel {
     border: 2px solid CanvasText;

@@ -1,7 +1,14 @@
 import type { MenuState } from './processing/nativeMenu'
 
 /** Studio actions that the keyboard and the desktop menu can request. */
-export type StudioAction = 'open' | 'export' | 'original' | 'artwork' | 'render' | 'cancel'
+export type StudioAction =
+  | 'open'
+  | 'export'
+  | 'original'
+  | 'artwork'
+  | 'split'
+  | 'render'
+  | 'cancel'
 
 /** Facts the gates read; built once per render so the buttons and the menu share one answer. */
 export interface StudioFacts {
@@ -16,13 +23,14 @@ export interface StudioGates {
   readonly render: boolean
   readonly original: boolean
   readonly artwork: boolean
+  readonly split: boolean
   readonly cancel: boolean
 }
 
 /**
  * The single source of truth for when each action may run. A missing source, a busy studio
  * (import, render or export) or an invalid draft closes the gate; the menu state and the
- * buttons both read these flags.
+ * buttons both read these flags. Split needs the same draft as artwork, since it shows artwork.
  */
 export function studioGates({ hasSource, busy, draftBlocked }: StudioFacts): StudioGates {
   return {
@@ -31,6 +39,7 @@ export function studioGates({ hasSource, busy, draftBlocked }: StudioFacts): Stu
     render: hasSource && !busy && !draftBlocked,
     original: hasSource,
     artwork: hasSource && !draftBlocked,
+    split: hasSource && !draftBlocked,
     cancel: busy,
   }
 }
@@ -42,6 +51,7 @@ export function menuStateOf(gates: StudioGates): MenuState {
     render: gates.render,
     original: gates.original,
     artwork: gates.artwork,
+    split: gates.split,
     cancel: gates.cancel,
   }
 }

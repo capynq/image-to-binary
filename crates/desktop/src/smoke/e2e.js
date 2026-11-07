@@ -255,7 +255,11 @@
     const activeLabel = () => (document.activeElement?.textContent ?? '').trim()
     const selectedView = () => document.querySelector('.view-toggle label.is-selected')?.textContent.trim() ?? ''
     const menu = {}
-    menu.imported = await invoke('smoke_menu_snapshot')
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      menu.imported = await invoke('smoke_menu_snapshot')
+      if (menu.imported['file.export'] === true) break
+      await sleep(100)
+    }
     document.querySelector('input[type="radio"][value="ascii"]').click()
     const menuRamp = await waitFor(() => document.querySelector('input[name="ramp"]'), 'ASCII ramp for menu checks')
     setValue(menuRamp, 'café')
@@ -291,6 +295,15 @@
     await invoke('smoke_menu_action', { id: 'view.artwork' })
     await waitFor(() => selectedView() === 'Artwork', 'menu artwork view')
     menu.artwork = selectedView()
+    await invoke('smoke_menu_action', { id: 'view.split' })
+    await waitFor(() => selectedView() === 'Split' && document.querySelector('[role="slider"]') !== null, 'menu split view')
+    await settle()
+    menu.split = {
+      view: selectedView(),
+      divider: document.querySelector('[role="slider"]')?.getAttribute('aria-valuenow') ?? null,
+      images: document.querySelectorAll('.comparison-clip img').length,
+      focusIsBody: document.activeElement === document.body || document.activeElement === null,
+    }
     await invoke('smoke_menu_action', { id: 'view.render' })
     await waitFor(previewImage, 'menu render preview')
     menu.rendered = true

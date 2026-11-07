@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ChangeEvent, DragEvent, RefObject } from 'react'
 import { importNativeFile, toInput } from './processing/nativeFiles'
 import type { NativeFiles } from './processing/nativeFiles'
-import type { PreviewKind } from './processing/types'
+import type { ViewMode } from './comparisonGeometry'
 import type { StudioController } from './state/controller'
 
 export const IMPORT_ACCEPT =
@@ -20,14 +20,14 @@ export function formatBytes(bytes: number): string {
 
 export interface ImportFlow {
   readonly inputRef: RefObject<HTMLInputElement | null>
-  readonly view: PreviewKind
+  readonly view: ViewMode
   readonly localError: string | null
   readonly dragActive: boolean
   /** Resolves once the picker has settled: at once in the browser, after the dialog in the shell. */
   openPicker(): Promise<void>
   onInputChange(event: ChangeEvent<HTMLInputElement>): void
   loadDemo(): void
-  selectView(kind: PreviewKind): void
+  selectView(mode: ViewMode): void
   renderArtwork(): void
   cancel(): void
   reset(): void
@@ -57,7 +57,8 @@ export function useImportFlow(
   const inputRef = useRef<HTMLInputElement>(null)
   const intent = useRef(0)
   const dragDepth = useRef(0)
-  const [view, setView] = useState<PreviewKind>('original')
+  const [view, setView] = useState<ViewMode>('original')
+  const wanted = useRef<ViewMode>('original')
   const [localError, setLocalError] = useState<string | null>(null)
   const [dragActive, setDragActive] = useState(false)
 
@@ -81,6 +82,7 @@ export function useImportFlow(
       if (intent.current !== token) return
       const after = controller.getSnapshot()
       if (after.status !== 'ready' || after.metadata === null || after.metadata === before) return
+      wanted.current = 'original'
       setView('original')
       try {
         await controller.preview('original')
@@ -169,19 +171,43 @@ export function useImportFlow(
     void runImport(() => controller.loadDemo())
   }, [controller, runImport])
 
+  /**
+   * Shows a view and renders only what it lacks. A newer preview supersedes an older one, so split
+   * asks for the original first and the artwork is requested by a later call once that settles.
+   */
   const selectView = useCallback(
-    (kind: PreviewKind): void => {
-      setView(kind)
+    (mode: ViewMode): void => {
+      wanted.current = mode
+      setView(mode)
       const current = controller.getSnapshot()
-      const cached = kind === 'original' ? current.original : current.preview
-      if (cached !== null || current.metadata === null || current.status === 'importing') return
-      controller.preview(kind).catch(() => undefined)
+      if (current.metadata === null || current.status === 'importing') return
+      if (mode !== 'artwork' && current.original === null) {
+        controller.preview('original').then(
+          () => {
+            const after = controller.getSnapshot()
+            if (
+              wanted.current !== 'original' &&
+              after.original !== null &&
+              after.preview === null
+            ) {
+              controller.preview('artwork').catch(() => undefined)
+            }
+          },
+          () => undefined,
+        )
+        return
+      }
+      if (mode !== 'original' && current.preview === null) {
+        controller.preview('artwork').catch(() => undefined)
+      }
     },
     [controller],
   )
 
+  /** Render keeps the split view, so a re-render after a settings change does not drop the comparison. */
   const renderArtwork = useCallback((): void => {
-    setView('artwork')
+    wanted.current = wanted.current === 'split' ? 'split' : 'artwork'
+    setView(wanted.current)
     const current = controller.getSnapshot()
     if (current.metadata === null || current.status === 'importing') return
     controller.preview('artwork').catch(() => undefined)
@@ -197,6 +223,7 @@ export function useImportFlow(
     dragDepth.current = 0
     setDragActive(false)
     setLocalError(null)
+    wanted.current = 'original'
     setView('original')
     controller.reset()
   }, [controller])

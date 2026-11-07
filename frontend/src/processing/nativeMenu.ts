@@ -3,7 +3,15 @@ import type { NativeBridge } from './nativeBridge'
 export const NATIVE_MENU_EVENT = 'native-menu-action'
 
 /** Studio actions a menu item can request; each one is gated by the same rules as its button. */
-export const MENU_ACTIONS = ['open', 'export', 'original', 'artwork', 'render', 'cancel'] as const
+export const MENU_ACTIONS = [
+  'open',
+  'export',
+  'original',
+  'artwork',
+  'split',
+  'render',
+  'cancel',
+] as const
 export type MenuAction = (typeof MENU_ACTIONS)[number]
 
 /** Enabled flags the page reports to the menu bar. Every flag is required. */
@@ -12,6 +20,7 @@ export interface MenuState {
   readonly render: boolean
   readonly original: boolean
   readonly artwork: boolean
+  readonly split: boolean
   readonly cancel: boolean
 }
 
@@ -39,6 +48,7 @@ export function createNativeMenu(bridge: NativeBridge): NativeMenu {
           render: state.render,
           original: state.original,
           artwork: state.artwork,
+          split: state.split,
           cancel: state.cancel,
         },
       })
