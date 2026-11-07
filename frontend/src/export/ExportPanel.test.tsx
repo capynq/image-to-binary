@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { createDemoProcessingAdapter } from '../processing/demoAdapter'
-import type { ExportArtifact, UrlApi } from '../processing/types'
+import type { BlobExportArtifact, UrlApi } from '../processing/types'
 import { createStudioController } from '../state/controller'
 import { createDownloadOwner } from './downloadOwner'
 import type { DownloadLink } from './downloadOwner'
@@ -47,7 +47,8 @@ function countingUrlApi(): UrlApi & { created: number; revoked: string[] } {
 }
 
 function linkFor(size: number, filename: string, urls: UrlApi): DownloadLink {
-  const artifact: ExportArtifact = {
+  const artifact: BlobExportArtifact = {
+    kind: 'blob',
     blob: new Blob([new Uint8Array(size)], { type: 'image/png' }),
     byteLength: size,
     dispose: () => undefined,
@@ -158,7 +159,7 @@ describe('reset removes exportable state', () => {
     const controller = createStudioController({ adapter: pngAsText })
     await controller.loadDemo()
     await controller.startExport()
-    const artifact = controller.readyExport()
+    const artifact = controller.readyExport() as BlobExportArtifact | null
     expect(artifact).not.toBeNull()
 
     const owner = createDownloadOwner(urls)
@@ -170,7 +171,10 @@ describe('reset removes exportable state', () => {
     controller.reset()
     expect(controller.readyExport()).toBeNull()
     expect(controller.getSnapshot().export.status).toBe('idle')
-    const afterReset = owner.show(controller.readyExport(), 'image-binary.png')
+    const afterReset = owner.show(
+      controller.readyExport() as BlobExportArtifact | null,
+      'image-binary.png',
+    )
     expect(afterReset).toBeNull()
     expect(urls.revoked).toEqual(['blob:export/1'])
     expect(render({ phase: 'idle', download: afterReset })).not.toContain('Download PNG')

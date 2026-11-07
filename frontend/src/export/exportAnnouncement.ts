@@ -16,6 +16,7 @@ export function announceExportPhase(
   phase: ExportPhase,
   byteLength: number | null,
   error: string | null,
+  savedName: string | null = null,
 ): string {
   switch (phase) {
     case 'running':
@@ -23,6 +24,7 @@ export function announceExportPhase(
     case 'preparing':
       return previous?.phase === 'running' ? previous.text : 'Preparing PNG download.'
     case 'ready':
+      if (savedName !== null) return `Saved ${savedName}, ${formatBytes(byteLength ?? 0)}.`
       return `PNG export ready, ${formatBytes(byteLength ?? 0)}.`
     case 'failed':
       return error === null ? 'PNG export failed.' : `PNG export failed. ${error}`

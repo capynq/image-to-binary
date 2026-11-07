@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { blobOf } from '../export/exportTestSupport'
 import { createAdapterWithAccumulator } from './browserAdapter'
 import type { BrowserAdapterOptions } from './browserAdapter'
 import { createExportAccumulator, ExportLimitError } from './exportAccumulator'
@@ -80,7 +81,7 @@ describe('export chunk release on terminal paths', () => {
     expect(records[0]?.released).toBe(1)
 
     const artifact = await adapter.export(session, source, 'png', DEFAULT_SETTINGS, context(3))
-    expect(new Uint8Array(await artifact.blob.arrayBuffer())).toEqual(fakePngBytes(3))
+    expect(new Uint8Array(await blobOf(artifact).arrayBuffer())).toEqual(fakePngBytes(3))
     expect(records[1]?.released).toBe(1)
     pair.close()
   })

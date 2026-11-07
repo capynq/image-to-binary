@@ -15,6 +15,8 @@ export interface ExportPanelProps {
   readonly byteLength: number | null
   readonly error: string | null
   readonly download: DownloadLink | null
+  /** Name of a native export already written to the chosen file; replaces the download link. */
+  readonly savedName?: string | null
   readonly onExport: () => void
   readonly onCancel: () => void
 }
@@ -27,9 +29,10 @@ export interface ExportPanelProps {
  */
 export function ExportPanel(props: ExportPanelProps) {
   const { phase, canExport, disabledReason, progress, byteLength, error } = props
+  const savedName = props.savedName ?? null
   const [announced, setAnnounced] = useState<AnnouncedExport>(() => ({
     phase,
-    text: announceExportPhase(null, phase, byteLength, error),
+    text: announceExportPhase(null, phase, byteLength, error, savedName),
   }))
   const headingId = useId()
   const reasonId = useId()
@@ -40,13 +43,14 @@ export function ExportPanel(props: ExportPanelProps) {
   const cancelRef = useRef<HTMLButtonElement>(null)
   const downloadRef = useRef<HTMLAnchorElement>(null)
   const retryRef = useRef<HTMLButtonElement>(null)
+  const againRef = useRef<HTMLButtonElement>(null)
   const previousPhase = useRef<ExportPhase>(phase)
 
   useEffect(() => {
     const from = previousPhase.current
     previousPhase.current = phase
     if (from === phase) return
-    const target = exportFocusTarget(phase, canExport)
+    const target = exportFocusTarget(phase, canExport, savedName !== null)
     if (target === null) return
     const active = document.activeElement
     const onBody = active === null || active === document.body
@@ -57,15 +61,16 @@ export function ExportPanel(props: ExportPanelProps) {
       export: exportRef.current,
       cancel: cancelRef.current,
       download: downloadRef.current,
+      again: againRef.current,
       retry: retryRef.current,
       heading: headingRef.current,
     }
     elements[target]?.focus()
-  }, [phase, canExport])
+  }, [phase, canExport, savedName])
 
   let live = announced
   if (announced.phase !== phase) {
-    live = { phase, text: announceExportPhase(announced, phase, byteLength, error) }
+    live = { phase, text: announceExportPhase(announced, phase, byteLength, error, savedName) }
     setAnnounced(live)
   }
 
@@ -132,7 +137,13 @@ export function ExportPanel(props: ExportPanelProps) {
 
       {phase === 'ready' && (
         <div className="export-actions">
-          <p className="section-help">Encoded PNG: {formatBytes(byteLength ?? 0)}</p>
+          {savedName !== null ? (
+            <p className="section-help">
+              Saved {savedName}, {formatBytes(byteLength ?? 0)}.
+            </p>
+          ) : (
+            <p className="section-help">Encoded PNG: {formatBytes(byteLength ?? 0)}</p>
+          )}
           {download !== null && (
             <a
               ref={downloadRef}
@@ -144,6 +155,7 @@ export function ExportPanel(props: ExportPanelProps) {
             </a>
           )}
           <button
+            ref={againRef}
             className="button button-secondary button-wide"
             type="button"
             disabled={!canExport}

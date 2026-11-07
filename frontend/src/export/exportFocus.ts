@@ -1,17 +1,22 @@
 export type ExportPhase = 'idle' | 'running' | 'preparing' | 'ready' | 'failed'
 
-export type ExportFocusTarget = 'export' | 'cancel' | 'download' | 'retry' | 'heading'
+export type ExportFocusTarget = 'export' | 'cancel' | 'download' | 'again' | 'retry' | 'heading'
 
 /**
  * Names the control that takes focus when the export phase becomes `to`. `null` means the
  * next phase renders no focusable control yet, so focus stays put until the following phase.
+ * A saved export has no download link, so its ready phase focuses `Export again`.
  */
-export function exportFocusTarget(to: ExportPhase, canExport: boolean): ExportFocusTarget | null {
+export function exportFocusTarget(
+  to: ExportPhase,
+  canExport: boolean,
+  saved = false,
+): ExportFocusTarget | null {
   switch (to) {
     case 'running':
       return 'cancel'
     case 'ready':
-      return 'download'
+      return saved ? 'again' : 'download'
     case 'failed':
       return 'retry'
     case 'preparing':

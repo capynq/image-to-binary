@@ -10,6 +10,9 @@ use std::sync::Arc;
 
 use image::codecs::gif::GifEncoder;
 use image::{Delay, DynamicImage, Frame, ImageBuffer, ImageFormat, Luma, Rgba};
+use image_to_binary_adapters::session::{
+    EncodedPlan, PreviewSettings, Stage, DEFAULT_PIXEL_BUDGET,
+};
 use image_to_binary_adapters::{ArtworkPngTask, PngTaskLimits};
 use image_to_binary_core::{ContractError, Dimensions, Generation, Sampling};
 use image_to_binary_processing::{
@@ -438,11 +441,37 @@ fn large_export(sampling: Sampling) -> Result<Vec<u8>, Box<dyn Error>> {
     native_export(&grid, options)
 }
 
+/// Artwork preview of an encoded image at the studio's default settings (cell 12, font 16,
+/// threshold 128, classic), rendered through the shared session the desktop and WASM use. This
+/// is the pixel path a user sees, unlike the processing renderer behind the JSON `preview` field.
+fn ui_preview(encoded: &[u8]) -> Result<(u32, u32, Vec<u8>), Box<dyn Error>> {
+    let generation = Generation::new(1);
+    let mut session =
+        EncodedPlan::decode_session(encoded.to_vec()).map_err(|error| error.message())?;
+    let settings =
+        PreviewSettings::new(12, 16, 128, Sampling::Classic).map_err(|error| error.message())?;
+    session
+        .start_preview(generation, settings)
+        .map_err(|error| error.message())?;
+    while session
+        .advance(generation, DEFAULT_PIXEL_BUDGET)
+        .map_err(|error| error.message())?
+        != Stage::Ready
+    {}
+    let mut frame = session
+        .finish(generation)
+        .map_err(|error| error.message())?;
+    let (width, height) = (frame.width(), frame.height());
+    let pixels = frame.take_pixels().map_err(|error| error.message())?;
+    Ok((width, height, pixels))
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
-    let path = std::env::args_os()
-        .nth(1)
-        .map(PathBuf::from)
-        .ok_or("usage: reference_fixtures <output.json>")?;
+    let arguments: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
+    let path = arguments
+        .first()
+        .cloned()
+        .ok_or("usage: reference_fixtures <output.json> [<ui-preview.rgba>]")?;
     let mut json = String::from("{\"cases\":[");
     for (index, case) in CASES.iter().enumerate() {
         if index > 0 {
@@ -520,5 +549,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         fs::create_dir_all(parent)?;
     }
     fs::write(&path, json)?;
+    if let Some(preview_path) = arguments.get(1) {
+        let png = fixtures
+            .iter()
+            .find(|fixture| fixture.name == "png")
+            .ok_or("png fixture exists")?;
+        let (width, height, pixels) = ui_preview(&png.bytes)?;
+        fs::write(preview_path, &pixels)?;
+        eprintln!("ui preview {width}x{height}: {} bytes", pixels.len());
+    }
     Ok(())
 }

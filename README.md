@@ -5,6 +5,16 @@ Python/Tkinter, while the Rust migration is being implemented in the workspace
 described by [docs/PLAN.md](docs/PLAN.md). The Rust library is not yet a desktop
 or browser replacement.
 
+## Desktop status
+
+The Tauri shell in `crates/desktop` runs the studio UI natively. Open image,
+drop, Load demo, preview, PNG export to a chosen file, cancel, and reset call
+the native commands and report the same errors as the browser. On macOS arm64
+the `--smoke` run passes 42 of 42 checks: exported PNGs are byte-equal to the
+browser references, and the largest frame gap during a 1200 by 1200 export is
+18 ms. Real OS dialogs and drag and drop are not automated, and Windows and
+Linux have not been run.
+
 ## Rust migration status
 
 The Rust workspace currently provides normalized RGBA8 decoding for six image

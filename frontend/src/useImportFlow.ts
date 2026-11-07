@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ChangeEvent, DragEvent, RefObject } from 'react'
+import { importNativeFile, toInput } from './processing/nativeFiles'
+import type { NativeFiles } from './processing/nativeFiles'
 import type { PreviewKind } from './processing/types'
 import type { StudioController } from './state/controller'
 
@@ -47,7 +49,10 @@ function carriesFiles(event: DragEvent<HTMLElement>): boolean {
  * imports leave the current view untouched. Changing the controller invalidates any
  * pending intent. Dropped data is read only through `dataTransfer.files`.
  */
-export function useImportFlow(controller: StudioController): ImportFlow {
+export function useImportFlow(
+  controller: StudioController,
+  native: NativeFiles | null = null,
+): ImportFlow {
   const inputRef = useRef<HTMLInputElement>(null)
   const intent = useRef(0)
   const dragDepth = useRef(0)
@@ -101,8 +106,52 @@ export function useImportFlow(controller: StudioController): ImportFlow {
   )
 
   const openPicker = useCallback((): void => {
-    inputRef.current?.click()
-  }, [])
+    if (native === null) {
+      inputRef.current?.click()
+      return
+    }
+    native.openImage().then(
+      (file) => {
+        if (file !== null) void runImport(() => importNativeFile(controller, native, file))
+      },
+      (error: unknown) => setLocalError(error instanceof Error ? error.message : String(error)),
+    )
+  }, [controller, native, runImport])
+
+  useEffect(() => {
+    if (native === null) return undefined
+    let attached = true
+    const stops: Array<() => void> = []
+    const attach = (subscription: Promise<() => void>): void => {
+      subscription
+        .then((stop) => {
+          if (attached) stops.push(stop)
+          else stop()
+        })
+        .catch(() => undefined)
+    }
+    attach(
+      native.listenDrops((outcome) => {
+        dragDepth.current = 0
+        setDragActive(false)
+        if (outcome.status === 'accepted') {
+          void runImport(() => importNativeFile(controller, native, toInput(outcome.file)))
+        } else {
+          setLocalError(outcome.error.message)
+        }
+      }),
+    )
+    attach(
+      native.listenHover((active) => {
+        if (!active) dragDepth.current = 0
+        setDragActive(active)
+      }),
+    )
+    return () => {
+      attached = false
+      for (const stop of stops) stop()
+    }
+  }, [controller, native, runImport])
 
   const onInputChange = useCallback(
     (event: ChangeEvent<HTMLInputElement>): void => {

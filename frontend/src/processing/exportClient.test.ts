@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { blobOf } from '../export/exportTestSupport'
 import { createBrowserProcessingAdapter } from './browserAdapter'
 import { ExportLimitError } from './exportAccumulator'
 import {
@@ -324,10 +325,11 @@ describe('browser adapter PNG export', () => {
       (fraction) => fractions.push(fraction),
     )
 
-    expect(artifact.blob.type).toBe('image/png')
+    const blob = blobOf(artifact)
+    expect(blob.type).toBe('image/png')
     expect(artifact.byteLength).toBe(fakePngBytes(3).byteLength)
-    expect(artifact.blob.size).toBe(artifact.byteLength)
-    expect(new Uint8Array(await artifact.blob.arrayBuffer())).toEqual(fakePngBytes(3))
+    expect(blob.size).toBe(artifact.byteLength)
+    expect(new Uint8Array(await blob.arrayBuffer())).toEqual(fakePngBytes(3))
     expect(fractions).toEqual([...fractions].sort((left, right) => left - right))
     expect(fractions.at(-1)).toBe(1)
     pair.close()

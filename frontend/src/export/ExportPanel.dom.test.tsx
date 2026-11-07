@@ -145,3 +145,36 @@ describe('ExportPanel announcements', () => {
     expect(container.querySelectorAll('[role="status"]')).toHaveLength(1)
   })
 })
+
+describe('ExportPanel saved export', () => {
+  it('shows the saved file and size in place of the download link', () => {
+    show({ phase: 'ready', byteLength: 2048, savedName: 'chosen.png' })
+    const text = container.textContent ?? ''
+    expect(text).toContain('Saved chosen.png, 2.0 KiB.')
+    expect(text).not.toContain('Encoded PNG')
+    expect(container.querySelector('a')).toBeNull()
+    expect(control('Export again')).toBeInstanceOf(HTMLButtonElement)
+  })
+
+  it('moves focus to Export again, since there is no download link to receive it', () => {
+    show({ phase: 'running' })
+    control('Cancel export').focus()
+    show({ phase: 'ready', byteLength: 2048, savedName: 'chosen.png' })
+    expect(document.activeElement).toBe(control('Export again'))
+  })
+
+  it('announces the saved name and size once', () => {
+    show({ phase: 'running' })
+    show({ phase: 'ready', byteLength: 2048, savedName: 'chosen.png' })
+    expect(liveText()).toBe('Saved chosen.png, 2.0 KiB.')
+    expect(container.querySelectorAll('[role="status"]')).toHaveLength(1)
+  })
+
+  it('a cancelled save dialog leaves the panel idle with no failure text', () => {
+    show({ phase: 'running' })
+    show({ phase: 'idle' })
+    expect(liveText()).toBe('PNG export cancelled.')
+    expect(container.querySelector('.error-panel')).toBeNull()
+    expect(control('Export PNG')).toBeInstanceOf(HTMLButtonElement)
+  })
+})

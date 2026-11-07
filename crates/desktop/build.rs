@@ -13,6 +13,7 @@ const APP_COMMANDS: &[&str] = &[
     "save_image_dialog",
     "release_handle",
     "import_source",
+    "import_demo",
     "start_preview",
     "export_png",
     "cancel",
@@ -25,6 +26,7 @@ const SMOKE_COMMANDS: &[&str] = &[
     "save_image_dialog",
     "release_handle",
     "import_source",
+    "import_demo",
     "start_preview",
     "export_png",
     "cancel",
@@ -32,10 +34,20 @@ const SMOKE_COMMANDS: &[&str] = &[
     "echo_binary",
     "smoke_page",
     "smoke_worker_probe",
+    "smoke_queue_open",
+    "smoke_queue_save",
+    "smoke_e2e",
 ];
 /// Permission files generated only for smoke commands. Removing them keeps a default build's
 /// ACL free of smoke identifiers, because stale gitignored files would otherwise be embedded.
-const SMOKE_PERMISSION_FILES: &[&str] = &["echo_binary", "smoke_page", "smoke_worker_probe"];
+const SMOKE_PERMISSION_FILES: &[&str] = &[
+    "echo_binary",
+    "smoke_page",
+    "smoke_worker_probe",
+    "smoke_queue_open",
+    "smoke_queue_save",
+    "smoke_e2e",
+];
 
 fn main() -> Result<(), Box<dyn Error>> {
     let smoke = env::var_os("CARGO_FEATURE_SMOKE").is_some();

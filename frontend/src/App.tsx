@@ -5,7 +5,9 @@ import type { ExportPhase } from './export/exportFocus'
 import { footerStatusLabel, useFooterAnnouncement } from './export/footerAnnouncement'
 import { useExportDownload } from './export/useExportDownload'
 import { defaultUrlApi } from './processing/demoAdapter'
+import type { NativeFiles } from './processing/nativeFiles'
 import type { ExportStatus } from './processing/types'
+import type { StudioController } from './state/controller'
 import { IMPORT_ACCEPT, IMPORT_GUIDANCE, formatBytes, useImportFlow } from './useImportFlow'
 import { useStudio } from './useStudio'
 
@@ -43,9 +45,15 @@ function exportBlockedBy(status: string, hasSource: boolean): string | null {
   return null
 }
 
-export default function App() {
-  const { controller, snapshot } = useStudio()
-  const flow = useImportFlow(controller)
+export interface AppProps {
+  readonly controller: StudioController
+  /** Present only inside the desktop shell, where dialogs and drops are native. */
+  readonly native: NativeFiles | null
+}
+
+export default function App({ controller, native }: AppProps) {
+  const { snapshot } = useStudio(controller)
+  const flow = useImportFlow(controller, native)
   const hintId = useId()
   const [theme, setTheme] = useState<Theme>(getInitialTheme)
   const [inspectorOpen, setInspectorOpen] = useState(true)
@@ -80,11 +88,16 @@ export default function App() {
       : snapshot.importStage === 'heifDecoder'
         ? 'Loading HEIC/AVIF decoder…'
         : 'Importing image…'
-  const exportArtifact = snapshot.export.status === 'ready' ? controller.readyExport() : null
+  const readyExport = snapshot.export.status === 'ready' ? controller.readyExport() : null
+  const exportArtifact = readyExport?.kind === 'blob' ? readyExport : null
+  const savedExport = readyExport?.kind === 'saved' ? readyExport : null
   const downloadName = exportFilename(snapshot.metadata?.name ?? '')
   const download = useExportDownload(exportArtifact, downloadName, DOWNLOAD_URL_API)
   const footerAnnouncement = useFooterAnnouncement(snapshot.status, snapshot.export.status)
-  const exportPhase = exportPhaseOf(snapshot.export.status, download !== null)
+  const exportPhase = exportPhaseOf(
+    snapshot.export.status,
+    download !== null || savedExport !== null,
+  )
   const canExport = hasSource && !isBusy
   const exportBlock = canExport ? null : exportBlockedBy(snapshot.status, hasSource)
 
@@ -384,6 +397,7 @@ export default function App() {
               byteLength={snapshot.export.byteLength}
               error={snapshot.export.error}
               download={download}
+              savedName={savedExport?.name ?? null}
               onExport={startPngExport}
               onCancel={flow.cancel}
             />

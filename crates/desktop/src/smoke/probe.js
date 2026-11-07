@@ -1,8 +1,13 @@
 (() => {
   const LENGTH = __ECHO_LENGTH__;
   const invoke = (command, payload) => window.__TAURI_INTERNALS__.invoke(command, payload);
-  const state = { token: crypto.randomUUID(), violations: 0 };
+  const state = { token: crypto.randomUUID(), violations: 0, workers: [] };
   window.__imageToBinarySmoke = state;
+  const NativeWorker = window.Worker;
+  window.Worker = function (url, options) {
+    state.workers.push(String(url));
+    return new NativeWorker(url, options);
+  };
   document.addEventListener('securitypolicyviolation', () => {
     state.violations += 1;
   });
@@ -28,7 +33,7 @@
     innerHeight: window.innerHeight,
     devicePixelRatio: window.devicePixelRatio,
     cspViolations: state.violations,
-    rootChildren: document.getElementById('root')?.childElementCount ?? 0,
+    rootChildren: document.querySelectorAll('#root .app-shell').length,
     ...extra,
   });
   const send = (probe) => invoke('smoke_page', { probe });

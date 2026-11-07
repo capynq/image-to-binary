@@ -10,8 +10,8 @@ use crate::files::dialog::{self, NativePicker};
 use crate::files::{FileId, FileRef, FileTable, SinkRef};
 use crate::limits::AppLimits;
 use crate::processing::{
-    self, ExportReport, ExportRequest, ImportedSource, PreviewKind, PreviewMode, PreviewRequest,
-    Processing, ProgressEvent,
+    self, ExportReport, ExportRequest, ImportedDemo, ImportedSource, PreviewKind, PreviewMode,
+    PreviewRequest, Processing, ProgressEvent,
 };
 
 /// Codecs compiled into this binary; the native codec path is enabled by the `native-codecs` feature.
@@ -68,6 +68,10 @@ pub(crate) async fn open_image_dialog(
     app: tauri::AppHandle,
     files: tauri::State<'_, Arc<FileTable>>,
 ) -> Result<Option<FileRef>, IpcError> {
+    #[cfg(feature = "smoke")]
+    if let Some(answer) = crate::smoke::take_open_answer(&app) {
+        return answer;
+    }
     dialog::pick_source(&NativePicker::new(app), files.inner().clone()).await
 }
 
@@ -83,6 +87,10 @@ pub(crate) async fn save_image_dialog(
     files: tauri::State<'_, Arc<FileTable>>,
     suggested_name: Option<String>,
 ) -> Result<Option<SinkRef>, IpcError> {
+    #[cfg(feature = "smoke")]
+    if let Some(answer) = crate::smoke::take_save_answer(&app) {
+        return answer;
+    }
     dialog::pick_destination(
         &NativePicker::new(app),
         files.inner().clone(),
@@ -110,8 +118,23 @@ pub(crate) fn release_handle(files: tauri::State<'_, Arc<FileTable>>, id: FileId
 pub(crate) async fn import_source(
     processing: tauri::State<'_, Arc<Processing>>,
     file_id: FileId,
+    generation: Option<serde_json::Value>,
 ) -> Result<ImportedSource, IpcError> {
-    processing.import_source(file_id).await
+    let generation = processing::generation_argument(generation.as_ref())?.value();
+    processing.import_source(file_id, generation).await
+}
+
+/// Replaces the source with the built-in demo and returns its metadata. No pixels cross IPC.
+///
+/// Failure contract: `cancelled` when superseded, and the session's codes for the RGBA plan.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+pub(crate) async fn import_demo(
+    processing: tauri::State<'_, Arc<Processing>>,
+    generation: Option<serde_json::Value>,
+) -> Result<ImportedDemo, IpcError> {
+    let generation = processing::generation_argument(generation.as_ref())?.value();
+    processing.import_demo(generation).await
 }
 
 /// Renders a preview of the source and returns the raw frame body described in

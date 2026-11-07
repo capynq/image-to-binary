@@ -13,6 +13,14 @@ use crate::error::{ErrorCode, IpcError};
 
 /// Event name that carries a [`DropOutcome`] to the page.
 pub(crate) const DROP_EVENT: &str = "native-file-drop";
+/// Event name that carries a [`HoverState`] while a drag is over the window.
+pub(crate) const HOVER_EVENT: &str = "native-file-hover";
+
+/// Whether a drag is currently over the window, so the page can show a drop target.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub(crate) struct HoverState {
+    active: bool,
+}
 
 /// Result of one completed drop, emitted to the page as the [`DROP_EVENT`] payload.
 #[derive(Clone, Debug, Serialize)]
@@ -48,14 +56,49 @@ pub(crate) fn drop_outcome(paths: &[PathBuf], table: &FileTable) -> DropOutcome 
     }
 }
 
-/// Handles a window event. Only a completed drop produces an outcome; hover and leave events are
-/// not forwarded. The file checks run on the blocking pool, so the UI thread never waits on
-/// metadata, and the outcome is emitted to this window alone once they finish.
+/// One step the page must take for a window drag event.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum DragAction {
+    /// Show (`true`) or clear (`false`) the drop target.
+    Hover(bool),
+    /// Import the one dropped file, or report the rule it broke.
+    Drop(Vec<PathBuf>),
+}
+
+/// Maps a window drag event to the actions the page needs. A drop always clears the hover first,
+/// so no drop target stays on screen after a drop.
+pub(crate) fn drag_actions(event: &DragDropEvent) -> Vec<DragAction> {
+    match event {
+        DragDropEvent::Enter { .. } => vec![DragAction::Hover(true)],
+        DragDropEvent::Leave => vec![DragAction::Hover(false)],
+        DragDropEvent::Drop { paths, .. } => {
+            vec![DragAction::Hover(false), DragAction::Drop(paths.clone())]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Handles a window event. Enter and leave events become hover states for the page; a drop also
+/// ends the hover and produces an outcome. The file checks run on the blocking pool, so the UI
+/// thread never waits on metadata, and the outcome is emitted to this window alone once they
+/// finish.
 pub(crate) fn on_window_event(window: &WebviewWindow, event: &WindowEvent) {
-    let WindowEvent::DragDrop(DragDropEvent::Drop { paths, .. }) = event else {
+    let WindowEvent::DragDrop(drag) = event else {
         return;
     };
-    let paths = paths.clone();
+    for action in drag_actions(drag) {
+        match action {
+            DragAction::Hover(active) => emit_hover(window, active),
+            DragAction::Drop(paths) => spawn_outcome(window, paths),
+        }
+    }
+}
+
+fn emit_hover(window: &WebviewWindow, active: bool) {
+    let _ = window.emit_to(window.label(), HOVER_EVENT, HoverState { active });
+}
+
+fn spawn_outcome(window: &WebviewWindow, paths: Vec<PathBuf>) {
     let window = window.clone();
     let _detached = tauri::async_runtime::spawn_blocking(move || {
         let outcome = match window.try_state::<Arc<FileTable>>() {
@@ -85,6 +128,31 @@ mod tests {
             DropOutcome::Rejected { error } => error.message().to_owned(),
             DropOutcome::Accepted { .. } => String::new(),
         }
+    }
+
+    #[test]
+    fn hover_is_set_by_enter_and_cleared_by_leave_and_by_a_drop() {
+        let position = tauri::PhysicalPosition::new(0.0, 0.0);
+        let path = PathBuf::from("drop.png");
+        assert_eq!(
+            drag_actions(&DragDropEvent::Enter {
+                paths: vec![path.clone()],
+                position,
+            }),
+            vec![DragAction::Hover(true)]
+        );
+        assert_eq!(
+            drag_actions(&DragDropEvent::Leave),
+            vec![DragAction::Hover(false)]
+        );
+        assert_eq!(
+            drag_actions(&DragDropEvent::Drop {
+                paths: vec![path.clone()],
+                position,
+            }),
+            vec![DragAction::Hover(false), DragAction::Drop(vec![path])]
+        );
+        assert!(drag_actions(&DragDropEvent::Over { position }).is_empty());
     }
 
     #[test]

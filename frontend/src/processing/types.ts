@@ -40,7 +40,15 @@ export interface DemoFixtureInput {
   readonly kind: 'demo'
 }
 
-export type ImportInput = DemoFixtureInput | File
+/** Opaque handle to a file the native shell selected; the page never sees its path. */
+export interface NativeFileInput {
+  readonly kind: 'native-file'
+  readonly id: number
+  readonly name: string
+  readonly byteLength: number
+}
+
+export type ImportInput = DemoFixtureInput | File | NativeFileInput
 
 export interface ImportedResult {
   readonly source: ImportedSource
@@ -94,15 +102,37 @@ export interface PreviewArtifact {
   dispose(): void
 }
 
-/** Opaque encoded export; `blob` is the only handle to the bytes, which never enter JSON state. */
-export interface ExportArtifact {
+/** Browser export: `blob` is the only handle to the encoded bytes, which never enter JSON state. */
+export interface BlobExportArtifact {
+  readonly kind: 'blob'
   readonly blob: Blob
   readonly byteLength: number
   dispose(): void
 }
 
+/** Native export already committed to a file the shell chose; no bytes cross into the page. */
+export interface SavedExportArtifact {
+  readonly kind: 'saved'
+  readonly name: string
+  readonly byteLength: number
+  dispose(): void
+}
+
+export type ExportArtifact = BlobExportArtifact | SavedExportArtifact
+
+/** Raised when the user dismisses the native save dialog; the export returns to idle silently. */
+export class ExportCancelledError extends Error {
+  constructor() {
+    super('The export was cancelled before a destination was chosen.')
+    this.name = 'ExportCancelledError'
+  }
+}
+
 /** Receives a fraction in [0, 1]. */
 export type ExportProgressListener = (fraction: number) => void
+
+/** Receives a fraction in [0, 1] of a running preview; adapters that cannot report it omit it. */
+export type PreviewProgressListener = (fraction: number) => void
 
 /** `artwork` renders the converted output; `original` shows the bounded imported image. */
 export type PreviewKind = 'artwork' | 'original'
@@ -122,6 +152,7 @@ export interface ProcessingAdapter {
     settings: StudioSettings,
     context: JobContext,
     kind?: PreviewKind,
+    onProgress?: PreviewProgressListener,
   ): Promise<PreviewArtifact>
   /**
    * Encodes `source` with `settings`. Rejects with the typed adapter error when `format` is

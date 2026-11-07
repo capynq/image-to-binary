@@ -1,5 +1,5 @@
 import { MAX_ENCODED_BYTES } from './protocol'
-import type { ExportArtifact } from './types'
+import type { BlobExportArtifact } from './types'
 import type { ExportCompletion, ExportSink } from './workerClient'
 
 /** Cumulative encoded-output ceiling; equal to the WASM encoded ceiling (256 MiB). */
@@ -22,7 +22,7 @@ export interface ExportAccumulatorOptions {
 /** Sink that owns the chunks of one export until it is finished or released. */
 export interface ExportAccumulator extends ExportSink {
   /** Builds the `image/png` Blob and releases the chunks; fails if the totals disagree. */
-  finish(completion: ExportCompletion): ExportArtifact
+  finish(completion: ExportCompletion): BlobExportArtifact
   /** Drops every accumulated chunk. Idempotent; later accepts fail. */
   release(): void
 }
@@ -55,14 +55,14 @@ export function createExportAccumulator(options: ExportAccumulatorOptions = {}):
     progress(fraction: number): void {
       options.onProgress?.(fraction)
     },
-    finish(completion: ExportCompletion): ExportArtifact {
+    finish(completion: ExportCompletion): BlobExportArtifact {
       const parts = chunks
       if (parts === null) throw new Error('The export accumulator was released.')
       const matches = completion.chunkCount === parts.length && completion.byteLength === total
       release()
       if (!matches) throw new Error('The exported chunks do not match the worker totals.')
       const blob = new Blob(parts, { type: 'image/png' })
-      return { blob, byteLength: blob.size, dispose: () => undefined }
+      return { kind: 'blob', blob, byteLength: blob.size, dispose: () => undefined }
     },
     release,
   }

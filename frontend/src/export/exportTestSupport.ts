@@ -1,4 +1,4 @@
-import type { ExportArtifact, UrlApi } from '../processing/types'
+import type { BlobExportArtifact, ExportArtifact, UrlApi } from '../processing/types'
 
 export interface CountingUrlApi extends UrlApi {
   readonly created: number
@@ -29,10 +29,17 @@ export function countingUrlApi(): CountingUrlApi {
   }
 }
 
-export function artifactOf(size: number): ExportArtifact {
+export function artifactOf(size: number): BlobExportArtifact {
   return {
+    kind: 'blob',
     blob: new Blob([new Uint8Array(size)], { type: 'image/png' }),
     byteLength: size,
     dispose: () => undefined,
   }
+}
+
+/** Returns the blob of a browser export, failing the test if the artifact is a native save. */
+export function blobOf(artifact: ExportArtifact): Blob {
+  if (artifact.kind !== 'blob') throw new Error('Expected a blob export.')
+  return artifact.blob
 }

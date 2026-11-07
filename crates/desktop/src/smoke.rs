@@ -4,7 +4,8 @@
 //! IPC commands from the page, resizes the real window, and writes a JSON report. The run
 //! exits non-zero on any failed check, and a watchdog exits the process if it stalls.
 
-use std::path::PathBuf;
+use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -16,7 +17,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{App, AppHandle, LogicalSize, Manager, State, WebviewWindow};
 
+mod e2e;
+
 use crate::error::{ErrorCode, IpcError};
+use crate::files::{self, FileRef, FileTable, SinkRef};
 use crate::ipc::app_info_value;
 use crate::limits::app_limits;
 use crate::window::{MINIMUM_HEIGHT_LOGICAL, MINIMUM_WIDTH_LOGICAL};
@@ -26,7 +30,7 @@ use crate::worker::{Worker, WorkerError, WORKER_THREAD_NAME};
 /// power of two, so truncation or padding is visible.
 pub const SMOKE_ECHO_LENGTH: usize = 48 * 1024 + 123;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
-const HARD_TIMEOUT: Duration = Duration::from_secs(120);
+const HARD_TIMEOUT: Duration = Duration::from_secs(300);
 const SETTLE: Duration = Duration::from_millis(700);
 const WORKER_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_LOGICAL: (f64, f64) = (1280.0, 800.0);
@@ -40,6 +44,7 @@ const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Options {
     report_path: Option<PathBuf>,
+    e2e_dir: Option<PathBuf>,
 }
 
 impl Options {
@@ -49,6 +54,7 @@ impl Options {
     pub fn from_args<I: IntoIterator<Item = String>>(args: I) -> Option<Self> {
         let mut enabled = false;
         let mut report_path = None;
+        let mut e2e_dir = None;
         let mut iterator = args.into_iter();
         while let Some(argument) = iterator.next() {
             if argument == "--smoke" {
@@ -57,9 +63,16 @@ impl Options {
                 report_path = Some(PathBuf::from(path));
             } else if argument == "--smoke-report" {
                 report_path = iterator.next().map(PathBuf::from);
+            } else if let Some(path) = argument.strip_prefix("--smoke-e2e-dir=") {
+                e2e_dir = Some(PathBuf::from(path));
+            } else if argument == "--smoke-e2e-dir" {
+                e2e_dir = iterator.next().map(PathBuf::from);
             }
         }
-        enabled.then_some(Self { report_path })
+        enabled.then_some(Self {
+            report_path,
+            e2e_dir,
+        })
     }
 }
 
@@ -99,10 +112,13 @@ struct EchoReceipt {
     fnv1a64: u64,
 }
 
-/// Managed smoke state shared by the probe commands and the echo command.
+/// Managed smoke state shared by the probe commands, the echo command and the dialog stand-ins.
 pub struct SmokeState {
     probes: Mutex<Sender<PageProbe>>,
+    e2e: Mutex<Sender<Value>>,
     echo: Mutex<Option<EchoReceipt>>,
+    open_answers: Mutex<VecDeque<Result<Option<FileRef>, IpcError>>>,
+    save_answers: Mutex<VecDeque<Result<Option<SinkRef>, IpcError>>>,
 }
 
 impl SmokeState {
@@ -120,14 +136,96 @@ impl SmokeState {
     }
 }
 
-/// Creates the smoke state and returns the receiver the driver waits on.
-pub fn install(app: &App) -> Receiver<PageProbe> {
-    let (sender, receiver) = mpsc::channel();
+/// Receivers the driver waits on: startup and resize probes, and end-to-end reports.
+pub struct Probes {
+    page: Receiver<PageProbe>,
+    e2e: Receiver<Value>,
+}
+
+/// Creates the smoke state and returns the receivers the driver waits on.
+pub fn install(app: &App) -> Probes {
+    let (sender, page) = mpsc::channel();
+    let (e2e_sender, e2e) = mpsc::channel();
     app.manage(SmokeState {
         probes: Mutex::new(sender),
+        e2e: Mutex::new(e2e_sender),
         echo: Mutex::new(None),
+        open_answers: Mutex::new(VecDeque::new()),
+        save_answers: Mutex::new(VecDeque::new()),
     });
-    receiver
+    Probes { page, e2e }
+}
+
+/// Next answer for `open_image_dialog`, queued by the driver. `None` means no stand-in is queued.
+pub(crate) fn take_open_answer(app: &AppHandle) -> Option<Result<Option<FileRef>, IpcError>> {
+    let state = app.try_state::<SmokeState>()?;
+    let mut answers = state
+        .open_answers
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    answers.pop_front()
+}
+
+/// Next answer for `save_image_dialog`, queued by the driver. `None` means no stand-in is queued.
+pub(crate) fn take_save_answer(app: &AppHandle) -> Option<Result<Option<SinkRef>, IpcError>> {
+    let state = app.try_state::<SmokeState>()?;
+    let mut answers = state
+        .save_answers
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    answers.pop_front()
+}
+
+/// Queues the answer of the next open dialog. A path is registered in the file table exactly as a
+/// chosen file would be; `None` queues a cancellation.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+pub(crate) fn smoke_queue_open(
+    files: State<'_, Arc<FileTable>>,
+    state: State<'_, SmokeState>,
+    path: Option<String>,
+) {
+    let answer = match path {
+        Some(path) => files::source_ref(files.inner(), PathBuf::from(path)).map(Some),
+        None => Ok(None),
+    };
+    state
+        .open_answers
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push_back(answer);
+}
+
+/// Queues the answer of the next save dialog, registering `path` as a destination.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+pub(crate) fn smoke_queue_save(
+    files: State<'_, Arc<FileTable>>,
+    state: State<'_, SmokeState>,
+    path: Option<String>,
+) {
+    let answer = match path {
+        Some(path) => files::sink_ref(files.inner(), PathBuf::from(path)).map(Some),
+        None => Ok(None),
+    };
+    state
+        .save_answers
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push_back(answer);
+}
+
+/// Receives the JSON report of one in-page end-to-end phase.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+pub(crate) fn smoke_e2e(state: State<'_, SmokeState>, report: Value) -> Result<(), IpcError> {
+    let sender = state.e2e.lock().unwrap_or_else(PoisonError::into_inner);
+    sender.send(report).map_err(|_| {
+        IpcError::new(
+            ErrorCode::Internal,
+            "the smoke driver is no longer listening",
+        )
+    })
 }
 
 /// Returns the probe script with this build's constants substituted.
@@ -190,7 +288,7 @@ pub(crate) async fn smoke_worker_probe(
 }
 
 /// Starts the watchdog and the driver thread. The driver exits the app with its verdict.
-pub fn start(app: AppHandle, options: Options, probes: Receiver<PageProbe>) {
+pub fn start(app: AppHandle, options: Options, probes: Probes) {
     let finished = Arc::new(AtomicBool::new(false));
     let watchdog_finished = Arc::clone(&finished);
     let watchdog_options = options.clone();
@@ -203,9 +301,10 @@ pub fn start(app: AppHandle, options: Options, probes: Receiver<PageProbe>) {
         }
     });
 
+    let fixtures = options.e2e_dir.clone();
     let driver = thread::Builder::new().name("smoke-driver".to_owned());
     let _ = driver.spawn(move || {
-        let report = drive(&app, &probes);
+        let report = drive(&app, &probes, fixtures.as_deref());
         let passed = report.passed;
         if !finished.swap(true, Ordering::SeqCst) {
             write_report(&options, &report);
@@ -239,6 +338,7 @@ struct Report {
     ipc: IpcReport,
     checks: Vec<Check>,
     failures: Vec<&'static str>,
+    e2e: Option<Value>,
 }
 
 /// Window sizes in logical CSS pixels, as measured from the native window.
@@ -328,10 +428,11 @@ struct Run {
     page: PageReport,
     ipc: IpcReport,
     scale_factor: Option<f64>,
+    e2e: Option<Value>,
 }
 
 impl Run {
-    fn drive(&mut self, app: &AppHandle, probes: &Receiver<PageProbe>) {
+    fn drive(&mut self, app: &AppHandle, probes: &Probes, fixtures: Option<&Path>) {
         self.window.units = "logical";
         self.window.default = Some(size(DEFAULT_LOGICAL));
         self.window.minimum = Some(size((MINIMUM_WIDTH_LOGICAL, MINIMUM_HEIGHT_LOGICAL)));
@@ -347,12 +448,13 @@ impl Run {
         self.recorder
             .check("main_window_present", true, "window labelled main exists");
 
-        let Some(baseline) = self.startup(app, &window, probes) else {
+        let Some(baseline) = self.startup(app, &window, &probes.page) else {
             return;
         };
-        let small_stable = self.resize(&window, probes, Resize::Small, &baseline);
-        let large_stable = self.resize(&window, probes, Resize::Large, &baseline);
+        let small_stable = self.resize(&window, &probes.page, Resize::Small, &baseline);
+        let large_stable = self.resize(&window, &probes.page, Resize::Large, &baseline);
         self.page.token_stable = small_stable && large_stable;
+        self.e2e = e2e::run(&mut self.recorder, app, &window, &probes.e2e, fixtures);
     }
 
     fn startup(
@@ -471,13 +573,14 @@ impl Run {
             ipc: self.ipc,
             checks: self.recorder.checks,
             failures,
+            e2e: self.e2e,
         }
     }
 }
 
-fn drive(app: &AppHandle, probes: &Receiver<PageProbe>) -> Report {
+fn drive(app: &AppHandle, probes: &Probes, fixtures: Option<&Path>) -> Report {
     let mut run = Run::default();
-    run.drive(app, probes);
+    run.drive(app, probes, fixtures);
     run.finish()
 }
 

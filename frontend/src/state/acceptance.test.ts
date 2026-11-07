@@ -57,7 +57,7 @@ function wrapperAdapter(
       if (options.beforeExport !== undefined) {
         await options.beforeExport(operation)
         const blob = new Blob(['accepted stale output'], { type: 'text/plain' })
-        return { blob, byteLength: blob.size, dispose: () => undefined }
+        return { kind: 'blob', blob, byteLength: blob.size, dispose: () => undefined }
       }
       return base.export(session, source, format, settings, operation)
     },

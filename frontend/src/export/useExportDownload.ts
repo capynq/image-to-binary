@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { ExportArtifact, UrlApi } from '../processing/types'
+import type { BlobExportArtifact, UrlApi } from '../processing/types'
 import { createDownloadOwner } from './downloadOwner'
 import type { DownloadLink } from './downloadOwner'
 
@@ -9,7 +9,7 @@ import type { DownloadLink } from './downloadOwner'
  * that precedes the owner's effect.
  */
 export function useExportDownload(
-  artifact: ExportArtifact | null,
+  artifact: BlobExportArtifact | null,
   filename: string,
   urlApi: UrlApi,
 ): DownloadLink | null {

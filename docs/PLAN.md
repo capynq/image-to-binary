@@ -1398,9 +1398,9 @@ Proposed commit title: `feat: connect native processing and file flows`
 
 Completion checklist:
 
-- [ ] Native file/dialog checks pass.
-- [ ] Off-thread and cancellation behavior passes.
-- [ ] Browser/native parity reviewed.
+- [x] Native file/dialog checks pass.
+- [x] Off-thread and cancellation behavior passes.
+- [x] Browser/native parity reviewed.
 
 #### 5.2.1 Add the native file boundary
 
@@ -1484,9 +1484,26 @@ Proposed commit title: `feat: connect native processing and file flows`
 
 Completion checklist:
 
-- [ ] Native adapter tests pass.
-- [ ] Browser/native parity reviewed.
-- [ ] Parent 5.2 checklist reflects verified evidence.
+- [x] Native adapter tests pass.
+- [x] Browser/native parity reviewed.
+- [x] Parent 5.2 checklist reflects verified evidence.
+
+Validation: the studio selects the native adapter only inside the Tauri
+webview; the browser renders immediately behind a static placeholder and its
+bundle contains no Tauri code, worker or WASM changes. The real desktop app
+passes the 42-check smoke flow: its PNG exports are byte-identical to the
+browser references (327 B and 2,756,400 B), its UI preview matches the
+reproducible UI-default reference from `reference_fixtures`, the UI keeps
+painting during a large export (largest frame gap 18 ms), cancel leaves no
+file, reset clears, and dialog cancels stay silent. Imports carry a generation
+and commit the source only while they are still the newest launch, so a
+cancelled or superseded import never replaces the displayed image. The page
+may only listen for events, and malformed native replies map to readable
+errors. Frontend (395), root workspace (257) and desktop (123 in each build)
+tests pass, with mutations of the import gate, generation epoch, hover reset
+and adoption path caught. Real OS dialogs and drag-and-drop were exercised only
+through queued answers and synthetic events; Windows and Linux are unavailable
+here, and Firefox and WebKit are not run by decision.
 
 ### 5.3 Add desktop menus, shortcuts, focus, appearance, and DPI
 

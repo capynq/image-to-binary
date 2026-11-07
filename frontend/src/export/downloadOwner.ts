@@ -1,8 +1,8 @@
-import type { ExportArtifact, UrlApi } from '../processing/types'
+import type { BlobExportArtifact, UrlApi } from '../processing/types'
 
 /** One object URL for one encoded export. `dispose` revokes the URL exactly once. */
 export interface DownloadLink {
-  readonly artifact: ExportArtifact
+  readonly artifact: BlobExportArtifact
   readonly url: string
   readonly filename: string
   dispose(): void
@@ -15,12 +15,12 @@ export interface DownloadLink {
  * Revocation never happens at click time, so the browser's download is not aborted.
  */
 export interface DownloadOwner {
-  show(artifact: ExportArtifact | null, filename: string): DownloadLink | null
+  show(artifact: BlobExportArtifact | null, filename: string): DownloadLink | null
   dispose(): void
 }
 
 export function createDownloadLink(
-  artifact: ExportArtifact,
+  artifact: BlobExportArtifact,
   filename: string,
   urlApi: UrlApi,
 ): DownloadLink {

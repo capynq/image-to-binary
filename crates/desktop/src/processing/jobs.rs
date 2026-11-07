@@ -12,12 +12,13 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::sync::TryLockError;
 
 use image_to_binary_adapters::session::{
-    EncodedPlan, PreviewSettings, Session, SessionError, Stage, DEFAULT_PIXEL_BUDGET,
+    EncodedPlan, PreviewSettings, Session, SessionError, SourcePlan, Stage, DEFAULT_PIXEL_BUDGET,
 };
 use image_to_binary_core::Generation;
 use serde::Serialize;
 use tauri::ipc::Channel;
 
+use super::demo::{fill_demo, DEMO_HEIGHT, DEMO_NAME, DEMO_WIDTH};
 use super::frame::encode_frame;
 use crate::error::{ErrorCode, IpcError};
 use crate::files::read::read_regular_file;
@@ -36,6 +37,11 @@ impl SessionSlot {
     /// Locks the held session. Callers keep the guard for one session call only.
     pub(crate) fn lock(&self) -> MutexGuard<'_, Option<Session>> {
         self.session.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Replaces the held session and returns the one it displaces.
+    pub(crate) fn replace(&self, session: Option<Session>) -> Option<Session> {
+        std::mem::replace(&mut *self.lock(), session)
     }
 
     #[cfg(test)]
@@ -156,18 +162,17 @@ pub(crate) struct ImportedSource {
     pub(crate) source: &'static str,
 }
 
-/// Reads and decodes the chosen file, then replaces the held source. A rejected file leaves the
-/// previous source in place.
+/// Reads and decodes the chosen file into a session. The held source is untouched: the launch
+/// layer commits the session only while its import is the newest, uncancelled launch.
 ///
 /// # Errors
 ///
 /// Returns the read errors of [`read_regular_file`] (`invalid_argument` for a non-regular file,
 /// `encoded_too_large` above the input ceiling) and the decoder's typed codes.
-pub(crate) fn import(
+pub(crate) fn decode_import(
     files: &FileTable,
-    slot: &SessionSlot,
     file: FileId,
-) -> Result<ImportedSource, IpcError> {
+) -> Result<(ImportedSource, Session), IpcError> {
     let path = files.source_path(file)?;
     let name = display_name(&path);
     let bytes = read_regular_file(&path, MAX_ENCODED_INPUT_BYTES)?;
@@ -176,14 +181,44 @@ pub(crate) fn import(
     EncodedPlan::new(bytes.len()).map_err(shared)?;
     let session = EncodedPlan::decode_session(bytes).map_err(shared)?;
     let dimensions = session.source_metadata().map_err(shared)?.dimensions();
-    *slot.lock() = Some(session);
-    Ok(ImportedSource {
+    let metadata = ImportedSource {
         name,
         width: dimensions.width(),
         height: dimensions.height(),
         input_bytes,
         source: "file",
-    })
+    };
+    Ok((metadata, session))
+}
+
+/// Metadata for the built-in demo. Its pixels are generated on the worker and never cross IPC.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ImportedDemo {
+    pub(crate) name: &'static str,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) source: &'static str,
+}
+
+/// Builds the demo fixture session. Like [`decode_import`], it leaves the held source alone.
+///
+/// # Errors
+///
+/// Returns the shared session errors of the RGBA source plan.
+pub(crate) fn build_demo() -> Result<(ImportedDemo, Session), IpcError> {
+    let plan =
+        SourcePlan::new(u64::from(DEMO_WIDTH), u64::from(DEMO_HEIGHT), None).map_err(shared)?;
+    let mut pixels = plan.allocate().map_err(shared)?;
+    fill_demo(&mut pixels);
+    let session = plan.into_session(pixels).map_err(shared)?;
+    let metadata = ImportedDemo {
+        name: DEMO_NAME,
+        width: DEMO_WIDTH,
+        height: DEMO_HEIGHT,
+        source: "demo",
+    };
+    Ok((metadata, session))
 }
 
 /// Which preview the page asked for: the original image, or the artwork rendered with settings.
@@ -403,6 +438,16 @@ mod tests {
     use super::*;
     use crate::files::test_support::TestDir;
     use crate::worker::{JobHandle, Worker, WORKER_THREAD_NAME};
+
+    fn import(
+        files: &FileTable,
+        slot: &SessionSlot,
+        file: FileId,
+    ) -> Result<ImportedSource, IpcError> {
+        let (metadata, session) = decode_import(files, file)?;
+        *slot.lock() = Some(session);
+        Ok(metadata)
+    }
 
     const WAIT: Duration = Duration::from_secs(20);
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { ExportArtifact, UrlApi } from '../processing/types'
+import type { BlobExportArtifact, UrlApi } from '../processing/types'
 import { createDownloadOwner } from './downloadOwner'
 
 function countingUrlApi(): UrlApi & { created: string[]; revoked: string[] } {
@@ -19,8 +19,9 @@ function countingUrlApi(): UrlApi & { created: string[]; revoked: string[] } {
   }
 }
 
-function artifact(size: number): ExportArtifact {
+function artifact(size: number): BlobExportArtifact {
   return {
+    kind: 'blob',
     blob: new Blob([new Uint8Array(size)], { type: 'image/png' }),
     byteLength: size,
     dispose: () => undefined,

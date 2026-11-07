@@ -53,6 +53,7 @@ pub fn run() -> ExitCode {
         ipc::save_image_dialog,
         ipc::release_handle,
         ipc::import_source,
+        ipc::import_demo,
         ipc::start_preview,
         ipc::export_png,
         ipc::cancel,
@@ -60,6 +61,9 @@ pub fn run() -> ExitCode {
         ipc::echo_binary,
         smoke::smoke_page,
         smoke::smoke_worker_probe,
+        smoke::smoke_queue_open,
+        smoke::smoke_queue_save,
+        smoke::smoke_e2e,
     ]);
     #[cfg(not(feature = "smoke"))]
     let builder = builder.invoke_handler(tauri::generate_handler![
@@ -69,6 +73,7 @@ pub fn run() -> ExitCode {
         ipc::save_image_dialog,
         ipc::release_handle,
         ipc::import_source,
+        ipc::import_demo,
         ipc::start_preview,
         ipc::export_png,
         ipc::cancel,

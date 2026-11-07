@@ -166,7 +166,7 @@ export function createDemoProcessingAdapter(options: DemoAdapterOptions = {}): P
         const blob = new Blob([fixtureChars(settings.threshold).join('\n')], {
           type: 'text/plain;charset=utf-8',
         })
-        return { blob, byteLength: blob.size, dispose: () => undefined }
+        return { kind: 'blob', blob, byteLength: blob.size, dispose: () => undefined }
       } finally {
         finishOperation(demoSession, guard)
       }

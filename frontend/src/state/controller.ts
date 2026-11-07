@@ -1,4 +1,5 @@
 import { createDemoProcessingAdapter } from '../processing/demoAdapter'
+import { ExportCancelledError } from '../processing/types'
 import type {
   ExportArtifact,
   ExportFormat,
@@ -254,7 +255,16 @@ export function createStudioController(options: StudioControllerOptions = {}): S
     const operation = beginOperation('processing', 'preview')
     let artifact: PreviewArtifact
     try {
-      artifact = await adapter.preview(session, owned.source, snapshot.settings, operation, kind)
+      artifact = await adapter.preview(
+        session,
+        owned.source,
+        snapshot.settings,
+        operation,
+        kind,
+        (fraction) => {
+          if (isCurrent(operation)) commit({ progress: fraction }, [])
+        },
+      )
     } catch (error) {
       const current = isCurrent(operation)
       fail(operation, error)
@@ -282,6 +292,21 @@ export function createStudioController(options: StudioControllerOptions = {}): S
         progress: 1,
       },
       [previous],
+    )
+  }
+
+  /** Restores the export section and the readiness the source had before the export began. */
+  const returnToIdleAfterCancelledExport = (): void => {
+    activeOperation = null
+    const ready = ownedImport !== null
+    commit(
+      {
+        status: ready ? 'ready' : 'idle',
+        progress: ready ? 1 : 0,
+        export: IDLE_EXPORT,
+        error: null,
+      },
+      [],
     )
   }
 
@@ -316,6 +341,10 @@ export function createStudioController(options: StudioControllerOptions = {}): S
       )
     } catch (error) {
       const current = isCurrent(operation)
+      if (error instanceof ExportCancelledError) {
+        if (current) returnToIdleAfterCancelledExport()
+        return
+      }
       fail(operation, error, {
         export: { status: 'failed', progress: 0, byteLength: null, error: errorText(error) },
       })
@@ -410,6 +439,7 @@ export function createStudioController(options: StudioControllerOptions = {}): S
       }
       activeOperation = null
       commit({ status: 'ready', progress: 1 }, [])
+      if (artifact.kind !== 'blob') throw new Error('Text export did not produce a blob.')
       return artifact.blob
     },
     startExport,

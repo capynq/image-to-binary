@@ -4,7 +4,7 @@ import type { ReactElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import type { ExportArtifact } from '../processing/types'
+import type { BlobExportArtifact } from '../processing/types'
 import { artifactOf, countingUrlApi } from './exportTestSupport'
 import type { CountingUrlApi } from './exportTestSupport'
 import { useExportDownload } from './useExportDownload'
@@ -12,7 +12,7 @@ import { useExportDownload } from './useExportDownload'
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
 
 function Harness(props: {
-  readonly artifact: ExportArtifact | null
+  readonly artifact: BlobExportArtifact | null
   readonly urlApi: CountingUrlApi
 }) {
   const link = useExportDownload(props.artifact, 'a-binary.png', props.urlApi)

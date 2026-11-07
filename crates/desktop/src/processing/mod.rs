@@ -10,20 +10,21 @@
 //! argument contract, so a wrong type, fraction, negative or missing field yields the same
 //! `{ code, message }` as the browser binding.
 
+mod demo;
 mod frame;
 mod jobs;
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use image_to_binary_adapters::session::args;
-use image_to_binary_adapters::session::PreviewSettings;
+use image_to_binary_adapters::session::{PreviewSettings, Session};
 use image_to_binary_core::Generation;
 use serde::Deserialize;
 use serde_json::Value;
 
 pub(crate) use jobs::{
-    ExportReport, ExportRequest, ImportedSource, PreviewMode, PreviewRequest, ProgressEvent,
-    ProgressSink, SessionSlot,
+    ExportReport, ExportRequest, ImportedDemo, ImportedSource, PreviewMode, PreviewRequest,
+    ProgressEvent, ProgressSink, SessionSlot,
 };
 
 use crate::error::{ErrorCode, IpcError};
@@ -93,25 +94,44 @@ pub(crate) fn accept_if_latest<T>(latest: u64, token: u64, outcome: T) -> Result
 enum Launch {
     /// A preview or export for this generation of the current source.
     Generation(u64),
-    /// An import or reset: the source changes, so generations restart.
-    NewSource,
+    /// A source replacement. An import with a generation starts a new source epoch at that
+    /// generation; a reset carries none and leaves the epoch unchanged.
+    Source { generation: Option<u64> },
 }
 
 #[derive(Debug)]
 struct ActiveJob {
     generation: Option<u64>,
+    token: u64,
     handle: JobHandle,
 }
 
-#[derive(Debug, Default)]
+/// Outcome channel of one import decode: the metadata and the session it would commit.
+type ImportReceiver = tauri::async_runtime::Receiver<Result<(ImportedSource, Session), IpcError>>;
+
+/// The import that most recently replaced the source and the source it displaced. It is kept
+/// until the next launch, so a cancel that reaches the shell after the commit can restore the
+/// displaced source.
+struct Committed {
+    generation: u64,
+    displaced: Option<Session>,
+}
+
+#[derive(Default)]
 struct Launches {
     token: u64,
-    last_generation: Option<u64>,
+    /// Highest accepted generation of the current source epoch. Later launches never lower it,
+    /// so an older preview cannot be accepted after a newer one or a source change.
+    high_water: Option<u64>,
     active: Option<ActiveJob>,
+    /// Token of the active job that a cancel named, so its commit is refused.
+    cancelled: Option<u64>,
+    committed: Option<Committed>,
 }
 
 /// Managed state for the native pipeline. The launch mutex covers the token, the generation
-/// order and the active job, so they change together.
+/// order, the active job and the committed source, so they change together. The session slot is
+/// only written while that mutex is held (launches before slot).
 pub(crate) struct Processing {
     worker: Arc<Worker>,
     files: Arc<FileTable>,
@@ -134,8 +154,8 @@ impl Processing {
     }
 
     /// Submits a job and records it as active, under the launch mutex. A generation not greater
-    /// than the last launched one is refused before anything is submitted. A job superseded
-    /// before delivery drops its sender, so its receiver reports `cancelled` instead of hanging.
+    /// than the high-water mark is refused before anything is submitted. A job superseded before
+    /// delivery drops its sender, so its receiver reports `cancelled` instead of hanging.
     fn launch<T, F>(
         &self,
         launch: Launch,
@@ -147,13 +167,10 @@ impl Processing {
     {
         let mut launches = self.launches();
         if let Launch::Generation(generation) = launch {
-            if launches
-                .last_generation
-                .is_some_and(|last| generation <= last)
-            {
+            if launches.high_water.is_some_and(|mark| generation <= mark) {
                 return Err(IpcError::new(
                     ErrorCode::StaleGeneration,
-                    "generation is not newer than the last launched generation",
+                    "generation is not newer than the last accepted generation",
                 ));
             }
         }
@@ -168,10 +185,17 @@ impl Processing {
         let token = launches.token;
         let generation = match launch {
             Launch::Generation(generation) => Some(generation),
-            Launch::NewSource => None,
+            Launch::Source { generation } => generation,
         };
-        launches.last_generation = generation;
-        launches.active = Some(ActiveJob { generation, handle });
+        if let Some(value) = generation {
+            launches.high_water = Some(value);
+        }
+        launches.committed = None;
+        launches.active = Some(ActiveJob {
+            generation,
+            token,
+            handle,
+        });
         Ok((token, receiver))
     }
 
@@ -179,25 +203,87 @@ impl Processing {
         self.launches().token
     }
 
-    /// Imports the file behind `file` as the one source. Superseding any active preview.
+    /// Launches the decode of an import as the source epoch at `generation`. The held source is
+    /// not replaced until [`Self::commit_import`] accepts the outcome.
+    fn begin_import(
+        &self,
+        file: FileId,
+        generation: u64,
+    ) -> Result<(u64, ImportReceiver), IpcError> {
+        let files = Arc::clone(&self.files);
+        self.launch(
+            Launch::Source {
+                generation: Some(generation),
+            },
+            move |_| jobs::decode_import(&files, file),
+        )
+    }
+
+    /// Replaces the held source with an accepted import. The check and the write happen under the
+    /// launch mutex: a superseded or cancelled import is refused and never touches the slot.
     ///
     /// # Errors
     ///
-    /// Returns the import errors, or `cancelled` when a newer job supersedes this one.
-    pub(crate) async fn import_source(&self, file: FileId) -> Result<ImportedSource, IpcError> {
-        let files = Arc::clone(&self.files);
-        let slot = Arc::clone(&self.slot);
-        let (_, receiver) = self.launch(Launch::NewSource, move |_| {
-            jobs::import(&files, &slot, file)
-        })?;
-        await_outcome(receiver).await
+    /// Returns `cancelled` when a later launch, or a cancel of this generation, precedes the commit.
+    fn commit_import<T>(
+        &self,
+        token: u64,
+        outcome: (T, Session),
+        generation: u64,
+    ) -> Result<T, IpcError> {
+        let (metadata, session) = outcome;
+        let mut launches = self.launches();
+        if launches.token != token || launches.cancelled == Some(token) {
+            return Err(IpcError::new(
+                ErrorCode::Cancelled,
+                "the import was superseded or cancelled before it committed",
+            ));
+        }
+        let displaced = self.slot.replace(Some(session));
+        launches.committed = Some(Committed {
+            generation,
+            displaced,
+        });
+        Ok(metadata)
+    }
+
+    /// Imports the file behind `file` as the source of the epoch at `generation`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the import errors, or `cancelled` when this import is superseded or cancelled.
+    pub(crate) async fn import_source(
+        &self,
+        file: FileId,
+        generation: u64,
+    ) -> Result<ImportedSource, IpcError> {
+        let (token, receiver) = self.begin_import(file, generation)?;
+        let outcome = await_outcome(receiver).await?;
+        self.commit_import(token, outcome, generation)
+    }
+
+    /// Replaces the source with the built-in demo fixture. Generated on the worker, so no pixels
+    /// cross IPC, and the demo is the same pixels the browser's demo import produces.
+    ///
+    /// # Errors
+    ///
+    /// Returns `cancelled` when this import is superseded or cancelled before it commits.
+    pub(crate) async fn import_demo(&self, generation: u64) -> Result<ImportedDemo, IpcError> {
+        let (token, receiver) = self.launch(
+            Launch::Source {
+                generation: Some(generation),
+            },
+            |_: &crate::worker::JobContext| jobs::build_demo(),
+        )?;
+        let outcome = await_outcome(receiver).await?;
+        self.commit_import(token, outcome, generation)
     }
 
     /// Renders a preview. The frame is accepted only if no later launch arrived.
     ///
     /// # Errors
     ///
-    /// Returns `stale_generation` for a generation not newer than the last launched one or a
+    /// Returns `stale_generation` for a generation not newer than the high-water mark or a
     /// superseded result, `cancelled` for a superseded job, and the render errors.
     pub(crate) async fn render_preview<P>(
         &self,
@@ -221,7 +307,7 @@ impl Processing {
     ///
     /// # Errors
     ///
-    /// Returns `stale_generation` for a generation not newer than the last launched one, and the
+    /// Returns `stale_generation` for a generation not newer than the high-water mark, and the
     /// export errors. A job superseded before its commit reports `cancelled`.
     pub(crate) async fn export_png<P>(
         &self,
@@ -240,13 +326,27 @@ impl Processing {
         await_outcome(receiver).await
     }
 
-    /// Cancels the active job when it belongs to `generation`. Cancelling a finished or unknown
-    /// generation is a no-op, so the call is idempotent.
+    /// Cancels the active job when it belongs to `generation`. An import with that generation is
+    /// cancelled too, so its commit is refused. If the import already committed, the source it
+    /// displaced is restored. Cancelling a finished or unknown generation is a no-op.
     pub(crate) fn cancel(&self, generation: u64) {
-        if let Some(active) = self.launches().active.as_ref() {
-            if active.generation == Some(generation) {
+        let mut launches = self.launches();
+        let cancelled = launches
+            .active
+            .as_ref()
+            .filter(|active| active.generation == Some(generation))
+            .map(|active| {
                 active.handle.cancel();
-            }
+                active.token
+            });
+        if let Some(token) = cancelled {
+            launches.cancelled = Some(token);
+        }
+        if let Some(committed) = launches
+            .committed
+            .take_if(|committed| committed.generation == generation)
+        {
+            let _ = self.slot.replace(committed.displaced);
         }
     }
 
@@ -257,8 +357,8 @@ impl Processing {
     /// Returns `cancelled` when a later launch supersedes the reset before it runs.
     pub(crate) async fn reset(&self) -> Result<(), IpcError> {
         let slot = Arc::clone(&self.slot);
-        let (_, receiver) = self.launch(Launch::NewSource, move |_| {
-            *slot.lock() = None;
+        let (_, receiver) = self.launch(Launch::Source { generation: None }, move |_| {
+            let _ = slot.replace(None);
             Ok(())
         })?;
         await_outcome(receiver).await
@@ -431,18 +531,89 @@ mod tests {
             ErrorCode::StaleGeneration
         );
         processing
-            .launch(Launch::NewSource, |_: &crate::worker::JobContext| {
-                Ok::<(), IpcError>(())
-            })
+            .launch(
+                Launch::Source { generation: None },
+                |_: &crate::worker::JobContext| Ok::<(), IpcError>(()),
+            )
             .unwrap();
-        let (_, receiver) = processing.launch(Launch::Generation(0), record(0)).unwrap();
+        assert!(matches!(
+            processing.launch(Launch::Generation(0), record(0)),
+            Err(error) if error.code() == ErrorCode::StaleGeneration
+        ));
+        let (_, receiver) = processing.launch(Launch::Generation(6), record(6)).unwrap();
         assert_eq!(
             tauri::async_runtime::block_on(await_outcome(receiver)).unwrap(),
-            0
+            6
         );
         let order = ran.lock().unwrap().clone();
         assert!(!order.contains(&3), "a refused launch ran: {order:?}");
         assert!(order.iter().filter(|generation| **generation == 5).count() <= 1);
+    }
+
+    #[test]
+    fn a_cancelled_import_never_replaces_the_source() {
+        let dir = TestDir::new("mod-cancelled-import");
+        let processing = processing();
+        import_bmp(&processing, &dir);
+        let small = processing
+            .files
+            .insert_source(dir.file("small.bmp", &bmp_bytes(10, 10)))
+            .unwrap();
+        let (token, receiver) = processing.begin_import(small, 2).unwrap();
+        processing.cancel(2);
+        drop(receiver);
+        let outcome = jobs::decode_import(&processing.files, small).unwrap();
+        assert_eq!(
+            processing
+                .commit_import(token, outcome, 2)
+                .unwrap_err()
+                .code(),
+            ErrorCode::Cancelled
+        );
+        assert_eq!(source_dimensions(&processing), (40, 30));
+        tauri::async_runtime::block_on(processing.render_preview(
+            artwork_request(3),
+            Record(Arc::new(StdMutex::new(Vec::new()))),
+        ))
+        .expect("the previous source still renders");
+        assert_eq!(source_dimensions(&processing), (40, 30));
+    }
+
+    #[test]
+    fn cancelling_a_committed_import_restores_the_previous_source() {
+        let dir = TestDir::new("mod-restore");
+        let processing = processing();
+        import_bmp(&processing, &dir);
+        let small = processing
+            .files
+            .insert_source(dir.file("small.bmp", &bmp_bytes(10, 10)))
+            .unwrap();
+        tauri::async_runtime::block_on(processing.import_source(small, 2)).unwrap();
+        assert_eq!(source_dimensions(&processing), (10, 10));
+        processing.cancel(2);
+        assert_eq!(source_dimensions(&processing), (40, 30));
+    }
+
+    #[test]
+    fn an_import_epoch_keeps_refusing_generations_below_its_start() {
+        let processing = processing();
+        let accepted = |launch: Launch| {
+            processing
+                .launch(launch, |_: &crate::worker::JobContext| {
+                    Ok::<(), IpcError>(())
+                })
+                .is_ok()
+        };
+        assert!(accepted(Launch::Generation(5)));
+        assert!(accepted(Launch::Source {
+            generation: Some(6)
+        }));
+        assert!(!accepted(Launch::Generation(3)));
+        assert!(!accepted(Launch::Generation(6)));
+        assert!(accepted(Launch::Generation(7)));
+        assert!(accepted(Launch::Source { generation: None }));
+        assert!(!accepted(Launch::Generation(7)));
+        assert!(accepted(Launch::Generation(8)));
     }
 
     #[test]
@@ -536,36 +707,46 @@ mod tests {
 
     fn import_bmp(processing: &Processing, dir: &TestDir) {
         let id = processing.files.insert_source(bmp_fixture(dir)).unwrap();
-        tauri::async_runtime::block_on(processing.import_source(id)).unwrap();
+        tauri::async_runtime::block_on(processing.import_source(id, 0)).unwrap();
     }
 
     fn bmp_fixture(dir: &TestDir) -> PathBuf {
-        let path = dir.path().join("source.bmp");
-        if !path.exists() {
-            let mut bytes = b"BM".to_vec();
-            let (width, height) = (40_u32, 30_u32);
-            let row = (width * 3).div_ceil(4) * 4;
-            let data = row * height;
-            bytes.extend_from_slice(&(54 + data).to_le_bytes());
-            bytes.extend_from_slice(&[0, 0, 0, 0, 54, 0, 0, 0, 40, 0, 0, 0]);
-            bytes.extend_from_slice(&width.to_le_bytes());
-            bytes.extend_from_slice(&height.to_le_bytes());
-            bytes.extend_from_slice(&[1, 0, 24, 0, 0, 0, 0, 0]);
-            bytes.extend_from_slice(&data.to_le_bytes());
-            bytes.extend_from_slice(&[0; 16]);
-            for y in 0..height {
-                for x in 0..width {
-                    bytes.extend_from_slice(&[
-                        u8::try_from((x * 9 + y) % 256).unwrap(),
-                        u8::try_from((x * 3) % 256).unwrap(),
-                        200,
-                    ]);
-                }
-                bytes.resize(bytes.len() + usize::try_from(row - width * 3).unwrap(), 0);
+        dir.file("source.bmp", &bmp_bytes(40, 30))
+    }
+
+    fn bmp_bytes(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = b"BM".to_vec();
+        let row = (width * 3).div_ceil(4) * 4;
+        let data = row * height;
+        bytes.extend_from_slice(&(54 + data).to_le_bytes());
+        bytes.extend_from_slice(&[0, 0, 0, 0, 54, 0, 0, 0, 40, 0, 0, 0]);
+        bytes.extend_from_slice(&width.to_le_bytes());
+        bytes.extend_from_slice(&height.to_le_bytes());
+        bytes.extend_from_slice(&[1, 0, 24, 0, 0, 0, 0, 0]);
+        bytes.extend_from_slice(&data.to_le_bytes());
+        bytes.extend_from_slice(&[0; 16]);
+        for y in 0..height {
+            for x in 0..width {
+                bytes.extend_from_slice(&[
+                    u8::try_from((x * 9 + y) % 256).unwrap(),
+                    u8::try_from((x * 3) % 256).unwrap(),
+                    200,
+                ]);
             }
-            std::fs::write(&path, bytes).unwrap();
+            bytes.resize(bytes.len() + usize::try_from(row - width * 3).unwrap(), 0);
         }
-        path
+        bytes
+    }
+
+    fn source_dimensions(processing: &Processing) -> (u32, u32) {
+        let slot = processing.slot.lock();
+        let dimensions = slot
+            .as_ref()
+            .expect("a source is held")
+            .source_metadata()
+            .unwrap()
+            .dimensions();
+        (dimensions.width(), dimensions.height())
     }
 
     fn artwork_request(generation: u64) -> PreviewRequest {
@@ -683,7 +864,7 @@ mod tests {
         let files = Arc::new(FileTable::default());
         let processing = Processing::new(Arc::new(Worker::spawn().unwrap()), Arc::clone(&files));
         let id = files.insert_source(heic_sample()).unwrap();
-        let imported = tauri::async_runtime::block_on(processing.import_source(id)).unwrap();
+        let imported = tauri::async_runtime::block_on(processing.import_source(id, 1)).unwrap();
         assert_eq!(imported.name, "sample.heic");
         assert_eq!((imported.width, imported.height), (64, 48));
         assert_eq!(imported.input_bytes, 653);
@@ -696,7 +877,7 @@ mod tests {
         let files = Arc::new(FileTable::default());
         let processing = Processing::new(Arc::new(Worker::spawn().unwrap()), Arc::clone(&files));
         let id = files.insert_source(heic_sample()).unwrap();
-        let error = tauri::async_runtime::block_on(processing.import_source(id)).unwrap_err();
+        let error = tauri::async_runtime::block_on(processing.import_source(id, 1)).unwrap_err();
         assert_eq!(error.code(), ErrorCode::CodecUnavailable);
     }
 

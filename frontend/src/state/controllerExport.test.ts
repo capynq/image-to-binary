@@ -84,6 +84,7 @@ function makeArtifact(state: Harness): ExportArtifact {
     disposals: 0,
   }
   const artifact: ExportArtifact = {
+    kind: 'blob',
     blob: new Blob([Uint8Array.of(1, 2, 3, 4, 5)], { type: 'image/png' }),
     byteLength: 5,
     dispose: () => {
