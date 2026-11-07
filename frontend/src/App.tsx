@@ -480,7 +480,7 @@ export default function App({ controller, native, menu = null }: AppProps) {
           </div>
           <div className={`artifact-frame ${viewReady ? 'has-fixture' : ''}`}>
             {snapshot.metadata !== null && (
-              <div hidden={!viewReady}>
+              <div className="canvas-slot" hidden={!viewReady}>
                 <ComparisonCanvas
                   view={view}
                   source={{ width: snapshot.metadata.width, height: snapshot.metadata.height }}

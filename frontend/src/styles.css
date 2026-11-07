@@ -265,13 +265,14 @@ button:disabled {
   border: 0;
 }
 
+.theme-choice {
+  max-width: 100%;
+}
 .theme-choice .mode-options {
-  display: flex;
-  flex-wrap: wrap;
   gap: 6px;
 }
 .theme-choice .mode-option {
-  min-width: 96px;
+  min-width: 0;
   padding: 0 12px;
   font-size: 0.9rem;
 }
@@ -324,6 +325,7 @@ h2 {
 }
 .view-toggle {
   min-width: 0;
+  max-width: 100%;
   margin: 0;
   padding: 3px;
   border: 1px solid var(--border);
@@ -331,10 +333,10 @@ h2 {
   border-radius: 6px;
 }
 .view-toggle .mode-options {
-  display: flex;
   gap: 3px;
 }
 .view-toggle .mode-option {
+  min-width: 0;
   min-height: 44px;
   padding: 6px 11px;
   border-color: transparent;
@@ -373,6 +375,7 @@ h2 {
 .artifact-frame.has-fixture {
   display: flex;
   flex-direction: column;
+  align-items: stretch;
   padding: 12px;
   background: var(--base);
 }
@@ -395,10 +398,20 @@ h2 {
   padding: 0 4px;
   font-size: 0.85rem;
 }
+.canvas-slot {
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+}
+.canvas-slot[hidden] {
+  display: none;
+}
 .comparison-viewport {
   position: relative;
   flex: 1 1 auto;
-  min-height: 14rem;
+  min-height: 16rem;
   min-width: 0;
   overflow: hidden;
   border: 1px solid var(--border);
@@ -732,7 +745,7 @@ a.button {
     overflow: visible;
   }
   .artifact-frame {
-    height: clamp(360px, 55vw, 600px);
+    min-height: clamp(360px, 55vw, 600px);
   }
   .inspector {
     border-top: 1px solid var(--border);
@@ -747,7 +760,7 @@ a.button {
   }
   .inspector-content {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr));
     gap: 24px;
   }
   .control-section {
@@ -784,15 +797,12 @@ a.button {
     align-items: start;
   }
   .artifact-frame {
-    height: clamp(330px, 70vw, 520px);
+    min-height: clamp(330px, 70vw, 520px);
   }
   .inspector {
     border-top: 1px solid var(--border);
     border-left: 0;
     overflow: visible;
-  }
-  .inspector-toggle {
-    display: flex;
   }
   .inspector-content {
     padding: 22px 16px 28px;

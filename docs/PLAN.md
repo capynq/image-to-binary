@@ -2040,9 +2040,30 @@ Proposed commit title: `feat: add responsive studio layout`
 
 Completion checklist:
 
-- [ ] Breakpoint geometry tests pass.
-- [ ] Resize/orientation state preservation passes.
-- [ ] Overflow and scrolling review complete.
+- [x] Breakpoint geometry tests pass.
+- [x] Resize/orientation state preservation passes.
+- [x] Overflow and scrolling review complete.
+
+Validation: container queries are not used, because the Safari/WKWebView 14.1
+and Chrome 100 floor lacks them; page bands use media queries and components
+reflow through intrinsic sizing (`flex-wrap`, `repeat(auto-fit, minmax(min(100%,
+…), 1fr))`, `min()`, `clamp()`), so the layout needs no progressive
+enhancement. Below 768 px the studio is one column with the inspector below the
+canvas and no collapse toggle; from 768 to 1199 px the canvas comes first and
+the inspector collapses through a labelled toggle; from 1200 px the inspector
+scrolls on its own beside the canvas and the page does not scroll at 1280×800.
+The comparison canvas now fills its frame: at 1280×800 it grew from 461×224 to
+838×394 CSS px. The theme choice and view tabs fit one row at 320 px. Chromium
+checks at 14 widths from 320 to 2560 px plus 640×360, 800×600, 1024×600, and
+844×390, in light and dark, find no horizontal overflow, overlap, ellipsis
+trimming, unreachable control, or touch target under 44 px; long names and
+full errors wrap. Source, settings, zoom, split, and inspector state survive
+resizing through 1440, 1024, 390, 844×390, and 1280×800 without reloading the
+image. 776 layout checks pass; removing the canvas fill fails 36 of them. 775
+frontend tests, 140 comparison checks, Chromium export sections a–i, 58 desktop
+interaction checks, forced-colour and focus checks, and the real app's 64 smoke
+checks pass. Firefox, WebKit, 200% text, and 400% zoom were not exercised here;
+the latter two belong to 7.4.
 
 ### 7.4 Add layout, accessibility, and boundary tests
 
