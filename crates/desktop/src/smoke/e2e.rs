@@ -219,6 +219,20 @@ fn check_main(recorder: &mut Recorder, main: &Value, assets: &Assets, scratch: &
         ),
     );
 
+    recorder.check(
+        "e2e_import_renders_artwork_without_a_render_click",
+        main["autoRender"]["importRendered"] == json!(true),
+        format!("autoRender {}", main["autoRender"]),
+    );
+    let badges = &main["autoRender"]["badges"];
+    recorder.check(
+        "e2e_settings_changes_show_the_updating_badge",
+        badges["cellSize"] == json!(true)
+            && badges["ramp"] == json!(true)
+            && badges["colour"] == json!(true),
+        format!("badges {badges}"),
+    );
+
     let png_status = text(&main["png"], "exportStatus");
     let png_out = read(&scratch.join("png.png"));
     recorder.check(

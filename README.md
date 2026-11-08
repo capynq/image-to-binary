@@ -115,7 +115,11 @@ Nothing is signed, notarised, uploaded or published.
    **ASCII** (a ramp of up to 64 printable characters, least ink first) or
    **Block** (Unicode block elements with average sampling).
 3. Adjust cell size, font size, threshold, colours, colour mode, contrast and
-   invert tones. Press **Render artwork** to refresh the artwork preview.
+   invert tones. The artwork refreshes about 250 ms after the last change: the
+   previous artwork stays on screen, dimmed, under an **Updating…** badge until
+   the new one is ready. Press **Render artwork** to render at once, or
+   **Escape** to cancel an automatic update until the next change. A newly
+   opened image renders as soon as its preview is ready.
 4. Switch the view between **Original**, **Artwork** and **Split** (a draggable
    divider over both images), zoom, pan and fit.
 5. Choose **PNG image** or **UTF-8 text** and press **Export**. In the browser,
@@ -137,8 +141,8 @@ Desktop menus provide these accelerators (`CmdOrCtrl` is Cmd on macOS):
 | Original view | `CmdOrCtrl+1` |
 | Artwork view | `CmdOrCtrl+2` |
 | Split view | `CmdOrCtrl+3` |
-| Render | `CmdOrCtrl+R` |
-| Cancel a running job | `Escape` (handled by the page, never while typing in a field) |
+| Render artwork now | `CmdOrCtrl+R` |
+| Cancel a running job or automatic update | `Escape` (handled by the page, never while typing in a field) |
 
 In the browser, these actions are buttons. The browser keeps its own shortcuts
 for the same key combinations, so the studio does not bind them.

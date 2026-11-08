@@ -2383,8 +2383,19 @@ Proposed commit title: `test: cover automatic render in the desktop smoke run`
 
 Completion checklist:
 
-- [ ] Smoke run updated and passing.
-- [ ] README updated.
+- [x] Smoke run updated and passing.
+- [x] README updated.
+
+Validation: the desktop smoke run waits for the automatic render after
+import and after each settings change, records the Updating badge, and keeps
+one explicit Render click plus the menu render step; on macOS arm64 it
+passes 66 checks with no failures. Desktop Clippy `-D warnings`, formatting
+and 145 tests pass. The README describes the 250 ms automatic refresh, the
+badge, the manual override and Escape. A Chromium check at 1280×800 showed
+the badge, `aria-busy` and 0.6 opacity right after a slider change, then the
+settled artwork, with no console errors. The large-export frame-gap check
+saw no animation frames in this headless-host run, so it proves nothing
+here; Escape during an automatic update is covered by unit tests only.
 
 ### 9.4 Decode animated GIF frames
 

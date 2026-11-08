@@ -52,6 +52,43 @@
       rgba: Array.from(context.getImageData(0, 0, canvas.width, canvas.height).data),
     }
   }
+  const artworkSrc = () =>
+    document.querySelector('img.fixture-preview[alt="Binary artwork preview"]')?.getAttribute('src') ?? null
+  const artworkIdle = () => document.querySelector('.artifact-frame.is-refreshing') === null
+  const newArtwork = (previous, what) =>
+    waitFor(() => {
+      const image = previewImage()
+      return image !== null && image.getAttribute('src') !== previous && artworkIdle() ? image : null
+    }, what, 60000)
+  const settledArtwork = async () => {
+    let seen = null
+    let quietSince = performance.now()
+    await waitFor(() => {
+      const current = artworkSrc()
+      if (previewImage() === null || !artworkIdle() || current !== seen) {
+        seen = current
+        quietSince = performance.now()
+        return null
+      }
+      return performance.now() - quietSince >= 400 ? true : null
+    }, 'settled artwork', 60000)
+    return artworkSrc()
+  }
+  const awaitAutoArtwork = () =>
+    waitFor(() => metadata().includes('Artwork preview'), 'automatic artwork after import', 60000)
+  const showArtwork = () =>
+    [...document.querySelectorAll('.view-toggle label')]
+      .find((label) => label.textContent.trim() === 'Artwork')
+      .click()
+  const badgeAfter = async (change) => {
+    change()
+    const started = performance.now()
+    for (;;) {
+      if (document.querySelector('.updating-badge') !== null) return true
+      if (performance.now() - started > 200) return false
+      await sleep(5)
+    }
+  }
   const openNative = async (path) => {
     await invoke('smoke_queue_open', { path })
     headerButton('Open image').click()
@@ -101,9 +138,11 @@
     await openNative(cfg.pngFixture)
     await waitFor(() => metadata().includes('png23x17.png'), 'PNG import')
     out.png = { metadata: metadata() }
-    await clickEnabled('Render artwork')
-    const preview = await waitFor(previewImage, 'PNG artwork preview')
+    await awaitAutoArtwork()
+    showArtwork()
+    const preview = await newArtwork(null, 'PNG artwork shown after import')
     out.preview = pixelsOf(preview)
+    out.autoRender = { importRendered: true }
     await invoke('smoke_queue_save', { path: `${cfg.outDir}/png.png` })
     await clickEnabled(['Export PNG', 'Export again'])
     await waitFor(() => status().startsWith('Saved '), 'PNG export to the chosen file')
@@ -112,18 +151,26 @@
     headerButton('Load demo').click()
     await waitFor(() => metadata().includes('Built-in demo'), 'demo import')
     out.demo = { metadata: metadata() }
-    await clickEnabled('Render artwork')
-    const demoPreview = await waitFor(previewImage, 'demo artwork preview')
+    await awaitAutoArtwork()
+    showArtwork()
+    const demoPreview = await newArtwork(null, 'demo artwork shown after import')
     out.demo.preview = { width: demoPreview.naturalWidth, height: demoPreview.naturalHeight }
 
     await openNative(cfg.largeFixture)
     await waitFor(() => metadata().includes('large1200.png'), 'large PNG import')
-    setRange('cell-size', 5)
-    setRange('font-size', 10)
+    await awaitAutoArtwork()
+    showArtwork()
+    await newArtwork(null, 'large artwork shown after import')
+    const beforeResize = await settledArtwork()
+    const resizeBadge = await badgeAfter(() => {
+      setRange('cell-size', 5)
+      setRange('font-size', 10)
+    })
     await waitFor(
       () => document.querySelector('output[for="font-size"]')?.textContent === '10px',
       'font setting',
     )
+    await newArtwork(beforeResize, 'large artwork rendered after cell size change')
     await invoke('smoke_queue_save', { path: `${cfg.outDir}/large.png` })
     const frames = startFrames()
     const started = performance.now()
@@ -151,6 +198,10 @@
 
     await openNative(cfg.modeFixture)
     await waitFor(() => metadata().includes('mode64x40.png'), 'mode PNG import')
+    await awaitAutoArtwork()
+    showArtwork()
+    await newArtwork(null, 'mode artwork shown after import')
+    const beforeAscii = await settledArtwork()
     setRange('cell-size', 6)
     setRange('font-size', 10)
     await waitFor(
@@ -159,9 +210,8 @@
     )
     document.querySelector('input[type="radio"][value="ascii"]').click()
     const rampField = await waitFor(() => document.querySelector('input[name="ramp"]'), 'ASCII ramp field')
-    setValue(rampField, cfg.modeRamp)
-    await clickEnabled('Render artwork')
-    const asciiPreview = await waitFor(previewImage, 'ASCII artwork preview')
+    const rampBadge = await badgeAfter(() => setValue(rampField, cfg.modeRamp))
+    const asciiPreview = await newArtwork(beforeAscii, 'ASCII artwork rendered after ramp change')
     out.mode = {
       ramp: document.querySelector('input[name="ramp"]').value,
       preview: pixelsOf(asciiPreview),
@@ -173,22 +223,21 @@
     document.querySelector('input[type="radio"][value="binary"]').click()
     await waitFor(() => document.querySelector('input[name="ramp"]') === null, 'classic mode restored')
 
-    const styleBefore = document.querySelector('img.fixture-preview[alt="Binary artwork preview"]')?.getAttribute('src') ?? null
+    const styleBefore = await settledArtwork()
     const foregroundField = await waitFor(() => document.querySelector('input[name="foreground"]'), 'foreground colour field')
-    setValue(foregroundField, '#ff8000')
-    setValue(document.querySelector('input[name="background"]'), '#102040')
+    const colourBadge = await badgeAfter(() => {
+      setValue(foregroundField, '#ff8000')
+      setValue(document.querySelector('input[name="background"]'), '#102040')
+    })
     await waitFor(
       () => document.querySelector('input[name="background"]').value === '#102040' && foregroundField.value === '#ff8000',
       'colours applied',
     )
+    await newArtwork(styleBefore, 'styled artwork rendered after colour change')
+    const beforeManual = artworkSrc()
     await clickEnabled('Render artwork')
-    const styledPreview = await waitFor(
-      () => {
-        const image = previewImage()
-        return image !== null && image.getAttribute('src') !== styleBefore ? image : null
-      },
-      'styled artwork preview',
-    )
+    const styledPreview = await newArtwork(beforeManual, 'styled artwork after the manual Render')
+    out.autoRender.badges = { cellSize: resizeBadge, ramp: rampBadge, colour: colourBadge }
     out.style = {
       foreground: foregroundField.value,
       background: document.querySelector('input[name="background"]').value,
@@ -243,6 +292,7 @@
 
     await openNative(cfg.pngFixture)
     await waitFor(() => metadata().includes('png23x17.png'), 'PNG import before save cancel')
+    await awaitAutoArtwork()
     await invoke('smoke_queue_save', { path: null })
     await clickEnabled(['Export PNG', 'Export again'])
     await waitFor(() => status() === 'PNG export cancelled.', 'save dialog cancellation', 20000)
@@ -251,6 +301,9 @@
     await waitFor(() => document.querySelector('.metadata-list') === null, 'final reset')
     await openNative(cfg.pngFixture)
     await waitFor(() => metadata().includes('png23x17.png'), 'PNG import for menu checks')
+    await awaitAutoArtwork()
+    showArtwork()
+    await newArtwork(null, 'PNG artwork shown for menu checks')
     const settle = () => sleep(250)
     const activeLabel = () => (document.activeElement?.textContent ?? '').trim()
     const selectedView = () => document.querySelector('.view-toggle label.is-selected')?.textContent.trim() ?? ''
@@ -304,8 +357,9 @@
       images: document.querySelectorAll('.comparison-clip img').length,
       focusIsBody: document.activeElement === document.body || document.activeElement === null,
     }
+    const beforeMenuRender = await settledArtwork()
     await invoke('smoke_menu_action', { id: 'view.render' })
-    await waitFor(previewImage, 'menu render preview')
+    await newArtwork(beforeMenuRender, 'menu render preview')
     menu.rendered = true
     await invoke('smoke_queue_open', { path: null })
     await invoke('smoke_menu_action', { id: 'file.open' })
@@ -328,6 +382,7 @@
     menu.savedExport = { status: status(), focus: activeLabel() }
     await openNative(cfg.largeFixture)
     await waitFor(() => metadata().includes('large1200.png'), 'large import for menu cancel')
+    await awaitAutoArtwork()
     await waitFor(() => enabledButton('Export PNG') ?? enabledButton('Export again'), 'large import ready to export', 60000)
     await invoke('smoke_queue_save', { path: `${cfg.outDir}/menu-cancelled.png` })
     document.activeElement?.blur()
