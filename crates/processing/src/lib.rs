@@ -6,7 +6,10 @@ mod renderer;
 mod sampling;
 mod style;
 
-pub use decode::{decode, DecodeError, DecodeLimits, DecodedSource, NativeFormat};
+pub use decode::{
+    decode, decode_animation, AnimationFrame, DecodeError, DecodeLimits, DecodedAnimation,
+    DecodedSource, LoopCount, NativeFormat, MAX_ANIMATION_FRAMES,
+};
 pub use original::{OriginalPreviewTask, ORIGINAL_PREVIEW_MAX_EDGE};
 pub use renderer::{
     cell_glyph, AspectGeometry, PreviewAdvance, PreviewTask, RenderError, RenderOptions,

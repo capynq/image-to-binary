@@ -1637,6 +1637,7 @@ name = "image-to-binary-processing"
 version = "0.1.0"
 dependencies = [
  "fontdue",
+ "gif",
  "image",
  "image-to-binary-core",
  "libheif-rs",

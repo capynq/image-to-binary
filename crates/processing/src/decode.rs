@@ -1,7 +1,12 @@
 //! Deterministic common-codec decoding into an owned RGBA8 source.
 
+mod animation;
 #[cfg(feature = "heif")]
 mod heif;
+
+pub use animation::{
+    decode_animation, AnimationFrame, DecodedAnimation, LoopCount, MAX_ANIMATION_FRAMES,
+};
 
 use std::fmt;
 use std::io::Cursor;
@@ -251,6 +256,12 @@ impl From<image::ImageError> for DecodeError {
     }
 }
 
+/// Returns the largest single-axis dimension admitted by `limits`.
+fn dimension_ceiling(limits: DecodeLimits) -> Result<u32, DecodeError> {
+    u32::try_from(limits.resource.max_pixels().min(u64::from(u32::MAX)))
+        .map_err(|_| DecodeError::Contract(ContractError::ArithmeticOverflow))
+}
+
 /// Decodes a supported common image and returns an owned normalized RGBA8 source.
 ///
 /// # Errors
@@ -269,10 +280,9 @@ pub fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<DecodedSource, Decod
         .with_guessed_format()
         .map_err(DecodeError::Io)?;
     let mut header_limits = Limits::default();
-    let dimension_ceiling = u32::try_from(limits.resource.max_pixels().min(u64::from(u32::MAX)))
-        .map_err(|_| DecodeError::Contract(ContractError::ArithmeticOverflow))?;
-    header_limits.max_image_width = Some(dimension_ceiling);
-    header_limits.max_image_height = Some(dimension_ceiling);
+    let ceiling = dimension_ceiling(limits)?;
+    header_limits.max_image_width = Some(ceiling);
+    header_limits.max_image_height = Some(ceiling);
     header_limits.max_alloc = Some(limits.max_decoded_bytes);
     reader.limits(header_limits);
     let format = reader.format().ok_or(DecodeError::UnsupportedFormat)?;

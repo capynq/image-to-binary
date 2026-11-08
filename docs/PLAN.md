@@ -2394,8 +2394,19 @@ Proposed commit title: `feat: decode animated GIF frames`
 
 Completion checklist:
 
-- [ ] Frame decode and limits implemented.
-- [ ] Format matrix and decode tests updated.
+- [x] Frame decode and limits implemented.
+- [x] Format matrix and decode tests updated.
+
+Validation: `decode_animation` composites GIF frames through `image`'s
+`GifDecoder` and reads the NETSCAPE loop count from a pixel-free `gif` 0.14.2
+header pass (`gif` was already locked; both lockfiles gain only the direct
+edge). Absent loop extensions play once, matching browsers; `image`'s own
+`loop_count` reports infinite for that case and is not used. Frame count
+(1000) and the decoded budget (frames plus one working canvas) are checked
+before each frame is accepted, reusing the existing error variants. `decode()`
+and its first-frame policy are unchanged. Nine animation tests, the full
+workspace and desktop suites, Clippy `-D warnings`, formatting and the WASM
+check pass.
 
 ### 9.5 Preview animated sources in the browser
 
