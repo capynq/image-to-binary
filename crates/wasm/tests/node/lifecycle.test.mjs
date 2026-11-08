@@ -166,7 +166,7 @@ test('generated declarations type numeric and sampling parameters', async () => 
   assert.match(body, /static fromRgbaWithMaxPixels\(\w+: number, \w+: number, \w+: number, \w+: Uint8Array\): ImageSession/);
   assert.match(
     body,
-    /startPreview\(\w+: number, \w+: number, \w+: number, \w+: number, \w+: "classic" \| "average", \w+: "binary" \| "ascii" \| "block" \| undefined, \w+: string \| undefined, \w+: string \| undefined, \w+: string \| undefined, \w+: "monochrome" \| "source" \| undefined, \w+: number \| undefined, \w+: boolean \| undefined, \w+: number \| undefined\): JobStage/,
+    /startPreview\(\w+: number, \w+: number, \w+: number, \w+: number, \w+: "classic" \| "average", \w+: "binary" \| "ascii" \| "block" \| undefined, \w+: string \| undefined, \w+: string \| undefined, \w+: string \| undefined, \w+: "monochrome" \| "source" \| undefined, \w+: number \| undefined, \w+: boolean \| undefined, \w+\?: number\): JobStage/,
   );
   assert.match(body, /advance\(\w+: number, \w+: number\): JobStage/);
   assert.match(body, /cancel\(\w+: number\): void/);

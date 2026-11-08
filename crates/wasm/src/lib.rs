@@ -462,7 +462,7 @@ impl ImageSession {
         color_mode: &JsValue,
         #[wasm_bindgen(unchecked_param_type = "number | undefined")] contrast: &JsValue,
         #[wasm_bindgen(unchecked_param_type = "boolean | undefined")] invert: &JsValue,
-        #[wasm_bindgen(unchecked_param_type = "number | undefined")] frame: &JsValue,
+        #[wasm_bindgen(unchecked_optional_param_type = "number")] frame: &JsValue,
     ) -> Result<JobStage, JsValue> {
         lift(start_job(
             &mut self.inner,
@@ -504,7 +504,7 @@ impl ImageSession {
     pub fn start_original_preview(
         &mut self,
         #[wasm_bindgen(unchecked_param_type = "number")] generation: &JsValue,
-        #[wasm_bindgen(unchecked_param_type = "number | undefined")] frame: &JsValue,
+        #[wasm_bindgen(unchecked_optional_param_type = "number")] frame: &JsValue,
     ) -> Result<JobStage, JsValue> {
         let generation = generation_of(&self.inner, generation);
         let frame = frame_of(frame);
@@ -632,7 +632,7 @@ impl ImageSession {
         #[wasm_bindgen(unchecked_param_type = "boolean | undefined")] invert: &JsValue,
         #[wasm_bindgen(unchecked_param_type = "\"png\" | \"text\" | undefined")]
         output_kind: &JsValue,
-        #[wasm_bindgen(unchecked_param_type = "number | undefined")] frame: &JsValue,
+        #[wasm_bindgen(unchecked_optional_param_type = "number")] frame: &JsValue,
     ) -> Result<JobStage, JsValue> {
         lift(start_job(
             &mut self.inner,
