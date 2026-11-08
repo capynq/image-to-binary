@@ -156,6 +156,47 @@
     const demoPreview = await newArtwork(null, 'demo artwork shown after import')
     out.demo.preview = { width: demoPreview.naturalWidth, height: demoPreview.naturalHeight }
 
+    await openNative(cfg.animationFixture)
+    await waitFor(() => metadata().includes('animated.gif'), 'animated GIF import')
+    await awaitAutoArtwork()
+    showArtwork()
+    const scrubber = await waitFor(
+      () => document.querySelector('input[type="range"][aria-label="Frame"]'),
+      'frame scrubber',
+    )
+    const controls = [...document.querySelectorAll('.playback-controls button')].map((button) =>
+      button.textContent.trim(),
+    )
+    const initialValueText = scrubber.getAttribute('aria-valuetext')
+    const pause = [...document.querySelectorAll('.playback-controls button')].find(
+      (button) => button.textContent.trim() === 'Pause',
+    )
+    if (pause !== undefined) pause.click()
+    await waitFor(
+      () =>
+        [...document.querySelectorAll('.playback-controls button')].some(
+          (button) => button.textContent.trim() === 'Play',
+        ),
+      'playback paused',
+    )
+    const animationFrames = []
+    for (let index = 0; index < 2; index += 1) {
+      setValue(scrubber, index)
+      await waitFor(
+        () => scrubber.getAttribute('aria-valuetext') === `Frame ${index + 1} of 2`,
+        `frame ${index + 1} selected`,
+      )
+      const src = await settledArtwork()
+      animationFrames.push({ src, width: previewImage()?.naturalWidth ?? 0 })
+    }
+    out.animation = {
+      metadata: metadata(),
+      scrubberMax: Number(scrubber.max),
+      initialValueText,
+      controls,
+      frames: animationFrames,
+    }
+
     await openNative(cfg.largeFixture)
     await waitFor(() => metadata().includes('large1200.png'), 'large PNG import')
     await awaitAutoArtwork()

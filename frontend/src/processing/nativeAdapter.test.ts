@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { countingUrlApi } from '../export/exportTestSupport'
 import { exportFilename } from '../export/downloadName'
 import { createStudioController } from '../state/controller'
+import { ANIMATION_BUDGET_MESSAGE } from './browserAdapter'
 import { createNativeProcessingAdapter, NativeUnsupportedInputError } from './nativeAdapter'
 import type { NativeBridge, NativeChannel } from './nativeBridge'
 import { NATIVE_FRAME_HEADER_BYTES } from './nativeFrame'
@@ -113,8 +114,11 @@ async function importDemo(
   return adapter.import(s, { kind: 'demo' }, context(1, 1))
 }
 
+/** Animation fields of a still import reply: one frame, no delays, loop count 0. */
+const STILL_REPLY = { frameCount: 1, frameDelays: [], loopCount: 0 } as const
+
 function demoReply() {
-  return { name: 'Demo fixture', width: 256, height: 192, source: 'demo' }
+  return { name: 'Demo fixture', width: 256, height: 192, ...STILL_REPLY, source: 'demo' }
 }
 
 function rejectionOf(promise: Promise<unknown>): Promise<unknown> {
@@ -147,6 +151,7 @@ describe('native import', () => {
         width: 4,
         height: 3,
         inputBytes: 123,
+        ...STILL_REPLY,
         source: 'file',
       }))
       .on('release_handle', () => undefined)
@@ -717,7 +722,14 @@ describe('native cancel of an in-flight import', () => {
     const pending = controller.import(toInput({ id: 9, name: 'b.png', byteLength: 10 }))
     await waitForCall(bridge, 'import_source')
     controller.cancel()
-    gate.finish?.({ name: 'b.png', width: 10, height: 10, inputBytes: 10, source: 'file' })
+    gate.finish?.({
+      name: 'b.png',
+      width: 10,
+      height: 10,
+      inputBytes: 10,
+      ...STILL_REPLY,
+      source: 'file',
+    })
     await pending
     expect(controller.getSnapshot().metadata?.name).toBe('Demo fixture')
     await controller.preview('artwork')
@@ -822,5 +834,252 @@ describe('native reply validation', () => {
       code: 'decode_failed',
       message: 'The native shell could not complete the request.',
     })
+  })
+})
+
+/** Import reply of an animated file; `loopCount` `null` is an endless loop. */
+function animatedReply(frameCount: number, frameDelays: number[], loopCount: number | null) {
+  return {
+    name: 'spin.gif',
+    width: 1,
+    height: 1,
+    inputBytes: 40,
+    frameCount,
+    frameDelays,
+    loopCount,
+    source: 'file',
+  }
+}
+
+/** A one-pixel frame whose pixel carries the frame index, so tests can tell frames apart. */
+function markedFrameBody(generation: number, frame: number): ArrayBuffer {
+  const body = frameBody(generation, 1, 1)
+  new Uint8Array(body)[NATIVE_FRAME_HEADER_BYTES] = frame
+  return body
+}
+
+function markingRender() {
+  return async (pixels: { pixels: ArrayBuffer }): Promise<Blob> =>
+    new Blob([], { type: `image/png;frame=${new Uint8Array(pixels.pixels)[0] ?? -1}` })
+}
+
+/** URL api that records each object's type under its URL and tracks which URLs are live. */
+function recordingUrlApi() {
+  const types = new Map<string, string>()
+  const live = new Set<string>()
+  let created = 0
+  return {
+    types,
+    live,
+    get created(): number {
+      return created
+    },
+    api: {
+      createObjectURL(blob: Blob): string {
+        created += 1
+        const url = `blob:frames/${created}`
+        types.set(url, blob.type)
+        live.add(url)
+        return url
+      },
+      revokeObjectURL(url: string): void {
+        live.delete(url)
+      },
+    },
+  }
+}
+
+describe('native animation', () => {
+  async function animatedSource(bridge: FakeBridge, frameCount: number) {
+    bridge
+      .on('import_source', () => animatedReply(frameCount, [5, 5, 5].slice(0, frameCount), 0))
+      .on('release_handle', () => undefined)
+    const recording = recordingUrlApi()
+    const adapter = createNativeProcessingAdapter({
+      bridge,
+      renderPreview: markingRender(),
+      urlApi: recording.api,
+    })
+    const s = adapter.createSession()
+    const result = await adapter.import(
+      s,
+      toInput({ id: 9, name: 'spin.gif', byteLength: 40 }),
+      context(1, 1),
+    )
+    return { adapter, s, source: result.source, result, recording }
+  }
+
+  it('adopts the frame timing and loop count of an animated import, and none for a still', async () => {
+    const bridge = new FakeBridge()
+      .on('import_source', () => animatedReply(3, [5, 20, 7], null))
+      .on('import_demo', demoReply)
+      .on('release_handle', () => undefined)
+    const { adapter } = setup(bridge)
+    const animated = await adapter.import(
+      adapter.createSession(),
+      toInput({ id: 9, name: 'spin.gif', byteLength: 40 }),
+      context(1, 1),
+    )
+    expect(animated.animation).toEqual({ frameCount: 3, delaysCs: [5, 20, 7], loopCount: Infinity })
+    const still = await importDemo(adapter, adapter.createSession())
+    expect(still.animation).toBeNull()
+  })
+
+  it('refuses an animation reply whose delays do not match its frame count', async () => {
+    const bridge = new FakeBridge()
+      .on('import_source', () => animatedReply(3, [5, 20], 0))
+      .on('release_handle', () => undefined)
+    const { adapter } = setup(bridge)
+    const error = await rejectionOf(
+      adapter.import(
+        adapter.createSession(),
+        toInput({ id: 9, name: 'spin.gif', byteLength: 40 }),
+        context(1, 1),
+      ),
+    )
+    expect(error).toMatchObject({ code: 'internal' })
+  })
+
+  it('renders every frame from the start frame with wrap-around, in frame order, reporting progress', async () => {
+    const bridge = new FakeBridge().on('start_preview', (args) =>
+      markedFrameBody(5, Number(args?.frame)),
+    )
+    const { adapter, s, source, recording } = await animatedSource(bridge, 3)
+    const fractions: number[] = []
+    const artifact = await adapter.preview(
+      s,
+      source,
+      DEFAULT_SETTINGS,
+      context(2, 5),
+      'artwork',
+      (fraction) => fractions.push(fraction),
+      { startFrame: 1 },
+    )
+    const frames = bridge.calls
+      .filter((call) => call.command === 'start_preview')
+      .map((call) => call.args?.frame)
+    expect(frames).toEqual([1, 2, 0])
+    expect(artifact.frames?.map((url) => recording.types.get(url))).toEqual([
+      'image/png;frame=0',
+      'image/png;frame=1',
+      'image/png;frame=2',
+    ])
+    expect(artifact.url).toBe(artifact.frames?.[1])
+    expect(fractions).toEqual([1 / 3, 2 / 3, 1])
+    artifact.dispose()
+    expect(recording.live.size).toBe(0)
+  })
+
+  it('a cancel between frames stops the run, starts no later frame and revokes the frames made', async () => {
+    const gate: { release?: () => void } = {}
+    const bridge = new FakeBridge()
+      .on('cancel', () => undefined)
+      .on('start_preview', async (args) => {
+        if (args?.frame === 1) {
+          await new Promise<void>((resolve) => {
+            gate.release = resolve
+          })
+        }
+        return markedFrameBody(5, Number(args?.frame))
+      })
+    const { adapter, s, source, recording } = await animatedSource(bridge, 3)
+    const pending = rejectionOf(
+      adapter.preview(s, source, DEFAULT_SETTINGS, context(2, 5), 'artwork', undefined, {
+        startFrame: 0,
+      }),
+    )
+    await waitForCall(bridge, 'start_preview', 2)
+    adapter.cancel(s, 2)
+    gate.release?.()
+    expect(await pending).toMatchObject({ code: 'cancelled' })
+    expect(bridge.countCalls('start_preview')).toBe(2)
+    expect(bridge.calls.find((call) => call.command === 'cancel')?.args).toEqual({ generation: 5 })
+    expect(recording.created).toBe(1)
+    expect(recording.live.size).toBe(0)
+  })
+
+  it('a failing frame revokes the frames already made and surfaces the shell error', async () => {
+    const bridge = new FakeBridge().on('start_preview', (args) => {
+      if (args?.frame === 2) throw { code: 'internal', message: 'boom' }
+      return markedFrameBody(5, Number(args?.frame))
+    })
+    const { adapter, s, source, recording } = await animatedSource(bridge, 3)
+    const error = await rejectionOf(
+      adapter.preview(s, source, DEFAULT_SETTINGS, context(2, 5), 'artwork', undefined, {
+        startFrame: 0,
+      }),
+    )
+    expect(error).toMatchObject({ code: 'internal', message: 'boom' })
+    expect(recording.created).toBe(2)
+    expect(recording.live.size).toBe(0)
+  })
+
+  it('refuses a run whose encoded frames exceed the 512 MiB budget and revokes the frames made', async () => {
+    const bridge = new FakeBridge().on('start_preview', (args) =>
+      markedFrameBody(5, Number(args?.frame)),
+    )
+    const recording = recordingUrlApi()
+    const adapter = createNativeProcessingAdapter({
+      bridge: bridge
+        .on('import_source', () => animatedReply(3, [5, 5, 5], 0))
+        .on('release_handle', () => undefined),
+      renderPreview: async () =>
+        ({ size: 300 * 1024 * 1024, type: 'image/png' }) as unknown as Blob,
+      urlApi: recording.api,
+    })
+    const s = adapter.createSession()
+    const { source } = await adapter.import(
+      s,
+      toInput({ id: 9, name: 'spin.gif', byteLength: 40 }),
+      context(1, 1),
+    )
+    const error = await rejectionOf(
+      adapter.preview(s, source, DEFAULT_SETTINGS, context(2, 5), 'artwork', undefined, {
+        startFrame: 0,
+      }),
+    )
+    expect(error).toEqual(new RangeError(ANIMATION_BUDGET_MESSAGE))
+    expect(recording.live.size).toBe(0)
+  })
+
+  it('refuses a start frame outside the source before any shell call', async () => {
+    const bridge = new FakeBridge()
+    const { adapter, s, source } = await animatedSource(bridge, 3)
+    const error = await rejectionOf(
+      adapter.preview(s, source, DEFAULT_SETTINGS, context(2, 5), 'artwork', undefined, {
+        startFrame: 3,
+      }),
+    )
+    expect(error).toBeInstanceOf(RangeError)
+    expect(bridge.countCalls('start_preview')).toBe(0)
+  })
+
+  it('export sends the frame index and refuses a frame outside the source before the save dialog', async () => {
+    const bridge = new FakeBridge()
+      .on('save_image_dialog', () => ({ id: 7, name: 'spin.png' }))
+      .on('export_file', () => ({ byteLength: 4 }))
+      .on('release_handle', () => undefined)
+    const { adapter, s, source } = await animatedSource(bridge, 3)
+    const artifact = await adapter.export(
+      s,
+      source,
+      'png',
+      DEFAULT_SETTINGS,
+      context(3, 6),
+      undefined,
+      {
+        frame: 2,
+      },
+    )
+    expect(artifact).toMatchObject({ kind: 'saved', byteLength: 4 })
+    expect(bridge.calls.find((call) => call.command === 'export_file')?.args).toMatchObject({
+      frame: 2,
+      generation: 6,
+    })
+    const error = await rejectionOf(
+      adapter.export(s, source, 'png', DEFAULT_SETTINGS, context(4, 7), undefined, { frame: 3 }),
+    )
+    expect(error).toBeInstanceOf(RangeError)
+    expect(bridge.countCalls('save_image_dialog')).toBe(1)
   })
 })

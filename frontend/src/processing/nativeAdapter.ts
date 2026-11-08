@@ -3,11 +3,13 @@ import { defaultUrlApi, isDemoFixture } from './demoAdapter'
 import type { NativeBridge, NativeChannel } from './nativeBridge'
 import { isCount, malformedReply, nativeError } from './nativeErrors'
 import { parsePreviewFrame } from './nativeFrame'
+import { renderNativeAnimation } from './nativeAnimation'
 import { renderPreviewPng } from './previewRenderer'
 import type { PreviewRenderer } from './previewRenderer'
 import type {
   ExportArtifact,
   ExportProgressListener,
+  ExportRenderOptions,
   ImportedResult,
   ImportedSource,
   ImportInput,
@@ -16,14 +18,20 @@ import type {
   PreviewArtifact,
   PreviewKind,
   PreviewProgressListener,
+  PreviewRenderOptions,
   ProcessingAdapter,
   ProcessingSession,
   StudioMetadata,
   StudioSettings,
   UrlApi,
 } from './types'
-import { isOutputKindName } from './protocol'
-import { ExportCancelledError, previewParametersOf, validateSettings } from './types'
+import { isAnimationMetadata, isOutputKindName, validateFrameIndex } from './protocol'
+import {
+  ExportCancelledError,
+  freezeAnimation,
+  previewParametersOf,
+  validateSettings,
+} from './types'
 import { ProcessingWorkerError } from './workerClient'
 import type { PreviewPixels } from './workerClient'
 
@@ -42,6 +50,7 @@ export interface NativeAdapterOptions {
 
 interface NativeSourceRecord {
   readonly name: string
+  readonly frameCount: number
   released: boolean
 }
 
@@ -66,6 +75,16 @@ interface ImportReply {
   readonly width: number
   readonly height: number
   readonly inputBytes: number | null
+  readonly frameCount: number
+  readonly frameDelays: ReadonlyArray<number>
+  /** `Infinity` for an endless loop, otherwise the repeat count after the first play. */
+  readonly loopCount: number
+}
+
+interface PreviewRequest {
+  readonly kind: PreviewKind
+  readonly settings: ReturnType<typeof previewParametersOf> | null
+  readonly generation: number
 }
 
 interface SinkReply {
@@ -125,6 +144,24 @@ export function createNativeProcessingAdapter(options: NativeAdapterOptions): Pr
       () => undefined,
       () => undefined,
     )
+  const fetchFrame = async (
+    state: NativeSessionState,
+    request: PreviewRequest,
+    frame: number,
+    channel: NativeChannel<ProgressMessage>,
+    operation: NativeOperation,
+  ): Promise<PreviewPixels> => {
+    let body: unknown
+    try {
+      await state.pendingCancel
+      body = await bridge.invoke('start_preview', { ...request, frame, progress: channel })
+    } catch (error) {
+      throw nativeError(error)
+    }
+    if (operation.cancelled) throw cancelledError()
+    const parsed = parsePreviewFrame(body, request.generation)
+    return { width: parsed.width, height: parsed.height, pixels: parsed.pixels }
+  }
   const beginOperation = (state: NativeSessionState, context: JobContext): NativeOperation => {
     const operation: NativeOperation = { generation: context.generation, cancelled: false }
     state.operations.set(context.operationId, operation)
@@ -151,7 +188,11 @@ export function createNativeProcessingAdapter(options: NativeAdapterOptions): Pr
       callQuietly('reset')
       throw new Error('Processing session is disposed.')
     }
-    const record: NativeSourceRecord = { name: reply.name, released: false }
+    const record: NativeSourceRecord = {
+      name: reply.name,
+      frameCount: reply.frameCount,
+      released: false,
+    }
     const handle = {} as ImportedSource
     state.sources.set(handle, record)
     state.current = record
@@ -168,7 +209,11 @@ export function createNativeProcessingAdapter(options: NativeAdapterOptions): Pr
     return {
       source: handle,
       metadata,
-      animation: null,
+      animation: freezeAnimation({
+        frameCount: reply.frameCount,
+        delaysCs: reply.frameDelays,
+        loopCount: reply.loopCount,
+      }),
       dispose(): void {
         if (record.released) return
         record.released = true
@@ -245,37 +290,46 @@ export function createNativeProcessingAdapter(options: NativeAdapterOptions): Pr
       context,
       kind: PreviewKind = 'artwork',
       onProgress?: PreviewProgressListener,
+      options: PreviewRenderOptions = {},
     ): Promise<PreviewArtifact> {
       const state = assertSession(session)
       assertActive(state)
-      sourceOf(state, source)
+      const record = sourceOf(state, source)
       if (kind !== 'artwork' && kind !== 'original') {
         throw new RangeError('Unknown preview kind.')
       }
       if (kind === 'artwork') validateSettings(settings)
+      const startFrame = options.startFrame ?? 0
+      const frameProblem = validateFrameIndex(startFrame, record.frameCount)
+      if (frameProblem !== null) throw new RangeError(frameProblem)
       const generation = context.generation
+      const request: PreviewRequest = {
+        kind,
+        settings: kind === 'artwork' ? previewParametersOf(settings) : null,
+        generation,
+      }
       const operation = beginOperation(state, context)
       try {
-        let body: unknown
-        try {
-          await state.pendingCancel
-          body = await bridge.invoke('start_preview', {
-            kind,
-            settings: kind === 'artwork' ? previewParametersOf(settings) : null,
-            generation,
-            progress: progressChannel(generation, onProgress),
-          })
-        } catch (error) {
-          throw nativeError(error)
+        if (record.frameCount === 1) {
+          const pixels = await fetchFrame(
+            state,
+            request,
+            0,
+            progressChannel(generation, onProgress),
+            operation,
+          )
+          return await artifactFor(pixels, renderPreview, urlApi)
         }
-        if (operation.cancelled) throw cancelledError()
-        const frame = parsePreviewFrame(body, generation)
-        const pixels: PreviewPixels = {
-          width: frame.width,
-          height: frame.height,
-          pixels: frame.pixels,
-        }
-        return await artifactFor(pixels, renderPreview, urlApi)
+        return await renderNativeAnimation({
+          frameCount: record.frameCount,
+          startFrame,
+          isCancelled: () => operation.cancelled,
+          onProgress,
+          renderFrame: (frame) =>
+            fetchFrame(state, request, frame, progressChannel(generation, undefined), operation),
+          encode: (pixels) => renderPreview(pixels),
+          urlApi,
+        })
       } finally {
         state.operations.delete(context.operationId)
       }
@@ -287,6 +341,7 @@ export function createNativeProcessingAdapter(options: NativeAdapterOptions): Pr
       settings,
       context,
       onProgress?: ExportProgressListener,
+      options: ExportRenderOptions = {},
     ): Promise<ExportArtifact> {
       const state = assertSession(session)
       assertActive(state)
@@ -295,6 +350,9 @@ export function createNativeProcessingAdapter(options: NativeAdapterOptions): Pr
         throw new RangeError('Export format must be png or text.')
       }
       validateSettings(settings)
+      const frame = options.frame ?? 0
+      const frameProblem = validateFrameIndex(frame, record.frameCount)
+      if (frameProblem !== null) throw new RangeError(frameProblem)
       const generation = context.generation
       const operation = beginOperation(state, context)
       let sink: SinkReply | null = null
@@ -319,6 +377,7 @@ export function createNativeProcessingAdapter(options: NativeAdapterOptions): Pr
             sinkId: sink.id,
             generation,
             outputKind: format,
+            frame,
             progress: progressChannel(generation, onProgress),
           })
         } catch (error) {
@@ -386,15 +445,34 @@ async function invokeImport(
 
 function readImportReply(reply: unknown): ImportReply {
   if (typeof reply !== 'object' || reply === null) throw malformedReply()
-  const { name, width, height, inputBytes } = reply as Record<string, unknown>
+  const { name, width, height, inputBytes, frameCount, frameDelays, loopCount } = reply as Record<
+    string,
+    unknown
+  >
   if (typeof name !== 'string' || !isCount(width) || !isCount(height)) throw malformedReply()
   if (inputBytes !== undefined && !isCount(inputBytes)) throw malformedReply()
+  const loop: unknown = loopCount === null ? Infinity : loopCount
+  if (
+    !isCount(frameCount) ||
+    !isNumberList(frameDelays) ||
+    typeof loop !== 'number' ||
+    !isAnimationMetadata(frameCount, frameDelays, loop)
+  ) {
+    throw malformedReply()
+  }
   return {
     name,
     width,
     height,
     inputBytes: typeof inputBytes === 'number' ? inputBytes : null,
+    frameCount,
+    frameDelays,
+    loopCount: loop,
   }
+}
+
+function isNumberList(value: unknown): value is ReadonlyArray<number> {
+  return Array.isArray(value) && value.every((item) => typeof item === 'number')
 }
 
 function readSinkReply(reply: unknown): SinkReply {

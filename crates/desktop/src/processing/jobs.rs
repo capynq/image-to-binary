@@ -12,7 +12,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::sync::TryLockError;
 
 use image_to_binary_adapters::session::{
-    EncodedPlan, OutputKind, PreviewSettings, Session, SessionError, SourcePlan, Stage,
+    EncodedPlan, LoopCount, OutputKind, PreviewSettings, Session, SessionError, SourcePlan, Stage,
     DEFAULT_PIXEL_BUDGET,
 };
 use image_to_binary_core::Generation;
@@ -29,15 +29,41 @@ use crate::limits::MAX_ENCODED_INPUT_BYTES;
 use crate::worker::JobContext;
 
 /// The one source the native shell holds. Only worker jobs lock it, one session call at a time.
+///
+/// The slot also issues the session generation of every job. A page generation can drive many
+/// frame jobs, but a session accepts only strictly newer generations, so each job takes the next
+/// value of this counter. The worker runs one job at a time in launch order, so the values
+/// increase in the order the session sees them.
 #[derive(Debug, Default)]
 pub(crate) struct SessionSlot {
     session: Mutex<Option<Session>>,
+    last_job_generation: Mutex<u64>,
 }
 
 impl SessionSlot {
     /// Locks the held session. Callers keep the guard for one session call only.
     pub(crate) fn lock(&self) -> MutexGuard<'_, Option<Session>> {
         self.session.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Issues the next session generation, strictly greater than every earlier one.
+    ///
+    /// # Errors
+    ///
+    /// Returns `arithmetic_overflow` when the counter is exhausted.
+    pub(crate) fn next_job_generation(&self) -> Result<Generation, IpcError> {
+        let mut last = self
+            .last_job_generation
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let next = last.checked_add(1).ok_or_else(|| {
+            IpcError::new(
+                ErrorCode::ArithmeticOverflow,
+                "the job generation counter is exhausted",
+            )
+        })?;
+        *last = next;
+        Ok(Generation::new(next))
     }
 
     /// Replaces the held session and returns the one it displaces.
@@ -153,6 +179,10 @@ fn with_session<R>(
 }
 
 /// Metadata for a newly imported source. Field names match the browser's import result.
+///
+/// `frame_count` is `1` for a still, and `frame_delays` is empty for one. `loop_count` is `None`
+/// for an animation that repeats forever (JSON `null`), otherwise the number of repeats after
+/// the first play.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ImportedSource {
@@ -161,6 +191,9 @@ pub(crate) struct ImportedSource {
     pub(crate) height: u32,
     pub(crate) input_bytes: u64,
     pub(crate) source: &'static str,
+    pub(crate) frame_count: usize,
+    pub(crate) frame_delays: Vec<u16>,
+    pub(crate) loop_count: Option<u16>,
 }
 
 /// Reads and decodes the chosen file into a session. The held source is untouched: the launch
@@ -180,14 +213,26 @@ pub(crate) fn decode_import(
     let input_bytes = u64::try_from(bytes.len())
         .map_err(|_| IpcError::new(ErrorCode::ArithmeticOverflow, "the input size overflows"))?;
     EncodedPlan::new(bytes.len()).map_err(shared)?;
-    let session = EncodedPlan::decode_session(bytes).map_err(shared)?;
+    let session = EncodedPlan::decode_animated_session(bytes).map_err(shared)?;
     let dimensions = session.source_metadata().map_err(shared)?.dimensions();
+    let frame_count = session.frame_count().map_err(shared)?;
+    let frame_delays = session
+        .frame_delays_centiseconds()
+        .map_err(shared)?
+        .to_vec();
+    let loop_count = match session.loop_count().map_err(shared)? {
+        LoopCount::Infinite => None,
+        LoopCount::Finite(repeats) => Some(repeats),
+    };
     let metadata = ImportedSource {
         name,
         width: dimensions.width(),
         height: dimensions.height(),
         input_bytes,
         source: "file",
+        frame_count,
+        frame_delays,
+        loop_count,
     };
     Ok((metadata, session))
 }
@@ -200,6 +245,9 @@ pub(crate) struct ImportedDemo {
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) source: &'static str,
+    pub(crate) frame_count: usize,
+    pub(crate) frame_delays: Vec<u16>,
+    pub(crate) loop_count: Option<u16>,
 }
 
 /// Builds the demo fixture session. Like [`decode_import`], it leaves the held source alone.
@@ -218,6 +266,9 @@ pub(crate) fn build_demo() -> Result<(ImportedDemo, Session), IpcError> {
         width: DEMO_WIDTH,
         height: DEMO_HEIGHT,
         source: "demo",
+        frame_count: 1,
+        frame_delays: Vec::new(),
+        loop_count: Some(0),
     };
     Ok((metadata, session))
 }
@@ -229,11 +280,21 @@ pub(crate) enum PreviewMode {
     Artwork(PreviewSettings),
 }
 
-/// One preview request. `generation` is the page's generation for the session.
+/// One preview request. `generation` is the page's generation, shared by every frame of one
+/// operation; `frame` is the index of the source frame to render (`0` for a still).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct PreviewRequest {
     pub(crate) generation: u64,
     pub(crate) mode: PreviewMode,
+    pub(crate) frame: usize,
+}
+
+/// The generations one job uses. `page` tags progress events and the encoded frame, and
+/// `session` is the strictly newer value the session accepts for this job's calls.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct JobGenerations {
+    pub(crate) page: u64,
+    pub(crate) session: Generation,
 }
 
 /// Renders a preview to completion and returns its raw frame body.
@@ -248,18 +309,25 @@ pub(crate) fn render_preview<P: ProgressSink>(
     progress: &P,
     request: PreviewRequest,
 ) -> Result<Vec<u8>, IpcError> {
-    let generation = Generation::new(request.generation);
+    let ids = JobGenerations {
+        page: request.generation,
+        session: slot.next_job_generation()?,
+    };
     with_session(slot, |session| {
         match request.mode {
-            PreviewMode::Original => session.start_original_preview(generation),
-            PreviewMode::Artwork(settings) => session.start_preview(generation, settings),
+            PreviewMode::Original => {
+                session.start_original_preview_frame(ids.session, request.frame)
+            }
+            PreviewMode::Artwork(settings) => {
+                session.start_preview_frame(ids.session, request.frame, settings)
+            }
         }
         .map(|_| ())
         .map_err(shared)
     })?;
-    drive(context, slot, generation, progress, false, |_| Ok(()))?;
+    drive(context, slot, ids, progress, false, |_| Ok(()))?;
     let (width, height, pixels) = with_session(slot, |session| {
-        let mut frame = session.finish(generation).map_err(shared)?;
+        let mut frame = session.finish(ids.session).map_err(shared)?;
         let (width, height) = (frame.width(), frame.height());
         let pixels = frame.take_pixels().map_err(shared)?;
         Ok((width, height, pixels))
@@ -275,6 +343,7 @@ pub(crate) struct ExportRequest {
     pub(crate) settings: PreviewSettings,
     pub(crate) output: OutputKind,
     pub(crate) sink: FileId,
+    pub(crate) frame: usize,
 }
 
 /// Summary of a committed export. The page never receives the destination path.
@@ -319,19 +388,22 @@ pub(crate) fn export_into<K: ChunkSink, P: ProgressSink>(
     request: ExportRequest,
     mut sink: K,
 ) -> Result<ExportReport, IpcError> {
-    let generation = Generation::new(request.generation);
+    let ids = JobGenerations {
+        page: request.generation,
+        session: slot.next_job_generation()?,
+    };
     with_session(slot, |session| {
         session
-            .start_export_as(generation, request.settings, request.output)
+            .start_export_frame_as(ids.session, request.frame, request.settings, request.output)
             .map(|_| ())
             .map_err(shared)
     })?;
     let mut byte_length = 0_u64;
-    drive(context, slot, generation, progress, true, |chunks| {
+    drive(context, slot, ids, progress, true, |chunks| {
         write_chunks(&mut sink, chunks, &mut byte_length)
     })?;
     let trailer = with_session(slot, |session| {
-        session.finish_export(generation).map_err(shared)
+        session.finish_export(ids.session).map_err(shared)
     })?;
     write_chunks(&mut sink, trailer, &mut byte_length)?;
     checkpoint(context)?;
@@ -374,7 +446,7 @@ fn checkpoint(context: &JobContext) -> Result<(), IpcError> {
 fn drive<P, W>(
     context: &JobContext,
     slot: &SessionSlot,
-    generation: Generation,
+    ids: JobGenerations,
     progress: &P,
     drain: bool,
     mut write: W,
@@ -383,9 +455,9 @@ where
     P: ProgressSink,
     W: FnMut(Vec<Vec<u8>>) -> Result<(), IpcError>,
 {
-    let outcome = drive_steps(context, slot, generation, progress, drain, &mut write);
+    let outcome = drive_steps(context, slot, ids, progress, drain, &mut write);
     if outcome.is_err() {
-        let _ = with_session(slot, |session| session.cancel(generation).map_err(shared));
+        let _ = with_session(slot, |session| session.cancel(ids.session).map_err(shared));
     }
     outcome
 }
@@ -393,7 +465,7 @@ where
 fn drive_steps<P, W>(
     context: &JobContext,
     slot: &SessionSlot,
-    generation: Generation,
+    ids: JobGenerations,
     progress: &P,
     drain: bool,
     write: &mut W,
@@ -406,10 +478,10 @@ where
         checkpoint(context)?;
         let (stage, chunks, done, total) = with_session(slot, |session| {
             let stage = session
-                .advance(generation, DEFAULT_PIXEL_BUDGET)
+                .advance(ids.session, DEFAULT_PIXEL_BUDGET)
                 .map_err(shared)?;
             let chunks = if drain {
-                session.drain_export(generation).map_err(shared)?
+                session.drain_export(ids.session).map_err(shared)?
             } else {
                 Vec::new()
             };
@@ -419,7 +491,7 @@ where
         write(chunks)?;
         if let Some(reported) = progress_stage(stage) {
             progress.report(ProgressEvent {
-                generation: generation.value(),
+                generation: ids.page,
                 stage: reported,
                 done,
                 total,
@@ -641,6 +713,7 @@ mod tests {
         let request = PreviewRequest {
             generation: 1,
             mode: PreviewMode::Artwork(settings()),
+            frame: 0,
         };
         let (handle, rx) = wait_for_outcome(&worker, move |context| {
             render_preview(context, &job_slot, &sink, request)
@@ -668,6 +741,7 @@ mod tests {
         let old = PreviewRequest {
             generation: 1,
             mode: PreviewMode::Artwork(settings()),
+            frame: 0,
         };
         let (_handle, old_rx) = wait_for_outcome(&worker, move |context| {
             render_preview(context, &old_slot, &sink, old)
@@ -677,6 +751,7 @@ mod tests {
         let newer = PreviewRequest {
             generation: 2,
             mode: PreviewMode::Original,
+            frame: 0,
         };
         let (_newer_handle, new_rx) = wait_for_outcome(&worker, move |context| {
             render_preview(context, &new_slot, &Recorder::default(), newer)
@@ -713,6 +788,7 @@ mod tests {
             settings: settings(),
             output: OutputKind::Png,
             sink,
+            frame: 0,
         };
         let (_handle, rx) = wait_for_outcome(&worker, move |context| {
             export_file(context, &job_slot, &job_files, &*job_recorder, request)
@@ -756,6 +832,7 @@ mod tests {
             settings: settings(),
             output: OutputKind::Png,
             sink,
+            frame: 0,
         };
         let (handle, rx) = wait_for_outcome(&worker, move |context| {
             export_file(context, &job_slot, &job_files, &progress, request)
@@ -792,6 +869,7 @@ mod tests {
             settings: settings(),
             output: OutputKind::Png,
             sink,
+            frame: 0,
         };
         let (_handle, rx) = wait_for_outcome(&worker, move |context| {
             export_file(context, &job_slot, &job_files, &progress, request)
@@ -819,6 +897,7 @@ mod tests {
             settings: settings(),
             output: OutputKind::Png,
             sink,
+            frame: 0,
         };
         let worker = Worker::spawn().unwrap();
         let files = Arc::new(files);
@@ -879,6 +958,7 @@ mod tests {
             settings: settings(),
             output: OutputKind::Png,
             sink: sink_id,
+            frame: 0,
         };
         let (handle, rx) = wait_for_outcome(&worker, move |context| {
             export_into(context, &job_slot, &Recorder::default(), request, sink)
@@ -899,9 +979,9 @@ mod tests {
 
     /// The bytes a complete text export of `settings()` produces through the held session.
     fn session_text_bytes(slot: &SessionSlot) -> Vec<u8> {
+        let generation = slot.next_job_generation().unwrap();
         let mut guard = slot.lock();
         let session = guard.as_mut().expect("a source is held");
-        let generation = Generation::new(1);
         session
             .start_export_as(generation, settings(), OutputKind::Text)
             .unwrap();
@@ -938,6 +1018,7 @@ mod tests {
             settings: settings(),
             output: OutputKind::Text,
             sink,
+            frame: 0,
         };
         let (_handle, rx) = wait_for_outcome(&worker, move |context| {
             export_file(
@@ -979,6 +1060,7 @@ mod tests {
             settings: settings(),
             output: OutputKind::Text,
             sink,
+            frame: 0,
         };
         let (handle, rx) = wait_for_outcome(&worker, move |context| {
             export_file(context, &job_slot, &job_files, &progress, request)
@@ -995,6 +1077,18 @@ mod tests {
             names_in(dir.path()).len(),
             2,
             "no temporary file may remain"
+        );
+    }
+
+    #[test]
+    fn job_generations_increase_and_refuse_exhaustion() {
+        let slot = SessionSlot::default();
+        assert_eq!(slot.next_job_generation().unwrap().value(), 1);
+        assert_eq!(slot.next_job_generation().unwrap().value(), 2);
+        *slot.last_job_generation.lock().unwrap() = u64::MAX;
+        assert_eq!(
+            slot.next_job_generation().unwrap_err().code(),
+            ErrorCode::ArithmeticOverflow
         );
     }
 }

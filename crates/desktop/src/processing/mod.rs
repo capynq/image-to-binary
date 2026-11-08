@@ -56,6 +56,22 @@ pub(crate) fn generation_argument(value: Option<&Value>) -> Result<Generation, I
     args::generation(js_number(value)).map_err(IpcError::from)
 }
 
+/// Converts the optional frame index. A missing or `null` value is frame `0`; any other value
+/// must be a non-negative safe integer. Whether it names a frame of the source is decided by the
+/// session, which refuses an index outside the frames with `invalid_argument`.
+///
+/// # Errors
+///
+/// Returns `invalid_argument` with the shared text for a non-integer, fractional or negative value.
+pub(crate) fn frame_argument(value: Option<&Value>) -> Result<usize, IpcError> {
+    match value {
+        None | Some(Value::Null) => Ok(0),
+        Some(other) => {
+            args::frame_index(other.as_f64().unwrap_or(f64::NAN)).map_err(IpcError::from)
+        }
+    }
+}
+
 /// Converts the settings object with the shared contract, checking sampling first, then cell
 /// size, font size and threshold, then mode, ramp and the render style.
 ///
@@ -141,11 +157,22 @@ pub(crate) fn accept_if_latest<T>(latest: u64, token: u64, outcome: T) -> Result
 /// How a launch relates to the page's generation sequence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Launch {
-    /// A preview or export for this generation of the current source.
+    /// An export for this generation of the current source. Each generation exports once.
     Generation(u64),
+    /// One frame of a preview for this generation. A generation may launch several frame jobs
+    /// in order, until it is cancelled.
+    Frame(u64),
     /// A source replacement. An import with a generation starts a new source epoch at that
     /// generation; a reset carries none and leaves the epoch unchanged.
     Source { generation: Option<u64> },
+}
+
+/// The frame run of the newest generation. An open run accepts further frame launches at that
+/// generation; a cancelled run refuses them with `cancelled`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FrameRun {
+    Open(u64),
+    Cancelled(u64),
 }
 
 #[derive(Debug)]
@@ -175,6 +202,7 @@ struct Launches {
     active: Option<ActiveJob>,
     /// Token of the active job that a cancel named, so its commit is refused.
     cancelled: Option<u64>,
+    frame_run: Option<FrameRun>,
     committed: Option<Committed>,
 }
 
@@ -215,14 +243,7 @@ impl Processing {
         F: FnOnce(&crate::worker::JobContext) -> Result<T, IpcError> + Send + 'static,
     {
         let mut launches = self.launches();
-        if let Launch::Generation(generation) = launch {
-            if launches.high_water.is_some_and(|mark| generation <= mark) {
-                return Err(IpcError::new(
-                    ErrorCode::StaleGeneration,
-                    "generation is not newer than the last accepted generation",
-                ));
-            }
-        }
+        admit(&launches, launch)?;
         let (sender, receiver) = tauri::async_runtime::channel::<Result<T, IpcError>>(1);
         let handle = self
             .worker
@@ -233,12 +254,16 @@ impl Processing {
         launches.token += 1;
         let token = launches.token;
         let generation = match launch {
-            Launch::Generation(generation) => Some(generation),
+            Launch::Generation(generation) | Launch::Frame(generation) => Some(generation),
             Launch::Source { generation } => generation,
         };
         if let Some(value) = generation {
             launches.high_water = Some(value);
         }
+        launches.frame_run = match launch {
+            Launch::Frame(generation) => Some(FrameRun::Open(generation)),
+            Launch::Generation(_) | Launch::Source { .. } => None,
+        };
         launches.committed = None;
         launches.active = Some(ActiveJob {
             generation,
@@ -328,12 +353,13 @@ impl Processing {
         self.commit_import(token, outcome, generation)
     }
 
-    /// Renders a preview. The frame is accepted only if no later launch arrived.
+    /// Renders one frame of a preview. The frame is accepted only if no later launch arrived.
     ///
     /// # Errors
     ///
-    /// Returns `stale_generation` for a generation not newer than the high-water mark or a
-    /// superseded result, `cancelled` for a superseded job, and the render errors.
+    /// Returns `stale_generation` for a generation below the high-water mark or a superseded
+    /// result, `cancelled` for a frame run that was cancelled or a superseded job, and the
+    /// render errors, including `invalid_argument` for a frame outside the source.
     pub(crate) async fn render_preview<P>(
         &self,
         request: PreviewRequest,
@@ -343,10 +369,9 @@ impl Processing {
         P: ProgressSink + Send + 'static,
     {
         let slot = Arc::clone(&self.slot);
-        let (token, receiver) = self
-            .launch(Launch::Generation(request.generation), move |context| {
-                jobs::render_preview(context, &slot, &progress, request)
-            })?;
+        let (token, receiver) = self.launch(Launch::Frame(request.generation), move |context| {
+            jobs::render_preview(context, &slot, &progress, request)
+        })?;
         let frame = await_outcome(receiver).await?;
         accept_if_latest(self.latest(), token, frame)
     }
@@ -380,6 +405,9 @@ impl Processing {
     /// displaced is restored. Cancelling a finished or unknown generation is a no-op.
     pub(crate) fn cancel(&self, generation: u64) {
         let mut launches = self.launches();
+        if launches.frame_run == Some(FrameRun::Open(generation)) {
+            launches.frame_run = Some(FrameRun::Cancelled(generation));
+        }
         let cancelled = launches
             .active
             .as_ref()
@@ -411,6 +439,46 @@ impl Processing {
             Ok(())
         })?;
         await_outcome(receiver).await
+    }
+}
+
+/// Decides whether `launch` may run, given the page's generation sequence.
+///
+/// A generation must exceed the high-water mark, except that frame launches may repeat the
+/// newest generation while its frame run is open. Frames of a cancelled run are refused.
+///
+/// # Errors
+///
+/// Returns `stale_generation` for a generation not newer than the mark (or a repeat that does
+/// not continue an open frame run), and `cancelled` for a frame of a cancelled run.
+fn admit(launches: &Launches, launch: Launch) -> Result<(), IpcError> {
+    let stale = || {
+        IpcError::new(
+            ErrorCode::StaleGeneration,
+            "generation is not newer than the last accepted generation",
+        )
+    };
+    match launch {
+        Launch::Source { .. } => Ok(()),
+        Launch::Generation(generation) => {
+            if launches.high_water.is_some_and(|mark| generation <= mark) {
+                Err(stale())
+            } else {
+                Ok(())
+            }
+        }
+        Launch::Frame(generation) => match launches.high_water {
+            Some(mark) if generation < mark => Err(stale()),
+            Some(mark) if generation == mark => match launches.frame_run {
+                Some(FrameRun::Open(run)) if run == generation => Ok(()),
+                Some(FrameRun::Cancelled(run)) if run == generation => Err(IpcError::new(
+                    ErrorCode::Cancelled,
+                    "the frame run was cancelled",
+                )),
+                _ => Err(stale()),
+            },
+            _ => Ok(()),
+        },
     }
 }
 
@@ -908,6 +976,7 @@ mod tests {
             mode: PreviewMode::Artwork(
                 PreviewSettings::new(5, 10, 128, image_to_binary_core::Sampling::Classic).unwrap(),
             ),
+            frame: 0,
         }
     }
 
@@ -918,6 +987,7 @@ mod tests {
                 .unwrap(),
             output: OutputKind::Png,
             sink,
+            frame: 0,
         }
     }
 
@@ -1066,5 +1136,216 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../processing/tests/fixtures/heif/sample.heic"
         ))
+    }
+
+    /// A two-by-one GIF on a four-colour palette (red, green, blue, white). Frame `n` holds the
+    /// palette indices `0, 1` for even `n` and `2, 3` for odd `n`, so consecutive frames differ.
+    /// `loop_extension` adds a NETSCAPE block with that repeat count when given.
+    fn gif_bytes(loop_extension: Option<u16>, delays: &[u16]) -> Vec<u8> {
+        let mut bytes = b"GIF89a".to_vec();
+        bytes.extend_from_slice(&2_u16.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&[0x81, 0, 0]);
+        bytes.extend_from_slice(&[255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255]);
+        if let Some(repeats) = loop_extension {
+            bytes.extend_from_slice(&[0x21, 0xFF, 0x0B]);
+            bytes.extend_from_slice(b"NETSCAPE2.0");
+            bytes.extend_from_slice(&[0x03, 0x01]);
+            bytes.extend_from_slice(&repeats.to_le_bytes());
+            bytes.push(0);
+        }
+        for (index, delay) in delays.iter().enumerate() {
+            let (first, second): (u16, u16) = if index % 2 == 0 { (0, 1) } else { (2, 3) };
+            bytes.extend_from_slice(&[0x21, 0xF9, 0x04, 0x00]);
+            bytes.extend_from_slice(&delay.to_le_bytes());
+            bytes.extend_from_slice(&[0x00, 0x00]);
+            bytes.extend_from_slice(&[0x2C, 0, 0, 0, 0, 2, 0, 1, 0, 0]);
+            bytes.extend_from_slice(&[0x02, 0x02]);
+            let codes: u16 = 4 | (first << 3) | (second << 6) | (5 << 9);
+            bytes.extend_from_slice(&codes.to_le_bytes());
+            bytes.push(0);
+        }
+        bytes.push(0x3B);
+        bytes
+    }
+
+    fn import_gif(
+        processing: &Processing,
+        dir: &TestDir,
+        generation: u64,
+        bytes: &[u8],
+    ) -> ImportedSource {
+        let id = processing
+            .files
+            .insert_source(dir.file(&format!("animation-{generation}.gif"), bytes))
+            .unwrap();
+        tauri::async_runtime::block_on(processing.import_source(id, generation)).unwrap()
+    }
+
+    fn original_frame(generation: u64, frame: usize) -> PreviewRequest {
+        PreviewRequest {
+            generation,
+            mode: PreviewMode::Original,
+            frame,
+        }
+    }
+
+    fn render(processing: &Processing, request: PreviewRequest) -> Result<Vec<u8>, IpcError> {
+        tauri::async_runtime::block_on(processing.render_preview(request, Record(Arc::default())))
+    }
+
+    fn body_generation(body: &[u8]) -> u64 {
+        u64::from_le_bytes(body[8..16].try_into().unwrap())
+    }
+
+    #[test]
+    fn an_animated_gif_imports_with_frame_timing_and_loop_count() {
+        let dir = TestDir::new("gif-import");
+        let processing = processing();
+        let finite = import_gif(&processing, &dir, 1, &gif_bytes(Some(3), &[5, 20]));
+        assert_eq!(finite.frame_count, 2);
+        assert_eq!(finite.frame_delays, vec![5, 20]);
+        assert_eq!(finite.loop_count, Some(3));
+        let forever = import_gif(&processing, &dir, 2, &gif_bytes(Some(0), &[5, 20]));
+        assert_eq!(forever.frame_count, 2);
+        assert_eq!(forever.loop_count, None);
+        let json = serde_json::to_value(&forever).unwrap();
+        assert_eq!(json["loopCount"], Value::Null);
+        assert_eq!(json["frameDelays"], json!([5, 20]));
+        let still = import_gif(&processing, &dir, 3, &gif_bytes(None, &[5]));
+        assert_eq!(still.frame_count, 1);
+        assert!(still.frame_delays.is_empty());
+        assert_eq!(still.loop_count, Some(0));
+    }
+
+    #[test]
+    fn every_frame_renders_under_one_page_generation_in_request_order() {
+        let dir = TestDir::new("gif-frames");
+        let processing = processing();
+        import_gif(&processing, &dir, 1, &gif_bytes(None, &[5, 5]));
+        let first = render(&processing, original_frame(10, 0)).unwrap();
+        let second = render(&processing, original_frame(10, 1)).unwrap();
+        let again = render(&processing, original_frame(10, 0)).unwrap();
+        assert_eq!(body_generation(&first), 10);
+        assert_eq!(body_generation(&second), 10);
+        assert_ne!(&first[24..], &second[24..]);
+        assert_eq!(&first[24..], &again[24..]);
+    }
+
+    #[test]
+    fn a_frame_outside_the_source_is_an_invalid_argument_and_the_run_continues() {
+        let dir = TestDir::new("gif-range");
+        let processing = processing();
+        import_gif(&processing, &dir, 1, &gif_bytes(None, &[5, 5]));
+        let error = render(&processing, original_frame(20, 2)).unwrap_err();
+        assert_eq!(error.code(), ErrorCode::InvalidArgument);
+        assert!(render(&processing, original_frame(20, 1)).is_ok());
+    }
+
+    #[test]
+    fn cancelling_a_generation_stops_its_remaining_frames() {
+        let dir = TestDir::new("gif-cancel-between");
+        let processing = processing();
+        import_gif(&processing, &dir, 1, &gif_bytes(None, &[5, 5]));
+        render(&processing, original_frame(30, 0)).unwrap();
+        processing.cancel(30);
+        let error = render(&processing, original_frame(30, 1)).unwrap_err();
+        assert_eq!(error.code(), ErrorCode::Cancelled);
+        assert!(render(&processing, original_frame(31, 1)).is_ok());
+    }
+
+    #[test]
+    fn cancelling_a_running_frame_refuses_its_result() {
+        let dir = TestDir::new("gif-cancel-running");
+        let processing = processing();
+        import_gif(&processing, &dir, 1, &gif_bytes(None, &[5, 5]));
+        let (gate, reached, release) = Blocking::new();
+        let worker_processing = Arc::clone(&processing);
+        let rendering = std::thread::spawn(move || {
+            tauri::async_runtime::block_on(
+                worker_processing.render_preview(original_frame(40, 1), gate),
+            )
+        });
+        reached.recv_timeout(WAIT).unwrap();
+        processing.cancel(40);
+        release.send(()).unwrap();
+        let error = rendering.join().unwrap().unwrap_err();
+        assert_eq!(error.code(), ErrorCode::Cancelled);
+        assert_eq!(
+            render(&processing, original_frame(40, 0))
+                .unwrap_err()
+                .code(),
+            ErrorCode::Cancelled
+        );
+    }
+
+    #[test]
+    fn frame_launches_repeat_only_the_open_generation() {
+        let mut launches = Launches::default();
+        assert!(admit(&launches, Launch::Frame(5)).is_ok());
+        launches.high_water = Some(5);
+        launches.frame_run = Some(FrameRun::Open(5));
+        assert!(admit(&launches, Launch::Frame(5)).is_ok());
+        assert_eq!(
+            admit(&launches, Launch::Generation(5)).unwrap_err().code(),
+            ErrorCode::StaleGeneration
+        );
+        assert_eq!(
+            admit(&launches, Launch::Frame(4)).unwrap_err().code(),
+            ErrorCode::StaleGeneration
+        );
+        launches.frame_run = Some(FrameRun::Cancelled(5));
+        assert_eq!(
+            admit(&launches, Launch::Frame(5)).unwrap_err().code(),
+            ErrorCode::Cancelled
+        );
+        launches.frame_run = None;
+        assert_eq!(
+            admit(&launches, Launch::Frame(5)).unwrap_err().code(),
+            ErrorCode::StaleGeneration
+        );
+        assert!(admit(&launches, Launch::Frame(6)).is_ok());
+    }
+
+    #[test]
+    fn the_frame_argument_defaults_to_zero_and_refuses_bad_indices() {
+        assert_eq!(frame_argument(None).unwrap(), 0);
+        assert_eq!(frame_argument(Some(&Value::Null)).unwrap(), 0);
+        assert_eq!(frame_argument(Some(&json!(3))).unwrap(), 3);
+        for bad in [json!(-1), json!(1.5), json!("1")] {
+            assert_eq!(
+                frame_argument(Some(&bad)).unwrap_err().code(),
+                ErrorCode::InvalidArgument
+            );
+        }
+    }
+
+    #[test]
+    fn an_export_of_a_frame_writes_that_frame_and_refuses_one_outside_the_source() {
+        let dir = TestDir::new("gif-export");
+        let processing = processing();
+        import_gif(&processing, &dir, 1, &gif_bytes(None, &[5, 5]));
+        let destination = dir.path().join("frame.png");
+        let sink_id = processing.files.insert_sink(destination.clone()).unwrap();
+        let mut request = export_request(10, sink_id);
+        request.frame = 1;
+        let report =
+            tauri::async_runtime::block_on(processing.export_file(request, Record(Arc::default())))
+                .unwrap();
+        assert_eq!(report.generation, 10);
+        assert_eq!(
+            report.byte_length,
+            std::fs::metadata(&destination).unwrap().len()
+        );
+        let sink_id = processing
+            .files
+            .insert_sink(dir.path().join("out-of-range.png"))
+            .unwrap();
+        let mut request = export_request(11, sink_id);
+        request.frame = 9;
+        let error =
+            tauri::async_runtime::block_on(processing.export_file(request, Record(Arc::default())))
+                .unwrap_err();
+        assert_eq!(error.code(), ErrorCode::InvalidArgument);
     }
 }

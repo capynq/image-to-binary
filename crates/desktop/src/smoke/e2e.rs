@@ -43,6 +43,10 @@ const STYLE_PREVIEW_SIZE: (u64, u64) = (60, 36);
 const STYLE_PREVIEW_BYTES: usize = 60 * 36 * 4;
 /// Byte length of the styled PNG export reference from the `mono_custom_colours` entry.
 const STYLE_EXPORT_BYTES: usize = 9_986;
+/// Frame delays of the animated GIF written at run time, in centiseconds.
+const ANIMATION_DELAYS: [u16; 2] = [5, 20];
+/// Side of the animated GIF's square frames, in pixels.
+const ANIMATION_SIDE: u16 = 32;
 /// Byte lengths of the classic, ASCII and block text references: 6 rows of 10 characters, 4 rows
 /// of 11 characters, and 4 rows of 11 three-byte block glyphs, each row followed by one LF.
 const TEXT_CLASSIC_BYTES: usize = 66;
@@ -153,9 +157,21 @@ pub(super) fn run(
         recorder.check("e2e_scratch_created", false, error.to_string());
         return None;
     }
-    let detail = main_phase(recorder, window, reports, &assets, &scratch);
+    let inputs = std::env::temp_dir().join(format!("i2b-e2e-input-{}", process::id()));
+    let _ = fs::remove_dir_all(&inputs);
+    if let Err(error) = fs::create_dir_all(&inputs) {
+        recorder.check("e2e_input_dir_created", false, error.to_string());
+        return None;
+    }
+    let animation = inputs.join("animated.gif");
+    if let Err(error) = fs::write(&animation, animated_gif()) {
+        recorder.check("e2e_animated_fixture_written", false, error.to_string());
+        return None;
+    }
+    let detail = main_phase(recorder, window, reports, &assets, &scratch, &animation);
     drop_phase(recorder, app, window, reports, &assets);
     let _ = fs::remove_dir_all(&scratch);
+    let _ = fs::remove_dir_all(&inputs);
     detail
 }
 
@@ -165,12 +181,14 @@ fn main_phase(
     reports: &Receiver<Value>,
     assets: &Assets,
     scratch: &Path,
+    animation: &Path,
 ) -> Option<Value> {
     let config = json!({
         "mode": "main",
         "pngFixture": assets.png,
         "largeFixture": assets.large,
         "modeFixture": assets.mode,
+        "animationFixture": animation,
         "modeRamp": MODE_RAMP,
         "outDir": scratch,
     });
@@ -188,6 +206,7 @@ fn main_phase(
         format!("phase {phase}; error {}", text(&main, "error")),
     );
     check_main(recorder, &main, assets, scratch);
+    check_animation(recorder, &main);
     let mut detail = main.clone();
     if let Some(preview) = detail.get_mut("preview").and_then(Value::as_object_mut) {
         preview.remove("rgba");
@@ -285,6 +304,13 @@ fn check_main(recorder: &mut Recorder, main: &Value, assets: &Assets, scratch: &
         ),
     );
 
+    check_page_health(recorder, main);
+    check_cancel_and_outputs(recorder, main, scratch);
+    check_menu(recorder, main);
+}
+
+/// The page must not load a browser worker, WASM or codec resource, and must not violate CSP.
+fn check_page_health(recorder: &mut Recorder, main: &Value) {
     let loads: Vec<String> = main["loads"]
         .as_array()
         .map(|items| {
@@ -304,9 +330,55 @@ fn check_main(recorder: &mut Recorder, main: &Value, assets: &Assets, scratch: &
         loads.is_empty(),
         format!("browser worker or WASM resources {loads:?}"),
     );
+}
 
-    check_cancel_and_outputs(recorder, main, scratch);
-    check_menu(recorder, main);
+/// The animated GIF is imported through the studio. The playback controls must show two frames,
+/// and selecting each frame must render its own loaded artwork. Delays and loop count are covered
+/// by the Rust and adapter tests.
+fn check_animation(recorder: &mut Recorder, main: &Value) {
+    let animation = &main["animation"];
+    let controls: Vec<String> = animation["controls"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    recorder.check(
+        "e2e_animated_playback_controls_show_two_frames",
+        number(&animation["scrubberMax"]) == 1
+            && text(animation, "initialValueText").starts_with("Frame 1 of 2")
+            && controls
+                .iter()
+                .any(|label| label == "Play" || label == "Pause"),
+        format!(
+            "max {}, value {:?}, controls {controls:?}",
+            animation["scrubberMax"],
+            text(animation, "initialValueText")
+        ),
+    );
+
+    let frames = animation["frames"].as_array().cloned().unwrap_or_default();
+    let sources: BTreeSet<String> = frames.iter().map(|frame| text(frame, "src")).collect();
+    let loaded = frames
+        .iter()
+        .all(|frame| text(frame, "src").starts_with("blob:") && number(&frame["width"]) > 0);
+    recorder.check(
+        "e2e_animated_every_frame_renders",
+        frames.len() == 2 && sources.len() == 2 && loaded,
+        format!(
+            "{} frames, {} distinct sources, loaded {loaded}",
+            frames.len(),
+            sources.len()
+        ),
+    );
+    recorder.check(
+        "e2e_animated_import_is_shown",
+        text(animation, "metadata").contains("animated.gif"),
+        format!("metadata {:?}", text(animation, "metadata")),
+    );
 }
 
 /// The menu phase drives every studio menu item through the smoke-only dispatch path and checks
@@ -678,6 +750,70 @@ fn receive(reports: &Receiver<Value>, timeout: Duration) -> Result<Value, String
     reports
         .recv_timeout(timeout)
         .map_err(|error| format!("no page report: {error}"))
+}
+
+/// Builds the animated fixture: square frames on a four-colour palette, each frame an endless loop
+/// with the delays of `ANIMATION_DELAYS`. Every pixel is preceded by a clear code, so the LZW
+/// table resets before each code and never grows past three-bit codes.
+fn animated_gif() -> Vec<u8> {
+    const CLEAR: u8 = 4;
+    const END: u8 = 5;
+    let side = ANIMATION_SIDE;
+    let mut bytes = b"GIF89a".to_vec();
+    bytes.extend_from_slice(&side.to_le_bytes());
+    bytes.extend_from_slice(&side.to_le_bytes());
+    bytes.extend_from_slice(&[0x81, 0, 0]);
+    bytes.extend_from_slice(&[255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255]);
+    bytes.extend_from_slice(&[0x21, 0xFF, 0x0B]);
+    bytes.extend_from_slice(b"NETSCAPE2.0");
+    bytes.extend_from_slice(&[0x03, 0x01, 0x00, 0x00, 0x00]);
+    for (frame, delay) in ANIMATION_DELAYS.iter().enumerate() {
+        bytes.extend_from_slice(&[0x21, 0xF9, 0x04, 0x00]);
+        bytes.extend_from_slice(&delay.to_le_bytes());
+        bytes.extend_from_slice(&[0x00, 0x00]);
+        bytes.push(0x2C);
+        bytes.extend_from_slice(&[0, 0, 0, 0]);
+        bytes.extend_from_slice(&side.to_le_bytes());
+        bytes.extend_from_slice(&side.to_le_bytes());
+        bytes.push(0x00);
+        bytes.push(2);
+        let mut codes = Vec::new();
+        for y in 0..side {
+            for x in 0..side {
+                let shade = (usize::from(x) + usize::from(y) + frame) % 4;
+                codes.push(CLEAR);
+                codes.push(u8::try_from(shade).unwrap_or(0));
+            }
+        }
+        codes.push(END);
+        for block in pack_three_bit_codes(&codes).chunks(255) {
+            bytes.push(u8::try_from(block.len()).unwrap_or(255));
+            bytes.extend_from_slice(block);
+        }
+        bytes.push(0);
+    }
+    bytes.push(0x3B);
+    bytes
+}
+
+/// Packs three-bit LZW codes least significant bit first, the order GIF data uses.
+fn pack_three_bit_codes(codes: &[u8]) -> Vec<u8> {
+    let mut packed = Vec::new();
+    let mut buffer: u32 = 0;
+    let mut bits: u32 = 0;
+    for code in codes {
+        buffer |= u32::from(*code) << bits;
+        bits += 3;
+        while bits >= 8 {
+            packed.push(u8::try_from(buffer & 0xFF).unwrap_or(0));
+            buffer >>= 8;
+            bits -= 8;
+        }
+    }
+    if bits > 0 {
+        packed.push(u8::try_from(buffer & 0xFF).unwrap_or(0));
+    }
+    packed
 }
 
 fn text(value: &Value, key: &str) -> String {

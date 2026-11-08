@@ -142,13 +142,16 @@ pub(crate) async fn import_demo(
     processing.import_demo(generation).await
 }
 
-/// Renders a preview of the source and returns the raw frame body described in
-/// `processing::frame`. `settings` is required for `artwork` and ignored for `original`. The
-/// generation and settings arrive as raw JSON and are converted with the shared argument
-/// contract, so a wrong type or value gives the browser's `{ code, message }`.
+/// Renders one frame of a preview and returns the raw frame body described in
+/// `processing::frame`. `frame` is the source frame index and defaults to `0`. `settings` is
+/// required for `artwork` and ignored for `original`. The generation, frame and settings arrive as
+/// raw JSON and are converted with the shared argument contract, so a wrong type or value gives
+/// the browser's `{ code, message }`.
 ///
-/// Failure contract: `invalid_argument` and `invalid_settings` from the contract, `no_job`
-/// without a source, `stale_generation`, `cancelled` when superseded, and the session's codes.
+/// Failure contract: `invalid_argument` and `invalid_settings` from the contract (an index outside
+/// the source's frames is `invalid_argument`), `no_job` without a source, `stale_generation`,
+/// `cancelled` when superseded or when the page generation's frame run was cancelled, and the
+/// session's codes.
 #[allow(clippy::needless_pass_by_value)]
 #[tauri::command]
 pub(crate) async fn start_preview(
@@ -156,9 +159,11 @@ pub(crate) async fn start_preview(
     kind: PreviewKind,
     settings: Option<serde_json::Value>,
     generation: Option<serde_json::Value>,
+    frame: Option<serde_json::Value>,
     progress: Channel<ProgressEvent>,
 ) -> Result<tauri::ipc::Response, IpcError> {
     let generation = processing::generation_argument(generation.as_ref())?.value();
+    let frame = processing::frame_argument(frame.as_ref())?;
     let mode = match kind {
         PreviewKind::Original => PreviewMode::Original,
         PreviewKind::Artwork => {
@@ -166,18 +171,26 @@ pub(crate) async fn start_preview(
         }
     };
     let frame = processing
-        .render_preview(PreviewRequest { generation, mode }, progress)
+        .render_preview(
+            PreviewRequest {
+                generation,
+                mode,
+                frame,
+            },
+            progress,
+        )
         .await?;
     Ok(tauri::ipc::Response::new(frame))
 }
 
-/// Exports the artwork into the chosen sink as `outputKind` (`png` by default, or `text`) and
-/// commits it atomically. Returns the committed byte length; the destination path never crosses
-/// IPC.
+/// Exports one frame of the artwork into the chosen sink as `outputKind` (`png` by default, or
+/// `text`) and commits it atomically. `frame` is the source frame index and defaults to `0`.
+/// Returns the committed byte length; the destination path never crosses IPC.
 ///
-/// Failure contract: the shared argument codes for `settings`, `generation` and `outputKind`,
-/// `invalid_argument` for an unavailable destination, `internal` for a write failure,
-/// `cancelled` or `stale_generation` when superseded before the commit.
+/// Failure contract: the shared argument codes for `settings`, `generation`, `frame` and
+/// `outputKind`, `invalid_argument` for an unavailable destination or a frame outside the source,
+/// `internal` for a write failure, `cancelled` or `stale_generation` when superseded before the
+/// commit.
 #[allow(clippy::needless_pass_by_value)]
 #[tauri::command]
 pub(crate) async fn export_file(
@@ -186,11 +199,13 @@ pub(crate) async fn export_file(
     sink_id: FileId,
     generation: Option<serde_json::Value>,
     output_kind: Option<serde_json::Value>,
+    frame: Option<serde_json::Value>,
     progress: Channel<ProgressEvent>,
 ) -> Result<ExportReport, IpcError> {
     let generation = processing::generation_argument(generation.as_ref())?.value();
     let settings = processing::settings_argument(settings.as_ref())?;
     let output = processing::output_kind_argument(output_kind.as_ref())?;
+    let frame = processing::frame_argument(frame.as_ref())?;
     processing
         .export_file(
             ExportRequest {
@@ -198,6 +213,7 @@ pub(crate) async fn export_file(
                 settings,
                 output,
                 sink: sink_id,
+                frame,
             },
             progress,
         )

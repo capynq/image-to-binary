@@ -2481,8 +2481,22 @@ Proposed commit title: `feat: preview animated sources on the desktop`
 
 Completion checklist:
 
-- [ ] Native animation jobs implemented.
-- [ ] Packet parser tested.
+- [x] Native animation jobs implemented.
+- [x] Packet parser tested.
+
+Validation: desktop imports use the shared animated decode, and import
+replies carry frame count, delays and loop count (`null` for endless, mapped
+to `Infinity` in the page). `start_preview` and `export_file` take an
+optional frame. A frame run lets one page generation launch one frame job
+after another, each with a strictly newer session generation; cancel closes
+the run, and export stays strict per generation. Per-frame requests reuse the
+existing preview packet, so no multi-frame packet was needed. The native
+adapter shares the browser's wrap-around frame loop rules, revocation and
+512 MiB budget. The smoke run imports a generated two-frame GIF, pauses
+playback, scrubs both frames and sees two distinct loaded artwork images;
+all 69 checks pass on macOS arm64. Delays and loop count are asserted in the
+Rust and adapter tests. Desktop Clippy (default and smoke), formatting, 154
+desktop tests, 57 native adapter tests and the frontend typecheck pass.
 
 ### 9.7 Play animations in the comparison canvas
 
