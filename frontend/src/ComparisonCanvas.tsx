@@ -23,6 +23,7 @@ import {
 } from './comparisonViewport'
 import type { Point, ViewportLayout, ViewportState } from './comparisonViewport'
 import type { PreviewSnapshot } from './processing/types'
+import type { FramePlayback } from './useFrameClock'
 import { Button } from './ui'
 
 export interface ComparisonCanvasProps {
@@ -37,12 +38,24 @@ export interface ComparisonCanvasProps {
   readonly artworkAlt: string
   /** False while the host hides the canvas; the viewport is measured again once it is shown. */
   readonly visible?: boolean
+  /** Present only for an animated source; both images then show `playback.frame`. */
+  readonly playback?: FramePlayback | null
 }
 
 interface Pointer {
   readonly pointerId: number
   x: number
   y: number
+}
+
+/** The frame of a preview that is shown at `frame`; a still, or a frame missing from the list, shows its start image. */
+function frameSource(image: PreviewSnapshot, frame: number): string {
+  return image.frames?.[frame] ?? image.url
+}
+
+/** Scrubber and readout use a one-based count, so the first frame reads as "Frame 1 of N". */
+function frameValueText(frame: number, frameCount: number): string {
+  return `Frame ${frame + 1} of ${frameCount}`
 }
 
 const IMAGE_BASE: CSSProperties = {
@@ -101,10 +114,12 @@ export function ComparisonCanvas({
   originalAlt,
   artworkAlt,
   visible = true,
+  playback = null,
 }: ComparisonCanvasProps) {
   const viewportRef = useRef<HTMLDivElement>(null)
   const stageRef = useRef<HTMLDivElement>(null)
   const readoutId = useId()
+  const scrubberId = useId()
   const viewportSize = useElementSize(viewportRef, visible)
   const frame = comparisonFrame({
     view,
@@ -145,6 +160,9 @@ export function ComparisonCanvas({
     scale,
     viewport.split,
   )
+  const shownFrame = playback?.frame ?? 0
+  const originalSrc = original === null ? '' : frameSource(original, shownFrame)
+  const artworkSrc = artwork === null ? '' : frameSource(artwork, shownFrame)
   const altText =
     view === 'original'
       ? originalAlt
@@ -324,7 +342,7 @@ export function ComparisonCanvas({
         >
           {view === 'original' && original !== null && (
             <PreviewImage
-              src={original.url}
+              src={originalSrc}
               alt={originalAlt}
               width={original.width}
               height={original.height}
@@ -333,7 +351,7 @@ export function ComparisonCanvas({
           )}
           {view === 'artwork' && artwork !== null && (
             <PreviewImage
-              src={artwork.url}
+              src={artworkSrc}
               alt={artworkAlt}
               width={artwork.width}
               height={artwork.height}
@@ -347,7 +365,7 @@ export function ComparisonCanvas({
                 style={{ left: 0, width: boxes.seam, height: stage.height }}
               >
                 <PreviewImage
-                  src={original.url}
+                  src={originalSrc}
                   alt={originalAlt}
                   width={original.width}
                   height={original.height}
@@ -367,7 +385,7 @@ export function ComparisonCanvas({
                 }}
               >
                 <PreviewImage
-                  src={artwork.url}
+                  src={artworkSrc}
                   alt={artworkAlt}
                   width={artwork.width}
                   height={artwork.height}
@@ -401,6 +419,29 @@ export function ComparisonCanvas({
           )}
         </div>
       </div>
+      {playback !== null && (
+        <div className="playback-controls" role="group" aria-label="Animation controls">
+          <Button variant="secondary" onClick={() => playback.setPlaying(!playback.playing)}>
+            {playback.playing ? 'Pause' : 'Play'}
+          </Button>
+          <input
+            id={scrubberId}
+            className="frame-scrubber"
+            type="range"
+            name="frame"
+            min={0}
+            max={playback.frameCount - 1}
+            step={1}
+            value={playback.frame}
+            aria-label="Frame"
+            aria-valuetext={frameValueText(playback.frame, playback.frameCount)}
+            onChange={(event) => playback.setFrame(Number(event.currentTarget.value))}
+          />
+          <output htmlFor={scrubberId} className="frame-readout">
+            {frameValueText(playback.frame, playback.frameCount)}
+          </output>
+        </div>
+      )}
     </section>
   )
 }

@@ -2501,8 +2501,21 @@ Proposed commit title: `feat: play animations in the comparison canvas`
 
 Completion checklist:
 
-- [ ] Playback and controls implemented.
-- [ ] Tests and screenshots reviewed.
+- [x] Playback and controls implemented.
+- [x] Tests and screenshots reviewed.
+
+Validation: `useFrameClock` advances on `requestAnimationFrame` against each
+frame's delay, honours finite loop counts, holds while the document is hidden
+without catching up, resets per import and starts paused under reduced
+motion. Frames are pre-decoded with `Image.decode()` before playback starts.
+One frame index drives the original, artwork and both split images. A
+Play/Pause button and a frame range input (`aria-valuetext` "Frame n of N")
+appear only for animations; scrubbing pauses. Automatic and manual renders
+start at the shown frame, and PNG and text export the shown frame. Typecheck,
+format and 887 frontend tests pass. Chromium screenshots of a five-frame GIF
+at 1280 and 360 px show the controls unclipped with no horizontal overflow;
+at 360 px in split view the readout wraps under the scrubber. Split
+synchronisation is asserted on image sources, not by pixel comparison.
 
 ### 9.8 Export animated GIF
 

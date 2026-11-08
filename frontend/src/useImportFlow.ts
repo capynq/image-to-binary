@@ -33,10 +33,11 @@ export interface ImportFlow {
   openPicker(): Promise<void>
   onInputChange(event: ChangeEvent<HTMLInputElement>): void
   loadDemo(): void
-  selectView(mode: ViewMode): void
-  renderArtwork(): void
+  /** `startFrame` is the animation frame the artwork starts on, so the shown frame renders first. */
+  selectView(mode: ViewMode, startFrame?: number): void
+  renderArtwork(startFrame?: number): void
   /** Renders the artwork in the background: the view, the status and the progress row stay as they are. */
-  renderQuietly(): void
+  renderQuietly(startFrame?: number): void
   cancel(): void
   reset(): void
   onDragEnter(event: DragEvent<HTMLElement>): void
@@ -184,7 +185,7 @@ export function useImportFlow(
    * asks for the original first and the artwork is requested by a later call once that settles.
    */
   const selectView = useCallback(
-    (mode: ViewMode): void => {
+    (mode: ViewMode, startFrame = 0): void => {
       wanted.current = mode
       setView(mode)
       const current = controller.getSnapshot()
@@ -198,7 +199,7 @@ export function useImportFlow(
               after.original !== null &&
               !hasFreshArtwork(after)
             ) {
-              controller.preview('artwork').catch(() => undefined)
+              controller.preview('artwork', { startFrame }).catch(() => undefined)
             }
           },
           () => undefined,
@@ -206,24 +207,30 @@ export function useImportFlow(
         return
       }
       if (mode !== 'original' && !hasFreshArtwork(current)) {
-        controller.preview('artwork').catch(() => undefined)
+        controller.preview('artwork', { startFrame }).catch(() => undefined)
       }
     },
     [controller],
   )
 
   /** Render keeps the split view, so a re-render after a settings change does not drop the comparison. */
-  const renderArtwork = useCallback((): void => {
-    wanted.current = wanted.current === 'split' ? 'split' : 'artwork'
-    setView(wanted.current)
-    const current = controller.getSnapshot()
-    if (current.metadata === null || current.status === 'importing') return
-    controller.preview('artwork').catch(() => undefined)
-  }, [controller])
+  const renderArtwork = useCallback(
+    (startFrame = 0): void => {
+      wanted.current = wanted.current === 'split' ? 'split' : 'artwork'
+      setView(wanted.current)
+      const current = controller.getSnapshot()
+      if (current.metadata === null || current.status === 'importing') return
+      controller.preview('artwork', { startFrame }).catch(() => undefined)
+    },
+    [controller],
+  )
 
-  const renderQuietly = useCallback((): void => {
-    controller.preview('artwork', { quiet: true }).catch(() => undefined)
-  }, [controller])
+  const renderQuietly = useCallback(
+    (startFrame = 0): void => {
+      controller.preview('artwork', { quiet: true, startFrame }).catch(() => undefined)
+    },
+    [controller],
+  )
 
   const cancel = useCallback((): void => {
     intent.current += 1

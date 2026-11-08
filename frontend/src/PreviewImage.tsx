@@ -87,7 +87,7 @@ export function PreviewImage({ src, alt, width, height, style }: PreviewImagePro
     })
     observer.observe(element)
     return () => observer.disconnect()
-  }, [src])
+  }, [])
 
   const upscaled = box !== null && isUpscaledOnDevice(box, { width, height }, ratio)
   return (

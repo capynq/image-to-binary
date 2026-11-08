@@ -17,6 +17,8 @@ import type { StudioController } from './state/controller'
 import { IMPORT_ACCEPT, IMPORT_GUIDANCE, useImportFlow } from './useImportFlow'
 import { useStudio } from './useStudio'
 import { useAutoRender } from './useAutoRender'
+import { useDecodedFrames, useFrameClock } from './useFrameClock'
+import type { FramePlayback } from './useFrameClock'
 import {
   focusReachable,
   isBusyStatus,
@@ -197,11 +199,28 @@ export default function App({ controller, native, menu = null }: AppProps) {
     colourProblem(backgroundDraft, 'background') !== null
   const draftBlocker: DraftBlocker | null = rampBlocked ? 'ramp' : colourBlocked ? 'colour' : null
   const draftBlocked = draftBlocker !== null
+  const framesDecoded = useDecodedFrames(snapshot.original?.frames, snapshot.preview?.frames)
+  const clock = useFrameClock({
+    animation: snapshot.animation,
+    identity: snapshot.metadata,
+    ready: framesDecoded,
+  })
+  const frame = clock.frame
+  const playback: FramePlayback | null =
+    snapshot.animation === null
+      ? null
+      : {
+          frameCount: snapshot.animation.frameCount,
+          frame,
+          playing: clock.playing,
+          setFrame: clock.setFrame,
+          setPlaying: clock.setPlaying,
+        }
   const autoRender = useAutoRender({
     controller,
     snapshot,
     draftBlocked,
-    renderQuietly: flow.renderQuietly,
+    renderQuietly: () => flow.renderQuietly(frame),
   })
   const artworkRefreshing = snapshot.artworkUpdating || autoRender.pending
   const gates = studioGates({
@@ -275,7 +294,7 @@ export default function App({ controller, native, menu = null }: AppProps) {
     if (!currentGates().export) return
     setRunFormat(exportFormat)
     controller
-      .startExport(exportFormat)
+      .startExport(exportFormat, { frame })
       .catch(() => undefined)
       .finally(() => setExportSettled((count) => count + 1))
   }
@@ -299,15 +318,15 @@ export default function App({ controller, native, menu = null }: AppProps) {
     original: () => flow.selectView('original'),
     artwork: () => {
       autoRender.clear()
-      flow.selectView('artwork')
+      flow.selectView('artwork', frame)
     },
     split: () => {
       autoRender.clear()
-      flow.selectView('split')
+      flow.selectView('split', frame)
     },
     render: () => {
       autoRender.clear()
-      flow.renderArtwork()
+      flow.renderArtwork(frame)
     },
     cancel: () => {
       autoRender.suppress()
@@ -516,6 +535,7 @@ export default function App({ controller, native, menu = null }: AppProps) {
                   originalAlt="Original image"
                   artworkAlt="Binary artwork preview"
                   visible={viewReady}
+                  playback={playback}
                 />
               </div>
             )}

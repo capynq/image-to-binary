@@ -407,6 +407,21 @@ h2 {
   padding: 0 4px;
   font-size: 0.85rem;
 }
+.playback-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.frame-scrubber {
+  flex: 1 1 160px;
+  min-width: 0;
+}
+.frame-readout {
+  min-width: 7.5em;
+  padding: 0 4px;
+  font-size: 0.85rem;
+}
 .canvas-slot {
   min-width: 0;
   min-height: 0;
