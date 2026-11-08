@@ -106,7 +106,17 @@ export function RenderingSection({
         onContrastChange={onContrastChange}
         onInvertChange={onInvertChange}
       />
-      <Button variant="primary" wide busy={rendering} disabled={!renderEnabled} onClick={onRender}>
+      <p className="field-note" id="render-note">
+        Updates automatically after changes.
+      </p>
+      <Button
+        variant="primary"
+        wide
+        busy={rendering}
+        disabled={!renderEnabled}
+        aria-describedby="render-note"
+        onClick={onRender}
+      >
         {rendering ? 'Rendering…' : 'Render artwork'}
       </Button>
     </InspectorSection>

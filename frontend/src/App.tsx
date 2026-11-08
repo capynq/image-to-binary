@@ -16,8 +16,10 @@ import type { ColorModeName, ColourRole, RenderModeName } from './processing/pro
 import type { StudioController } from './state/controller'
 import { IMPORT_ACCEPT, IMPORT_GUIDANCE, useImportFlow } from './useImportFlow'
 import { useStudio } from './useStudio'
+import { useAutoRender } from './useAutoRender'
 import {
   focusReachable,
+  isBusyStatus,
   isFocusLost,
   menuStateOf,
   runStudioAction,
@@ -140,10 +142,7 @@ export default function App({ controller, native, menu = null }: AppProps) {
   }, [theme])
 
   const hasSource = snapshot.metadata !== null
-  const isBusy =
-    snapshot.status === 'importing' ||
-    snapshot.status === 'processing' ||
-    snapshot.status === 'exporting'
+  const isBusy = isBusyStatus(snapshot.status)
   const settings = snapshot.settings
 
   useEffect(() => {
@@ -198,7 +197,19 @@ export default function App({ controller, native, menu = null }: AppProps) {
     colourProblem(backgroundDraft, 'background') !== null
   const draftBlocker: DraftBlocker | null = rampBlocked ? 'ramp' : colourBlocked ? 'colour' : null
   const draftBlocked = draftBlocker !== null
-  const gates = studioGates({ hasSource, busy: isBusy, draftBlocked })
+  const autoRender = useAutoRender({
+    controller,
+    snapshot,
+    draftBlocked,
+    renderQuietly: flow.renderQuietly,
+  })
+  const artworkRefreshing = snapshot.artworkUpdating || autoRender.pending
+  const gates = studioGates({
+    hasSource,
+    busy: isBusy,
+    updating: snapshot.artworkUpdating,
+    draftBlocked,
+  })
   const canExport = gates.export
   const exportBlock = canExport
     ? null
@@ -252,13 +263,10 @@ export default function App({ controller, native, menu = null }: AppProps) {
 
   function currentGates(): StudioGates {
     const current = controller.getSnapshot()
-    const busyNow =
-      current.status === 'importing' ||
-      current.status === 'processing' ||
-      current.status === 'exporting'
     return studioGates({
       hasSource: current.metadata !== null,
-      busy: busyNow,
+      busy: isBusyStatus(current.status),
+      updating: current.artworkUpdating,
       draftBlocked: latest.current.draftBlocked,
     })
   }
@@ -289,10 +297,22 @@ export default function App({ controller, native, menu = null }: AppProps) {
     open: openImage,
     export: startExport,
     original: () => flow.selectView('original'),
-    artwork: () => flow.selectView('artwork'),
-    split: () => flow.selectView('split'),
-    render: () => flow.renderArtwork(),
-    cancel: () => flow.cancel(),
+    artwork: () => {
+      autoRender.clear()
+      flow.selectView('artwork')
+    },
+    split: () => {
+      autoRender.clear()
+      flow.selectView('split')
+    },
+    render: () => {
+      autoRender.clear()
+      flow.renderArtwork()
+    },
+    cancel: () => {
+      autoRender.suppress()
+      flow.cancel()
+    },
   }
   const latest = useRef({ draftBlocked, handlers })
   useEffect(() => {
@@ -350,6 +370,7 @@ export default function App({ controller, native, menu = null }: AppProps) {
       if (event.defaultPrevented) return
       const action = shortcutAction(event)
       if (action === null) return
+      if (action === 'cancel') autoRender.suppress()
       if (runAction(action)) event.preventDefault()
     }
     window.addEventListener('keydown', onKeyDown)
@@ -390,6 +411,8 @@ export default function App({ controller, native, menu = null }: AppProps) {
     },
   ]
   const statusBusyLabel = isBusy && snapshot.status !== 'exporting' ? busyLabel : null
+  const artworkShown = viewReady && !isOriginal
+  const refreshing = artworkShown && artworkRefreshing
 
   return (
     <div
@@ -478,7 +501,10 @@ export default function App({ controller, native, menu = null }: AppProps) {
               onChooseAnother={openImage}
             />
           </div>
-          <div className={`artifact-frame ${viewReady ? 'has-fixture' : ''}`}>
+          <div
+            className={`artifact-frame ${viewReady ? 'has-fixture' : ''} ${refreshing ? 'is-refreshing' : ''}`}
+            aria-busy={refreshing || undefined}
+          >
             {snapshot.metadata !== null && (
               <div className="canvas-slot" hidden={!viewReady}>
                 <ComparisonCanvas
@@ -503,9 +529,13 @@ export default function App({ controller, native, menu = null }: AppProps) {
                 onOpen={openImage}
                 onLoadDemo={flow.loadDemo}
                 onShowOriginal={() => flow.selectView('original')}
+                rendering={artworkRefreshing}
                 onRender={() => runAction('render')}
               />
             )}
+            <div className="canvas-status" role="status" aria-live="polite">
+              {refreshing && <span className="updating-badge">Updating…</span>}
+            </div>
           </div>
           <p className="canvas-caption" id={hintId}>
             {flow.dragActive

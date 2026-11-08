@@ -357,6 +357,7 @@ h2 {
   border-color: var(--border);
 }
 .artifact-frame {
+  position: relative;
   min-width: 0;
   min-height: 16rem;
   display: grid;
@@ -558,6 +559,25 @@ h2 {
 }
 .busy-row {
   min-width: 0;
+}
+.canvas-status {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  z-index: 1;
+  pointer-events: none;
+}
+.updating-badge {
+  display: inline-block;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.8rem;
+}
+.artifact-frame.is-refreshing .comparison-stage[data-view='artwork'],
+.artifact-frame.is-refreshing .comparison-artwork {
+  opacity: 0.6;
 }
 .error-panel {
   display: grid;
@@ -1144,6 +1164,13 @@ a.button {
   }
   .artifact-frame {
     border: 2px solid CanvasText;
+  }
+  .updating-badge {
+    border: 2px solid CanvasText;
+  }
+  .artifact-frame.is-refreshing .comparison-stage[data-view='artwork'],
+  .artifact-frame.is-refreshing .comparison-artwork {
+    opacity: 1;
   }
   .comparison-viewport {
     border: 2px solid CanvasText;

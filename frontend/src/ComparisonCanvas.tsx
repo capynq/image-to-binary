@@ -359,7 +359,7 @@ export function ComparisonCanvas({
                 />
               </div>
               <div
-                className="comparison-clip"
+                className="comparison-clip comparison-artwork"
                 style={{
                   left: boxes.seam,
                   width: Math.max(0, stage.width - boxes.seam),

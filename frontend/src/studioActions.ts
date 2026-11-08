@@ -1,4 +1,5 @@
 import type { MenuState } from './processing/nativeMenu'
+import type { StudioJobStatus } from './processing/types'
 
 /** Studio actions that the keyboard and the desktop menu can request. */
 export type StudioAction =
@@ -14,6 +15,8 @@ export type StudioAction =
 export interface StudioFacts {
   readonly hasSource: boolean
   readonly busy: boolean
+  /** A quiet artwork render is in flight; it blocks nothing except cancel. */
+  readonly updating: boolean
   readonly draftBlocked: boolean
 }
 
@@ -27,12 +30,18 @@ export interface StudioGates {
   readonly cancel: boolean
 }
 
+/** True while an import, a preview or an export owns the studio. A quiet artwork render does not. */
+export function isBusyStatus(status: StudioJobStatus): boolean {
+  return status === 'importing' || status === 'processing' || status === 'exporting'
+}
+
 /**
  * The single source of truth for when each action may run. A missing source, a busy studio
  * (import, render or export) or an invalid draft closes the gate; the menu state and the
  * buttons both read these flags. Split needs the same draft as artwork, since it shows artwork.
+ * Render and export stay open while artwork updates quietly, and only cancel reaches that work.
  */
-export function studioGates({ hasSource, busy, draftBlocked }: StudioFacts): StudioGates {
+export function studioGates({ hasSource, busy, updating, draftBlocked }: StudioFacts): StudioGates {
   return {
     open: true,
     export: hasSource && !busy && !draftBlocked,
@@ -40,7 +49,7 @@ export function studioGates({ hasSource, busy, draftBlocked }: StudioFacts): Stu
     original: hasSource,
     artwork: hasSource && !draftBlocked,
     split: hasSource && !draftBlocked,
-    cancel: busy,
+    cancel: busy || updating,
   }
 }
 

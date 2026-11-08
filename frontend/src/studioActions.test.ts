@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
+  isBusyStatus,
   menuStateOf,
   isTextEntry,
   runStudioAction,
@@ -8,7 +9,7 @@ import {
 } from './studioActions'
 import type { StudioAction, StudioHandlers } from './studioActions'
 
-const READY = { hasSource: true, busy: false, draftBlocked: false }
+const READY = { hasSource: true, busy: false, updating: false, draftBlocked: false }
 
 function handlers(): Record<StudioAction, ReturnType<typeof vi.fn>> {
   return {
@@ -24,7 +25,9 @@ function handlers(): Record<StudioAction, ReturnType<typeof vi.fn>> {
 
 describe('studio gates', () => {
   it('opens the picker at any time', () => {
-    expect(studioGates({ hasSource: false, busy: true, draftBlocked: true }).open).toBe(true)
+    expect(
+      studioGates({ updating: false, hasSource: false, busy: true, draftBlocked: true }).open,
+    ).toBe(true)
   })
 
   it('enables render and export only with a source, an idle studio and a valid draft', () => {
@@ -63,8 +66,26 @@ describe('studio gates', () => {
     expect(gates.cancel).toBe(true)
   })
 
-  it('offers cancel only while busy', () => {
+  it('offers cancel only while busy or while a quiet artwork render runs', () => {
     expect(studioGates(READY).cancel).toBe(false)
+    expect(studioGates({ ...READY, updating: true }).cancel).toBe(true)
+    expect(studioGates({ ...READY, busy: true }).cancel).toBe(true)
+  })
+
+  it('keeps render and export open while a quiet artwork render runs', () => {
+    const gates = studioGates({ ...READY, updating: true })
+    expect(gates.render).toBe(true)
+    expect(gates.export).toBe(true)
+    expect(gates.artwork).toBe(true)
+  })
+
+  it('treats only import, processing and export as busy statuses', () => {
+    expect(isBusyStatus('importing')).toBe(true)
+    expect(isBusyStatus('processing')).toBe(true)
+    expect(isBusyStatus('exporting')).toBe(true)
+    expect(isBusyStatus('ready')).toBe(false)
+    expect(isBusyStatus('cancelled')).toBe(false)
+    expect(isBusyStatus('idle')).toBe(false)
   })
 
   it('derives the menu state from the same gates', () => {

@@ -6,6 +6,8 @@ export interface EmptyCanvasProps {
   readonly isOriginal: boolean
   readonly viewName: string
   readonly renderEnabled: boolean
+  /** Artwork is being rendered or is queued to render after an edit. */
+  readonly rendering: boolean
   readonly onOpen: () => void
   readonly onLoadDemo: () => void
   readonly onShowOriginal: () => void
@@ -19,6 +21,7 @@ export function EmptyCanvas({
   isOriginal,
   viewName,
   renderEnabled,
+  rendering,
   onOpen,
   onLoadDemo,
   onShowOriginal,
@@ -34,7 +37,9 @@ export function EmptyCanvas({
           ? 'Open an image or drop one anywhere in this window.'
           : isBusy
             ? `Preparing the ${viewName}…`
-            : `The ${viewName} has not been rendered yet.`}
+            : rendering && !isOriginal
+              ? 'Rendering artwork…'
+              : `The ${viewName} has not been rendered yet. Changes render automatically.`}
       </p>
       {!hasSource && (
         <div className="empty-actions">

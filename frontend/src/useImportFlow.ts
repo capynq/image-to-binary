@@ -35,6 +35,8 @@ export interface ImportFlow {
   loadDemo(): void
   selectView(mode: ViewMode): void
   renderArtwork(): void
+  /** Renders the artwork in the background: the view, the status and the progress row stay as they are. */
+  renderQuietly(): void
   cancel(): void
   reset(): void
   onDragEnter(event: DragEvent<HTMLElement>): void
@@ -219,6 +221,10 @@ export function useImportFlow(
     controller.preview('artwork').catch(() => undefined)
   }, [controller])
 
+  const renderQuietly = useCallback((): void => {
+    controller.preview('artwork', { quiet: true }).catch(() => undefined)
+  }, [controller])
+
   const cancel = useCallback((): void => {
     intent.current += 1
     controller.cancel()
@@ -277,6 +283,7 @@ export function useImportFlow(
     loadDemo,
     selectView,
     renderArtwork,
+    renderQuietly,
     cancel,
     reset,
     onDragEnter,

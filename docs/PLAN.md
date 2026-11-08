@@ -2353,9 +2353,20 @@ Proposed commit title: `feat: render artwork automatically after edits`
 
 Completion checklist:
 
-- [ ] Debounced auto-render implemented.
-- [ ] Manual override, Escape and export interactions tested.
-- [ ] Updating indicator accessible.
+- [x] Debounced auto-render implemented.
+- [x] Manual override, Escape and export interactions tested.
+- [x] Updating indicator accessible.
+
+Validation: `useAutoRender` arms a 250 ms trailing timer per accepted
+settings revision and renders quietly only when a source is ready, no draft
+is invalid and the artwork is stale or missing. Each revision is retired once
+attempted, so failed or cancelled renders do not loop. Import renders the
+artwork right after the original preview; manual Render, Cmd/Ctrl+R and view
+changes flush; export clears the timer and re-arms if the artwork is stale;
+Escape cancels and waits for the next change. Cancel is open while updating,
+Render and Export stay enabled, and a polite "Updating…" status with a dimmed
+frame replaces the global busy row. Eleven new fake-timer tests; typecheck,
+format and all 814 frontend tests pass. Visual check follows in 9.3.
 
 ### 9.3 Update smoke run and docs for automatic render
 
