@@ -205,7 +205,11 @@ fn style_changes_reuse_the_sampled_grid_and_match_the_direct_renderer() {
     let mut session = new_session(41, 29);
     assert_eq!(start(&mut session, 0, 128).unwrap(), Stage::Sampling);
     let _plain = drive(&mut session, 0, MAX_SAFE);
-    let stats = |session: &Session| session.live.as_ref().unwrap().sampler.cache_stats();
+    let stats = |session: &Session| {
+        session.live.as_ref().unwrap().frames[0]
+            .sampler
+            .cache_stats()
+    };
     let (computed, entries) = (stats(&session).computed(), stats(&session).entries());
     assert_eq!(computed, 1);
 
@@ -237,7 +241,7 @@ fn style_changes_reuse_the_sampled_grid_and_match_the_direct_renderer() {
 /// glyph masks retained.
 fn cache_counts(session: &Session) -> (u64, usize, u64, usize) {
     let live = session.live.as_ref().unwrap();
-    let sampler = live.sampler.cache_stats();
+    let sampler = live.frames[0].sampler.cache_stats();
     let renderer = live.renderer.cache_stats();
     (
         sampler.computed(),
@@ -424,7 +428,7 @@ fn failed_starts_keep_the_current_job_and_the_proposed_generation() {
         session
             .live_mut()
             .unwrap()
-            .start(g(6), invalid, JobKind::Preview, OutputKind::Png);
+            .start(g(6), 0, invalid, JobKind::Preview, OutputKind::Png);
     assert_eq!(code(failed), ErrorCode::InvalidSettings);
     assert_eq!(session.live.as_ref().unwrap().newest, Some(5));
     assert_eq!(session.stage().unwrap(), Stage::Sampling);
@@ -570,7 +574,7 @@ fn invalid_starts_keep_an_accepted_original_job() {
         session
             .live_mut()
             .unwrap()
-            .start(g(6), invalid, JobKind::Preview, OutputKind::Png);
+            .start(g(6), 0, invalid, JobKind::Preview, OutputKind::Png);
     assert_eq!(code(failed), ErrorCode::InvalidSettings);
     assert_eq!(session.live.as_ref().unwrap().newest, Some(5));
     assert_eq!(session.stage().unwrap(), Stage::Preview);
@@ -585,11 +589,17 @@ fn invalid_starts_keep_an_accepted_original_job() {
 fn original_jobs_share_the_source_and_release_it_on_cancel_and_dispose() {
     let mut session = new_session(41, 29);
     session.start_original_preview(g(0)).unwrap();
-    assert_eq!(Arc::strong_count(&session.live.as_ref().unwrap().source), 3);
+    assert_eq!(
+        Arc::strong_count(&session.live.as_ref().unwrap().frames[0].source),
+        3
+    );
     assert_eq!(code(session.finish(g(0))), ErrorCode::JobIncomplete);
     session.advance(g(0), 2).unwrap();
     session.cancel(g(0)).unwrap();
-    assert_eq!(Arc::strong_count(&session.live.as_ref().unwrap().source), 2);
+    assert_eq!(
+        Arc::strong_count(&session.live.as_ref().unwrap().frames[0].source),
+        2
+    );
     assert_eq!(session.stage().unwrap(), Stage::Failed);
     assert_eq!(code(session.advance(g(0), 1)), ErrorCode::Cancelled);
     assert_eq!(code(session.finish(g(0))), ErrorCode::Cancelled);

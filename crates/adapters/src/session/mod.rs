@@ -1,22 +1,26 @@
-//! Transport-neutral processing session: one decoded source, one sample cache, one renderer,
-//! and at most one job.
+//! Transport-neutral processing session: one still source or one animation of frames, one
+//! renderer, and at most one job.
 //!
 //! This module is the single job state machine behind the WASM preview and export bindings
 //! and the native desktop shell. Both shells call the same methods with the same limits, so
 //! previews and PNG exports are deterministic across them.
 //!
 //! Invariants:
-//! - One source, one sample cache and one renderer per [`Session`]; at most one job.
+//! - At least one frame. A still source has exactly one frame with a classic sample cache;
+//!   every animation frame has its own sampler with the cache disabled.
+//! - One renderer per [`Session`]; at most one job, which names the frame it renders.
 //! - A job generation is accepted only when strictly newer than every earlier accepted
 //!   generation. Calls naming any other generation are stale and leave the job untouched.
 //! - A failed start keeps the current job; a failed advance makes that job terminal until a
 //!   newer start replaces it.
-//! - Disposal releases the source, caches, renderer and job; every later call reports
+//! - Disposal releases the frames, caches, renderer and job; every later call reports
 //!   [`SessionError::Disposed`].
 //!
 //! Failure contract: every fallible method returns a [`SessionError`] whose
 //! [`ErrorCode`] is the stable vocabulary shared by both shells. No method panics.
 
+#[cfg(test)]
+mod animation_tests;
 pub mod args;
 #[cfg(test)]
 mod contract_tests;
@@ -35,11 +39,13 @@ use std::sync::Arc;
 
 use image_to_binary_core::{ContractError, Generation, Sampling, SourceMetadata};
 use image_to_binary_processing::{
-    DecodedSource, OriginalPreviewTask, RenderOptions, Renderer, Sampler, SamplingPlan,
+    DecodedAnimation, DecodedSource, OriginalPreviewTask, RenderOptions, Renderer, Sampler,
+    SamplingPlan,
 };
 
 pub use error::{EngineFailure, ErrorCode, JobKind, SessionError, StaleReason};
 pub use frame::Frame;
+pub use image_to_binary_processing::LoopCount;
 pub use job::{OutputKind, Stage};
 pub use limits::{
     DEFAULT_PIXEL_BUDGET, EXPORT_CHUNK_BYTES, EXPORT_LIMITS, EXPORT_MAX_ENCODED_BYTES,
@@ -50,17 +56,59 @@ pub use settings::PreviewSettings;
 
 use job::{Job, Phase};
 
+/// One frame's pixels, the sampler that reads them and the cache policy it runs under.
+#[derive(Debug)]
+struct FrameSlot {
+    source: Arc<DecodedSource>,
+    sampler: Sampler,
+}
+
+impl FrameSlot {
+    /// The only frame of a still source keeps the default sample cache.
+    fn still(source: Arc<DecodedSource>) -> Self {
+        Self {
+            sampler: Sampler::new(Arc::clone(&source)),
+            source,
+        }
+    }
+
+    /// Animation frames have no sample cache, so a long animation retains no sampled grids;
+    /// every preview or export samples its frame again, and the pixels stay in `source` only.
+    fn animated(source: Arc<DecodedSource>) -> Self {
+        Self {
+            sampler: Sampler::with_cache_capacity(Arc::clone(&source), 0),
+            source,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct Live {
     metadata: SourceMetadata,
-    source: Arc<DecodedSource>,
-    sampler: Sampler,
+    frames: Vec<FrameSlot>,
+    /// Empty for a still source; otherwise one delay per frame.
+    delays_centiseconds: Vec<u16>,
+    loop_count: LoopCount,
     renderer: Renderer,
     job: Option<Job>,
     newest: Option<u64>,
 }
 
 impl Live {
+    fn slot(&self, frame: usize) -> Result<&FrameSlot, SessionError> {
+        self.frames.get(frame).ok_or(SessionError::FrameOutOfRange {
+            frame,
+            count: self.frames.len(),
+        })
+    }
+
+    fn slot_mut(&mut self, frame: usize) -> Result<&mut FrameSlot, SessionError> {
+        let count = self.frames.len();
+        self.frames
+            .get_mut(frame)
+            .ok_or(SessionError::FrameOutOfRange { frame, count })
+    }
+
     fn check_generation(&self, generation: Generation) -> Result<(), SessionError> {
         match self.newest {
             Some(newest) if newest == generation.value() => Ok(()),
@@ -72,21 +120,29 @@ impl Live {
     fn start(
         &mut self,
         generation: Generation,
+        frame: usize,
         settings: PreviewSettings,
         kind: JobKind,
         output: OutputKind,
     ) -> Result<Stage, SessionError> {
+        self.slot(frame)?;
         self.ensure_newer(generation)?;
-        let job = self.begin(generation, settings, kind, output)?;
+        let job = self.begin(generation, frame, settings, kind, output)?;
         Ok(self.commit(generation, job))
     }
 
-    fn start_original(&mut self, generation: Generation) -> Result<Stage, SessionError> {
+    fn start_original(
+        &mut self,
+        generation: Generation,
+        frame: usize,
+    ) -> Result<Stage, SessionError> {
+        let source = Arc::clone(&self.slot(frame)?.source);
         self.ensure_newer(generation)?;
-        let task = OriginalPreviewTask::new(Arc::clone(&self.source), generation)?;
+        let task = OriginalPreviewTask::new(source, generation)?;
         let job = Job {
             generation,
             kind: JobKind::Preview,
+            frame,
             phase: Phase::Original(Box::new(task)),
         };
         Ok(self.commit(generation, job))
@@ -112,6 +168,7 @@ impl Live {
     fn begin(
         &mut self,
         generation: Generation,
+        frame: usize,
         settings: PreviewSettings,
         kind: JobKind,
         output: OutputKind,
@@ -133,7 +190,7 @@ impl Live {
             style: settings.style,
             ..RenderOptions::default()
         };
-        let plan = self.sampler.prepare(
+        let plan = self.slot_mut(frame)?.sampler.prepare(
             settings.cell_size,
             cell_height,
             settings.sampling,
@@ -151,6 +208,7 @@ impl Live {
         Ok(Job {
             generation,
             kind,
+            frame,
             phase,
         })
     }
@@ -158,14 +216,18 @@ impl Live {
     fn advance(&mut self, generation: Generation, budget: u64) -> Result<Stage, SessionError> {
         self.check_generation(generation)?;
         let Self {
-            sampler,
+            frames,
             renderer,
             job,
             ..
         } = self;
-        job.as_mut()
-            .ok_or(SessionError::NoJob)?
-            .advance(sampler, renderer, budget)
+        let job = job.as_mut().ok_or(SessionError::NoJob)?;
+        let frame = job.frame;
+        let count = frames.len();
+        let slot = frames
+            .get_mut(frame)
+            .ok_or(SessionError::FrameOutOfRange { frame, count })?;
+        job.advance(&mut slot.sampler, renderer, budget)
     }
 
     fn cancel(&mut self, generation: Generation) -> Result<(), SessionError> {
@@ -259,7 +321,7 @@ impl Live {
     }
 }
 
-/// Owns the source, sampler cache, renderer and at most one job until disposed.
+/// Owns the frames, their sampler caches, the renderer and at most one job until disposed.
 ///
 /// Invariants and failure contract are described at the module level. Methods take
 /// [`Generation`] and typed [`PreviewSettings`], so no caller can pass an unchecked number.
@@ -269,19 +331,55 @@ pub struct Session {
 }
 
 impl Session {
-    /// Takes ownership of `source`; its pixels are moved, never cloned.
+    /// Takes ownership of `source` as a single-frame still; its pixels are moved, never cloned.
     ///
     /// # Errors
     ///
     /// Returns the renderer's failure when its fonts cannot be prepared.
     pub fn new(source: DecodedSource) -> Result<Self, SessionError> {
         let metadata = source.metadata();
-        let source = Arc::new(source);
         Ok(Self {
             live: Some(Live {
                 metadata,
-                sampler: Sampler::new(Arc::clone(&source)),
-                source,
+                frames: vec![FrameSlot::still(Arc::new(source))],
+                delays_centiseconds: Vec::new(),
+                loop_count: LoopCount::Finite(0),
+                renderer: Renderer::new()?,
+                job: None,
+                newest: None,
+            }),
+        })
+    }
+
+    /// Takes ownership of an animation's frames, which share their pixels with `animation`.
+    /// Frame order and delays are kept; the loop count is the decoder's.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionError::FrameTableReservation`] when the frame table cannot be
+    /// reserved, or the renderer's failure when its fonts cannot be prepared.
+    pub fn new_animation(animation: &DecodedAnimation) -> Result<Self, SessionError> {
+        let metadata = animation.metadata();
+        let loop_count = animation.loop_count();
+        let count = animation.frames().len();
+        let mut frames = Vec::new();
+        frames
+            .try_reserve_exact(count)
+            .map_err(|_| SessionError::FrameTableReservation)?;
+        let mut delays_centiseconds = Vec::new();
+        delays_centiseconds
+            .try_reserve_exact(count)
+            .map_err(|_| SessionError::FrameTableReservation)?;
+        for frame in animation.frames() {
+            frames.push(FrameSlot::animated(Arc::clone(frame.source())));
+            delays_centiseconds.push(frame.delay_centiseconds());
+        }
+        Ok(Self {
+            live: Some(Live {
+                metadata,
+                frames,
+                delays_centiseconds,
+                loop_count,
                 renderer: Renderer::new()?,
                 job: None,
                 newest: None,
@@ -313,24 +411,45 @@ impl Session {
         self.live = None;
     }
 
-    /// Starts a preview job that supersedes any current one. Allocation and font setup run
-    /// synchronously; sampling runs in later advances unless the grid is cached.
+    /// Starts a preview of frame `0`, superseding any current job. Allocation and font setup
+    /// run synchronously; sampling runs in later advances unless the grid is cached.
     ///
     /// # Errors
     ///
-    /// Returns [`SessionError::Disposed`], [`SessionError::StaleGeneration`] for a
-    /// generation not newer than the last accepted one, or a resource or contract error.
-    /// A failed start keeps the current job.
+    /// Same as [`Session::start_preview_frame`].
     pub fn start_preview(
         &mut self,
         generation: Generation,
         settings: PreviewSettings,
     ) -> Result<Stage, SessionError> {
-        self.live_mut()?
-            .start(generation, settings, JobKind::Preview, OutputKind::Png)
+        self.start_preview_frame(generation, 0, settings)
     }
 
-    /// Starts a PNG export job. It shares the preview sample cache for the same settings.
+    /// Starts a preview of `frame` that supersedes any current job. A still source accepts
+    /// only frame `0`; an animation accepts `0..frame_count()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionError::Disposed`], [`SessionError::FrameOutOfRange`] for an index
+    /// outside the frames, [`SessionError::StaleGeneration`] for a generation not newer than
+    /// the last accepted one, or a resource or contract error. A failed start keeps the
+    /// current job.
+    pub fn start_preview_frame(
+        &mut self,
+        generation: Generation,
+        frame: usize,
+        settings: PreviewSettings,
+    ) -> Result<Stage, SessionError> {
+        self.live_mut()?.start(
+            generation,
+            frame,
+            settings,
+            JobKind::Preview,
+            OutputKind::Png,
+        )
+    }
+
+    /// Starts a PNG export of frame `0`. It shares the preview sample cache for the same settings.
     ///
     /// # Errors
     ///
@@ -343,7 +462,7 @@ impl Session {
         self.start_export_as(generation, settings, OutputKind::Png)
     }
 
-    /// Starts an export job of the given output kind over the same sampled grid and
+    /// Starts an export of frame `0` in the given output kind over the same sampled grid and
     /// settings as [`Session::start_preview`], so PNG and text describe one grid.
     ///
     /// # Errors
@@ -355,21 +474,80 @@ impl Session {
         settings: PreviewSettings,
         output: OutputKind,
     ) -> Result<Stage, SessionError> {
-        self.live_mut()?
-            .start(generation, settings, JobKind::Export, output)
+        self.start_export_frame_as(generation, 0, settings, output)
     }
 
-    /// Starts a bounded original-image preview that supersedes any current job.
+    /// Starts an export of `frame` in the given output kind, with the same frame rules and
+    /// errors as [`Session::start_preview_frame`].
     ///
     /// # Errors
     ///
-    /// Returns [`SessionError::Disposed`], [`SessionError::StaleGeneration`], or a
-    /// resource error; a failed start keeps the current job.
+    /// Same as [`Session::start_preview_frame`].
+    pub fn start_export_frame_as(
+        &mut self,
+        generation: Generation,
+        frame: usize,
+        settings: PreviewSettings,
+        output: OutputKind,
+    ) -> Result<Stage, SessionError> {
+        self.live_mut()?
+            .start(generation, frame, settings, JobKind::Export, output)
+    }
+
+    /// Starts a bounded original-image preview of frame `0` that supersedes any current job.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Session::start_original_preview_frame`].
     pub fn start_original_preview(
         &mut self,
         generation: Generation,
     ) -> Result<Stage, SessionError> {
-        self.live_mut()?.start_original(generation)
+        self.start_original_preview_frame(generation, 0)
+    }
+
+    /// Starts a bounded original-image preview of `frame` that supersedes any current job.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionError::Disposed`], [`SessionError::FrameOutOfRange`],
+    /// [`SessionError::StaleGeneration`], or a resource error; a failed start keeps the
+    /// current job.
+    pub fn start_original_preview_frame(
+        &mut self,
+        generation: Generation,
+        frame: usize,
+    ) -> Result<Stage, SessionError> {
+        self.live_mut()?.start_original(generation, frame)
+    }
+
+    /// Returns the number of frames: `1` for a still, at least two for an animation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionError::Disposed`] after disposal.
+    pub fn frame_count(&self) -> Result<usize, SessionError> {
+        Ok(self.live_ref()?.frames.len())
+    }
+
+    /// Returns each frame's display time in centiseconds, in presentation order. Empty for a
+    /// still, so the slice length is `frame_count()` only for an animation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionError::Disposed`] after disposal.
+    pub fn frame_delays_centiseconds(&self) -> Result<&[u16], SessionError> {
+        Ok(&self.live_ref()?.delays_centiseconds)
+    }
+
+    /// Returns how many times the animation repeats. A still reports `Finite(0)`, which plays
+    /// once.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionError::Disposed`] after disposal.
+    pub fn loop_count(&self) -> Result<LoopCount, SessionError> {
+        Ok(self.live_ref()?.loop_count)
     }
 
     /// Spends `pixel_budget` pixels of work in the current stage only.

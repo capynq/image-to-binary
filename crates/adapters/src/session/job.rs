@@ -135,10 +135,13 @@ impl ExportTask {
     }
 }
 
+/// Invariant: `frame` indexes the owning session's frame table, and the job's sampler
+/// is that frame's sampler, so a sampling task always completes against its own source.
 #[derive(Debug)]
 pub(super) struct Job {
     pub(super) generation: Generation,
     pub(super) kind: JobKind,
+    pub(super) frame: usize,
     pub(super) phase: Phase,
 }
 

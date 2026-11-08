@@ -248,6 +248,7 @@ dependencies = [
 name = "image-to-binary-adapters"
 version = "0.1.0"
 dependencies = [
+ "image",
  "image-to-binary-core",
  "image-to-binary-export",
  "image-to-binary-processing",

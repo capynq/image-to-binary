@@ -268,6 +268,102 @@ fn two_frame_gif() -> Result<Vec<u8>, Box<dyn Error>> {
     Ok(output.into_inner())
 }
 
+const ANIMATION_SHADES: [u8; 3] = [255, 128, 0];
+const ANIMATION_DELAYS: [u32; 3] = [5, 0, 50];
+const LONG_FRAMES: usize = 1001;
+
+fn shaded_gif(
+    shades: &[u8],
+    delays_centiseconds: &[u32],
+    repeat: Option<image::codecs::gif::Repeat>,
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    let mut output = Cursor::new(Vec::new());
+    let mut encoder = GifEncoder::new(&mut output);
+    if let Some(repeat) = repeat {
+        encoder.set_repeat(repeat)?;
+    }
+    let frames: Vec<Frame> = shades
+        .iter()
+        .zip(delays_centiseconds)
+        .map(|(&shade, &centiseconds)| {
+            Frame::from_parts(
+                ImageBuffer::from_pixel(PAGE_SIZE, PAGE_SIZE, Rgba([shade, shade, shade, 255])),
+                0,
+                0,
+                Delay::from_numer_denom_ms(centiseconds * 10, 1),
+            )
+        })
+        .collect();
+    encoder.encode_frames(frames)?;
+    drop(encoder);
+    Ok(output.into_inner())
+}
+
+fn animation_entry(name: &str, bytes: &[u8]) -> Result<String, Box<dyn Error>> {
+    let animation = image_to_binary_processing::decode_animation(bytes, DecodeLimits::default())?
+        .ok_or("the animated fixture has several frames")?;
+    let dimensions = animation.metadata().dimensions();
+    let loop_count = match animation.loop_count() {
+        image_to_binary_processing::LoopCount::Infinite => "\"infinite\"".to_owned(),
+        image_to_binary_processing::LoopCount::Finite(times) => times.to_string(),
+    };
+    let mut frames = String::new();
+    for (index, frame) in animation.frames().iter().enumerate() {
+        if index > 0 {
+            frames.push(',');
+        }
+        let copy = DecodedSource::from_rgba(
+            dimensions,
+            frame.source().pixels().to_vec(),
+            DecodeLimits::default(),
+        )?;
+        let (preview, _) = preview_of(copy)?;
+        write!(
+            frames,
+            r#"{{"delay":{},"previewWidth":{},"previewHeight":{},"preview":"{}"}}"#,
+            frame.delay_centiseconds(),
+            preview.width(),
+            preview.height(),
+            base64(preview.pixels())
+        )?;
+    }
+    Ok(format!(
+        r#"{{"name":"{name}","width":{},"height":{},"bytes":"{}","loopCount":{loop_count},"frames":[{frames}]}}"#,
+        dimensions.width(),
+        dimensions.height(),
+        base64(bytes)
+    ))
+}
+
+fn long_animation_entry() -> Result<String, Box<dyn Error>> {
+    let bytes = shaded_gif(&vec![255; LONG_FRAMES], &vec![1; LONG_FRAMES], None)?;
+    let first = decode(&bytes, DecodeLimits::default())?;
+    let dimensions = first.metadata().dimensions();
+    let (preview, _) = preview_of(first)?;
+    Ok(format!(
+        r#"{{"name":"long_animation","width":{},"height":{},"bytes":"{}","previewWidth":{},"previewHeight":{},"preview":"{}"}}"#,
+        dimensions.width(),
+        dimensions.height(),
+        base64(&bytes),
+        preview.width(),
+        preview.height(),
+        base64(preview.pixels())
+    ))
+}
+
+fn animation_sections() -> Result<String, Box<dyn Error>> {
+    let shaded = shaded_gif(
+        &ANIMATION_SHADES,
+        &ANIMATION_DELAYS,
+        Some(image::codecs::gif::Repeat::Infinite),
+    )?;
+    Ok(format!(
+        "],\"animations\":[{}],\"longAnimation\":{},\"rejected\":[",
+        animation_entry("shaded_gif", &shaded)?,
+        long_animation_entry()?
+    ))
+}
+
 fn two_page_tiff() -> Result<Vec<u8>, Box<dyn Error>> {
     let pixels = usize::try_from(PAGE_SIZE * PAGE_SIZE * 3)?;
     let mut output = Cursor::new(Vec::new());
@@ -1023,7 +1119,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             base64(&png)
         )?;
     }
-    json.push_str("],\"rejected\":[");
+    json.push_str(&animation_sections()?);
     for (index, rejected) in rejected_fixtures(&fixtures)?.iter().enumerate() {
         if index > 0 {
             json.push(',');

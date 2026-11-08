@@ -163,6 +163,15 @@ pub enum SessionError {
     },
     /// A stage advance was given a zero pixel budget.
     ZeroBudget,
+    /// The frame index is outside the source's frames; a still source has only frame `0`.
+    FrameOutOfRange {
+        /// The requested frame index.
+        frame: usize,
+        /// How many frames the source holds.
+        count: usize,
+    },
+    /// The frame table could not be reserved.
+    FrameTableReservation,
     /// A preview setting is outside its inclusive range.
     SettingOutOfRange {
         /// Browser name of the setting, `cellSize` or `fontSize`.
@@ -200,12 +209,12 @@ impl SessionError {
             Self::Interrupted | Self::Changed => ErrorCode::Internal,
             Self::FrameConsumed => ErrorCode::FrameConsumed,
             Self::Argument { code, .. } => *code,
-            Self::ZeroBudget => ErrorCode::InvalidArgument,
+            Self::ZeroBudget | Self::FrameOutOfRange { .. } => ErrorCode::InvalidArgument,
             Self::SettingOutOfRange { .. } => ErrorCode::InvalidSettings,
             Self::DimensionsTooLarge | Self::SourceReservation => ErrorCode::ResourceLimitExceeded,
             Self::SourceLength => ErrorCode::InvalidDimensions,
             Self::EncodedTooLarge => ErrorCode::EncodedTooLarge,
-            Self::EncodedReservation => ErrorCode::ReservationFailed,
+            Self::EncodedReservation | Self::FrameTableReservation => ErrorCode::ReservationFailed,
             Self::Contract(error) => contract_code(error),
             Self::Engine(failure) => failure.code,
         }
@@ -241,6 +250,12 @@ impl SessionError {
             Self::FrameConsumed => "the frame pixels were already taken".to_owned(),
             Self::Argument { message, .. } => message.clone(),
             Self::ZeroBudget => "pixelBudget must be positive".to_owned(),
+            Self::FrameOutOfRange { frame, count } => {
+                format!("frame {frame} is outside the {count} frame(s) of this source")
+            }
+            Self::FrameTableReservation => {
+                "could not reserve memory for the animation frames".to_owned()
+            }
             Self::SettingOutOfRange { setting, min, max } => {
                 format!("{setting} must be between {min} and {max}")
             }

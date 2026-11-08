@@ -1,7 +1,9 @@
 //! Validated source geometry and encoded input, checked before any pixel or byte is copied.
 
-use image_to_binary_core::{Dimensions, ResourceLimits};
-use image_to_binary_processing::{decode, DecodeLimits, DecodedSource};
+use image_to_binary_core::{ContractError, Dimensions, ResourceLimits};
+use image_to_binary_processing::{
+    decode, decode_animation, DecodeError, DecodeLimits, DecodedSource,
+};
 
 use super::error::SessionError;
 use super::limits::{MAX_DECODED_BYTES, MAX_ENCODED_BYTES};
@@ -124,8 +126,8 @@ impl EncodedPlan {
         reserve_zeroed(self.len)
     }
 
-    /// Decodes `encoded` once with the default limits and builds a session from the
-    /// normalized pixels. The encoded buffer is dropped before the session is returned,
+    /// Decodes `encoded` once with the default limits and builds a single-frame session from
+    /// the normalized pixels. The encoded buffer is dropped before the session is returned,
     /// and decoded pixels are moved, not cloned.
     ///
     /// # Errors
@@ -137,4 +139,41 @@ impl EncodedPlan {
         drop(encoded);
         Session::new(source)
     }
+
+    /// Like [`EncodedPlan::decode_session`], but a multi-frame GIF becomes an animation session.
+    ///
+    /// A GIF over the frame limit or the decoded-byte budget falls back to its first frame,
+    /// exactly as [`EncodedPlan::decode_session`] would build it, so such files still import.
+    /// Every other failure, including malformed data, is reported as is.
+    ///
+    /// # Errors
+    ///
+    /// Returns the decoder's failure for anything other than a limit-exceeded animation, or
+    /// the session's failure to build. No session is built on error.
+    pub fn decode_animated_session(encoded: Vec<u8>) -> Result<Session, SessionError> {
+        let session = animated_or_still(&encoded, DecodeLimits::default())?;
+        drop(encoded);
+        Ok(session)
+    }
+}
+
+pub(super) fn animated_or_still(
+    encoded: &[u8],
+    limits: DecodeLimits,
+) -> Result<Session, SessionError> {
+    match decode_animation(encoded, limits) {
+        Ok(Some(animation)) => Session::new_animation(&animation),
+        Ok(None) => Session::new(decode(encoded, limits)?),
+        Err(error) if falls_back_to_still(&error) => Session::new(decode(encoded, limits)?),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// True for the frame-limit and decoded-byte-budget failures of an animation, which the
+/// still decoder can still satisfy by reading only the first frame.
+fn falls_back_to_still(error: &DecodeError) -> bool {
+    matches!(
+        error,
+        DecodeError::ResourceLimit(_) | DecodeError::Contract(ContractError::ResourceLimitExceeded)
+    )
 }

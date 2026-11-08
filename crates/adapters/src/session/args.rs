@@ -70,6 +70,21 @@ pub fn ranged(value: f64, name: &str, min: u8, max: u8) -> Result<u8, SessionErr
     }
 }
 
+/// Converts a frame index. Only the safe-integer rule applies here; whether the index names a
+/// frame of the source is decided by the session.
+///
+/// # Errors
+///
+/// Returns `invalid_argument` with `"frame must be a non-negative safe integer"` for a value
+/// that is not a safe integer, or one that does not fit the platform's index type.
+pub fn frame_index(value: f64) -> Result<usize, SessionError> {
+    let index = safe_integer(value, "frame")?;
+    usize::try_from(index).map_err(|_| SessionError::Argument {
+        code: ErrorCode::InvalidArgument,
+        message: "frame must be a non-negative safe integer".to_owned(),
+    })
+}
+
 /// Converts the page's generation.
 ///
 /// # Errors

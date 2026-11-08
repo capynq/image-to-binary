@@ -12,6 +12,7 @@ image-to-binary-export = { path = "../export" }
 image-to-binary-processing = { path = "../processing" }
 
 [dev-dependencies]
+image = { version = "=0.25.10", default-features = false, features = ["gif"] }
 png = "=0.18.1"
 
 [lints]

@@ -10,7 +10,9 @@ mod error;
 mod numbers;
 
 use image_to_binary_adapters::session::args::{self, BoolArg, StyleArgs, TextArg};
-use image_to_binary_adapters::session::{EncodedPlan, Frame, JobKind, Session, SourcePlan, Stage};
+use image_to_binary_adapters::session::{
+    EncodedPlan, Frame, JobKind, LoopCount, Session, SourcePlan, Stage,
+};
 use image_to_binary_core::Generation;
 use js_sys::{Error as JsError, Reflect, Uint8Array};
 use wasm_bindgen::prelude::*;
@@ -74,7 +76,7 @@ fn copy_encoded(bytes: &Uint8Array) -> Result<Session, BindingError> {
         .map_err(BindingError::from)?;
     let mut buffer = plan.allocate().map_err(BindingError::from)?;
     bytes.copy_to(&mut buffer);
-    EncodedPlan::decode_session(buffer).map_err(BindingError::from)
+    EncodedPlan::decode_animated_session(buffer).map_err(BindingError::from)
 }
 
 /// Checks the session is live before any argument is converted, so disposal wins over
@@ -82,6 +84,16 @@ fn copy_encoded(bytes: &Uint8Array) -> Result<Session, BindingError> {
 fn generation_of(session: &Session, value: &JsValue) -> Result<Generation, BindingError> {
     session.ensure_live().map_err(BindingError::from)?;
     args::generation(number(value)).map_err(BindingError::from)
+}
+
+/// The optional frame index. `undefined` and `null` select frame `0`, so existing callers
+/// that omit the trailing argument keep the first frame.
+fn frame_of(value: &JsValue) -> Result<usize, BindingError> {
+    if value.is_undefined() || value.is_null() {
+        Ok(0)
+    } else {
+        args::frame_index(number(value)).map_err(BindingError::from)
+    }
 }
 
 /// An optional text argument owned for the duration of one call. `undefined` and `null` are
@@ -176,8 +188,10 @@ fn start_job(
     ramp: &JsValue,
     style: &StyleInputs<'_>,
     output_kind: &JsValue,
+    frame: &JsValue,
 ) -> Result<Stage, BindingError> {
     let generation = generation_of(session, generation)?;
+    let frame = frame_of(frame)?;
     let sampling = sampling.as_string();
     let mode = OwnedText::of(mode);
     let ramp = OwnedText::of(ramp);
@@ -193,11 +207,11 @@ fn start_job(
     )
     .map_err(BindingError::from)?;
     match kind {
-        JobKind::Preview => session.start_preview(generation, settings),
+        JobKind::Preview => session.start_preview_frame(generation, frame, settings),
         JobKind::Export => {
             let output_kind = OwnedText::of(output_kind);
             let output = args::output_kind(output_kind.arg()).map_err(BindingError::from)?;
-            session.start_export_as(generation, settings, output)
+            session.start_export_frame_as(generation, frame, settings, output)
         }
     }
     .map_err(BindingError::from)
@@ -337,7 +351,9 @@ impl ImageSession {
     /// byte is copied. `bytes` is then copied once into fallibly reserved WASM
     /// memory; the caller's array is never retained or mutated and the copy is
     /// freed before the session is returned. Decoded pixels are moved into the
-    /// session, not cloned. GIF and TIFF yield their first frame or page.
+    /// session, not cloned. A GIF with several frames becomes an animation session of up to
+    /// 1000 frames within the decoded budget; a GIF over either limit, and a TIFF, yield their
+    /// first frame or page as before.
     ///
     /// Decoding is synchronous and runs to completion: it cannot be cancelled or
     /// preempted mid-call. The 50 MP and 1 GiB decoded-byte ceilings are checked
@@ -384,6 +400,42 @@ impl ImageSession {
         lift(self.inner.source_metadata()).map(image_to_binary_core::SourceMetadata::channels)
     }
 
+    /// Number of frames: `1` for a still, the decoded frame count for an animation.
+    ///
+    /// # Errors
+    ///
+    /// Throws `disposed`.
+    #[wasm_bindgen(getter, js_name = frameCount)]
+    pub fn frame_count(&self) -> Result<f64, JsValue> {
+        lift(self.inner.frame_count())
+            .map(|count| js_count(u64::try_from(count).unwrap_or(u64::MAX)))
+    }
+
+    /// Per-frame display times in centiseconds (`Uint16Array`, one per frame, never `0` or `1`).
+    /// Empty for a still.
+    ///
+    /// # Errors
+    ///
+    /// Throws `disposed`.
+    #[wasm_bindgen(getter, js_name = frameDelays)]
+    pub fn frame_delays(&self) -> Result<Vec<u16>, JsValue> {
+        lift(self.inner.frame_delays_centiseconds()).map(<[u16]>::to_vec)
+    }
+
+    /// Repeat count after the first play: `Infinity` loops forever, and `0` plays once, which a
+    /// still and an animation without a loop extension report.
+    ///
+    /// # Errors
+    ///
+    /// Throws `disposed`.
+    #[wasm_bindgen(getter, js_name = loopCount)]
+    pub fn loop_count(&self) -> Result<f64, JsValue> {
+        lift(self.inner.loop_count()).map(|count| match count {
+            LoopCount::Infinite => f64::INFINITY,
+            LoopCount::Finite(times) => f64::from(times),
+        })
+    }
+
     /// Starts a job superseding any current one. `generation` must exceed every
     /// earlier accepted generation (zero is valid first); `sampling` is
     /// `"classic"` or `"average"`. Allocation and font setup are synchronous.
@@ -410,6 +462,7 @@ impl ImageSession {
         color_mode: &JsValue,
         #[wasm_bindgen(unchecked_param_type = "number | undefined")] contrast: &JsValue,
         #[wasm_bindgen(unchecked_param_type = "boolean | undefined")] invert: &JsValue,
+        #[wasm_bindgen(unchecked_param_type = "number | undefined")] frame: &JsValue,
     ) -> Result<JobStage, JsValue> {
         lift(start_job(
             &mut self.inner,
@@ -429,6 +482,7 @@ impl ImageSession {
                 invert,
             },
             &JsValue::UNDEFINED,
+            frame,
         ))
         .map(JobStage::from)
     }
@@ -450,11 +504,14 @@ impl ImageSession {
     pub fn start_original_preview(
         &mut self,
         #[wasm_bindgen(unchecked_param_type = "number")] generation: &JsValue,
+        #[wasm_bindgen(unchecked_param_type = "number | undefined")] frame: &JsValue,
     ) -> Result<JobStage, JsValue> {
         let generation = generation_of(&self.inner, generation);
+        let frame = frame_of(frame);
         lift(generation.and_then(|generation| {
+            let frame = frame?;
             self.inner
-                .start_original_preview(generation)
+                .start_original_preview_frame(generation, frame)
                 .map_err(BindingError::from)
         }))
         .map(JobStage::from)
@@ -575,6 +632,7 @@ impl ImageSession {
         #[wasm_bindgen(unchecked_param_type = "boolean | undefined")] invert: &JsValue,
         #[wasm_bindgen(unchecked_param_type = "\"png\" | \"text\" | undefined")]
         output_kind: &JsValue,
+        #[wasm_bindgen(unchecked_param_type = "number | undefined")] frame: &JsValue,
     ) -> Result<JobStage, JsValue> {
         lift(start_job(
             &mut self.inner,
@@ -594,6 +652,7 @@ impl ImageSession {
                 invert,
             },
             output_kind,
+            frame,
         ))
         .map(JobStage::from)
     }

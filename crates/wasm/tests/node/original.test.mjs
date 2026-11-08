@@ -271,7 +271,7 @@ test('generated declarations type startOriginalPreview as a number-taking stage 
   const start = declarations.indexOf('export class ImageSession');
   assert.ok(start >= 0, 'ImageSession declaration');
   assert.ok(
-    declarations.slice(start).includes('startOriginalPreview(generation: number): JobStage'),
+    declarations.slice(start).includes('startOriginalPreview(generation: number, frame: number | undefined): JobStage'),
     'startOriginalPreview declaration',
   );
 });
