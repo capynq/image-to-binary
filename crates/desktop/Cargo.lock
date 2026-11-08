@@ -1628,6 +1628,7 @@ dependencies = [
 name = "image-to-binary-export"
 version = "0.1.0"
 dependencies = [
+ "gif",
  "image-to-binary-core",
  "png 0.18.1",
 ]

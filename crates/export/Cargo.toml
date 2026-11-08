@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 image-to-binary-core = { path = "../core" }
+gif = { version = "=0.14.2", default-features = false, features = ["std", "color_quant", "raii_no_panic"] }
 png = "=0.18.1"
 
 [lints]

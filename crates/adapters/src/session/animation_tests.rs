@@ -285,3 +285,116 @@ fn malformed_animations_report_their_decode_error_instead_of_falling_back() {
         SessionError::Contract(ContractError::ResourceLimitExceeded)
     );
 }
+
+fn still() -> Session {
+    let source = DecodedSource::from_rgba(
+        Dimensions::new(8, 8).unwrap(),
+        vec![255; 8 * 8 * 4],
+        DecodeLimits::default(),
+    )
+    .unwrap();
+    Session::new(source).unwrap()
+}
+
+fn gif_export(session: &mut Session, generation: u64, budget: u64) -> Vec<u8> {
+    session
+        .start_export_frame_as(g(generation), 0, settings(128), OutputKind::Gif)
+        .unwrap();
+    let mut bytes = Vec::new();
+    while session.stage().unwrap() != Stage::Ready {
+        session.advance(g(generation), budget).unwrap();
+        for chunk in session.drain_export(g(generation)).unwrap() {
+            bytes.extend(chunk);
+        }
+    }
+    for chunk in session.finish_export(g(generation)).unwrap() {
+        bytes.extend(chunk);
+    }
+    bytes
+}
+
+fn gif_delays_centiseconds(bytes: &[u8]) -> Vec<u64> {
+    let decoder = image::codecs::gif::GifDecoder::new(Cursor::new(bytes)).unwrap();
+    let frames = image::AnimationDecoder::into_frames(decoder)
+        .collect_frames()
+        .unwrap();
+    frames
+        .iter()
+        .map(|frame| {
+            let (numerator, denominator) = frame.delay().numer_denom_ms();
+            u64::from(numerator) / u64::from(denominator) / 10
+        })
+        .collect()
+}
+
+#[test]
+fn a_gif_export_writes_every_frame_with_its_timing_and_loop() {
+    let bytes = gif(&[255, 128, 0], &[5, 10, 50], Some(Repeat::Infinite));
+    let mut session = Session::new_animation(&animation(&bytes)).unwrap();
+    let exported = gif_export(&mut session, 1, 37);
+    assert!(exported.starts_with(b"GIF89a"));
+    assert_eq!(gif_delays_centiseconds(&exported), [5, 10, 50]);
+    assert!(exported.windows(11).any(|window| window == b"NETSCAPE2.0"));
+}
+
+#[test]
+fn gif_bytes_do_not_depend_on_the_pixel_budget_and_play_once_without_a_loop() {
+    let bytes = gif(&[255, 128, 0], &[10, 10, 10], None);
+    let expected = gif_export(
+        &mut Session::new_animation(&animation(&bytes)).unwrap(),
+        1,
+        u64::MAX,
+    );
+    assert!(!expected.windows(11).any(|window| window == b"NETSCAPE2.0"));
+    for budget in [1, 37, 4096] {
+        let mut session = Session::new_animation(&animation(&bytes)).unwrap();
+        assert_eq!(gif_export(&mut session, 1, budget), expected);
+    }
+}
+
+#[test]
+fn a_gif_export_of_a_still_source_is_refused_without_a_job() {
+    let mut session = still();
+    let error = session
+        .start_export_frame_as(g(1), 0, settings(128), OutputKind::Gif)
+        .unwrap_err();
+    assert_eq!(error.code(), ErrorCode::InvalidArgument);
+    assert_eq!(session.stage().unwrap(), Stage::Idle);
+}
+
+#[test]
+fn a_gif_export_refuses_a_frame_index_and_reports_progress_in_frames() {
+    let mut session = three_frames();
+    let error = session
+        .start_export_frame_as(g(1), 1, settings(128), OutputKind::Gif)
+        .unwrap_err();
+    assert_eq!(error.code(), ErrorCode::InvalidArgument);
+
+    session
+        .start_export_frame_as(g(1), 0, settings(128), OutputKind::Gif)
+        .unwrap();
+    assert_eq!(session.stage().unwrap(), Stage::Encoding);
+    assert_eq!(session.progress().unwrap(), (0, 3));
+    let mut completed = Vec::new();
+    while session.stage().unwrap() != Stage::Ready {
+        session.advance(g(1), 4096).unwrap();
+        completed.push(session.progress().unwrap().0);
+    }
+    assert!(completed.windows(2).all(|pair| pair[0] <= pair[1]));
+    assert_eq!(completed.last(), Some(&3));
+    assert_eq!(session.advance(g(1), 4096).unwrap(), Stage::Ready);
+    assert!(session.finish_export(g(1)).is_ok());
+}
+
+#[test]
+fn cancelling_a_gif_export_mid_run_is_terminal() {
+    let mut session = three_frames();
+    session
+        .start_export_frame_as(g(1), 0, settings(128), OutputKind::Gif)
+        .unwrap();
+    session.advance(g(1), 1).unwrap();
+    session.cancel(g(1)).unwrap();
+    assert_eq!(code(session.advance(g(1), 1)), ErrorCode::Cancelled);
+    assert_eq!(code(session.drain_export(g(1))), ErrorCode::Cancelled);
+    assert_eq!(code(session.finish_export(g(1))), ErrorCode::Cancelled);
+}

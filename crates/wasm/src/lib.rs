@@ -602,11 +602,14 @@ impl ImageSession {
         .map(|inner| PreviewFrame { inner })
     }
 
-    /// Starts a PNG export superseding any current job. It takes the same
+    /// Starts an export superseding any current job. It takes the same
     /// generation rule, settings and sampling as `startPreview`, so both kinds
     /// sample the same deterministic grid and share one cache. The job reports
     /// `Sampling`, `Encoding` then `Ready`; advance it with `advance`, collect
     /// bytes with `drainExport` and `finishExport`, and stop it with `cancel`.
+    ///
+    /// `"gif"` encodes every frame of an animation in turn and needs an animated
+    /// source and frame `0` or no frame. Its `Encoding` progress counts frames.
     ///
     /// # Errors
     ///
@@ -630,7 +633,7 @@ impl ImageSession {
         color_mode: &JsValue,
         #[wasm_bindgen(unchecked_param_type = "number | undefined")] contrast: &JsValue,
         #[wasm_bindgen(unchecked_param_type = "boolean | undefined")] invert: &JsValue,
-        #[wasm_bindgen(unchecked_param_type = "\"png\" | \"text\" | undefined")]
+        #[wasm_bindgen(unchecked_param_type = "\"png\" | \"text\" | \"gif\" | undefined")]
         output_kind: &JsValue,
         #[wasm_bindgen(unchecked_optional_param_type = "number")] frame: &JsValue,
     ) -> Result<JobStage, JsValue> {

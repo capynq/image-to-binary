@@ -22,6 +22,7 @@ pub(crate) const IMAGE_EXTENSIONS: &[&str] =
     &["bmp", "gif", "jpeg", "jpg", "png", "tif", "tiff", "webp"];
 const PNG_EXTENSIONS: &[&str] = &["png"];
 const TEXT_EXTENSIONS: &[&str] = &["txt"];
+const GIF_EXTENSIONS: &[&str] = &["gif"];
 
 /// The label and extensions a save dialog offers for one output kind. The first extension is
 /// the one a default name gets.
@@ -31,7 +32,8 @@ pub(crate) struct SaveFilter {
     pub(crate) extensions: &'static [&'static str],
 }
 
-/// Returns the save filter of `output`: `PNG image` with `png` for PNG, `Text` with `txt` for text.
+/// Returns the save filter of `output`: `PNG image` with `png` for PNG, `Text` with `txt` for text,
+/// and `GIF image` with `gif` for animated GIF.
 #[must_use]
 pub(crate) fn save_filter(output: OutputKind) -> SaveFilter {
     match output {
@@ -42,6 +44,10 @@ pub(crate) fn save_filter(output: OutputKind) -> SaveFilter {
         OutputKind::Text => SaveFilter {
             label: "Text",
             extensions: TEXT_EXTENSIONS,
+        },
+        OutputKind::Gif => SaveFilter {
+            label: "GIF image",
+            extensions: GIF_EXTENSIONS,
         },
     }
 }
@@ -540,6 +546,50 @@ mod tests {
         assert_eq!(
             destination_name(Some(".hidden"), OutputKind::Text),
             ".hidden.txt"
+        );
+    }
+
+    #[test]
+    fn the_gif_save_filter_offers_gif_and_defaults_to_image_gif() {
+        assert_eq!(
+            save_filter(OutputKind::Gif),
+            SaveFilter {
+                label: "GIF image",
+                extensions: &["gif"],
+            }
+        );
+        assert_eq!(destination_name(None, OutputKind::Gif), "image.gif");
+        assert_eq!(
+            destination_name(Some("photo-binary.png"), OutputKind::Gif),
+            "photo-binary.gif"
+        );
+        assert_eq!(
+            destination_name(Some("loop.GIF"), OutputKind::Gif),
+            "loop.GIF"
+        );
+    }
+
+    #[test]
+    fn a_gif_save_offers_the_gif_filter_and_returns_a_sink_handle() {
+        let dir = TestDir::new("dialog-gif-save");
+        let destination = dir.path().join("loop.gif");
+        let table = Arc::new(FileTable::default());
+        let picker = FakePicker::replying(Ok(Some(destination.clone())));
+        block(pick_destination(
+            &picker,
+            Arc::clone(&table),
+            Some("loop.png"),
+            OutputKind::Gif,
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            picker.suggested.lock().unwrap().as_deref(),
+            Some("loop.gif")
+        );
+        assert_eq!(
+            *picker.filter.lock().unwrap(),
+            Some(save_filter(OutputKind::Gif))
         );
     }
 

@@ -37,6 +37,7 @@ mod tests;
 
 use std::sync::Arc;
 
+use crate::ArtworkGifTask;
 use image_to_binary_core::{ContractError, Generation, Sampling, SourceMetadata};
 use image_to_binary_processing::{
     DecodedAnimation, DecodedSource, OriginalPreviewTask, RenderOptions, Renderer, Sampler,
@@ -54,7 +55,10 @@ pub use limits::{
 pub use plan::{EncodedPlan, SourcePlan};
 pub use settings::PreviewSettings;
 
-use job::{Job, Phase};
+use job::{ExportTask, FrameSampling, GifExport, Job, Phase};
+
+const GIF_NEEDS_ANIMATION: &str = "outputKind \"gif\" needs an animated source";
+const GIF_FRAME_MESSAGE: &str = "a GIF export covers every frame, so frame must be 0";
 
 /// One frame's pixels, the sampler that reads them and the cache policy it runs under.
 #[derive(Debug)]
@@ -94,6 +98,18 @@ struct Live {
     newest: Option<u64>,
 }
 
+fn render_options(settings: PreviewSettings) -> RenderOptions {
+    RenderOptions {
+        cell_size: settings.cell_size,
+        font_size: settings.font_size,
+        threshold: settings.threshold,
+        sampling: settings.sampling,
+        mode: settings.mode,
+        style: settings.style,
+        ..RenderOptions::default()
+    }
+}
+
 impl Live {
     fn slot(&self, frame: usize) -> Result<&FrameSlot, SessionError> {
         self.frames.get(frame).ok_or(SessionError::FrameOutOfRange {
@@ -125,10 +141,75 @@ impl Live {
         kind: JobKind,
         output: OutputKind,
     ) -> Result<Stage, SessionError> {
+        if output == OutputKind::Gif {
+            return self.start_gif(generation, frame, settings);
+        }
         self.slot(frame)?;
         self.ensure_newer(generation)?;
         let job = self.begin(generation, frame, settings, kind, output)?;
         Ok(self.commit(generation, job))
+    }
+
+    fn start_gif(
+        &mut self,
+        generation: Generation,
+        frame: usize,
+        settings: PreviewSettings,
+    ) -> Result<Stage, SessionError> {
+        if self.delays_centiseconds.is_empty() {
+            return Err(SessionError::Argument {
+                code: ErrorCode::InvalidArgument,
+                message: GIF_NEEDS_ANIMATION.to_owned(),
+            });
+        }
+        if frame != 0 {
+            return Err(SessionError::Argument {
+                code: ErrorCode::InvalidArgument,
+                message: GIF_FRAME_MESSAGE.to_owned(),
+            });
+        }
+        self.ensure_newer(generation)?;
+        let job = self.begin_gif(generation, settings)?;
+        Ok(self.commit(generation, job))
+    }
+
+    fn begin_gif(
+        &self,
+        generation: Generation,
+        settings: PreviewSettings,
+    ) -> Result<Job, SessionError> {
+        let frame = FrameSampling {
+            cell_size: settings.cell_size,
+            cell_height: self.cell_height(settings)?,
+            sampling: settings.sampling,
+        };
+        let task = ArtworkGifTask::new(
+            Renderer::new()?,
+            render_options(settings),
+            generation,
+            self.delays_centiseconds.clone(),
+            self.loop_count,
+            EXPORT_LIMITS,
+        )?;
+        Ok(Job {
+            generation,
+            kind: JobKind::Export,
+            frame: 0,
+            phase: Phase::Encoding(Box::new(ExportTask::Gif(Box::new(GifExport::new(
+                task, frame,
+            ))))),
+        })
+    }
+
+    fn cell_height(&self, settings: PreviewSettings) -> Result<u32, SessionError> {
+        Ok(match settings.sampling {
+            Sampling::Classic => u32::from(settings.cell_size),
+            Sampling::Average => u32::from(
+                self.renderer
+                    .aspect_geometry(settings.cell_size, settings.font_size)?
+                    .source_cell_height,
+            ),
+        })
     }
 
     fn start_original(
@@ -173,23 +254,8 @@ impl Live {
         kind: JobKind,
         output: OutputKind,
     ) -> Result<Job, SessionError> {
-        let cell_height = match settings.sampling {
-            Sampling::Classic => u32::from(settings.cell_size),
-            Sampling::Average => u32::from(
-                self.renderer
-                    .aspect_geometry(settings.cell_size, settings.font_size)?
-                    .source_cell_height,
-            ),
-        };
-        let options = RenderOptions {
-            cell_size: settings.cell_size,
-            font_size: settings.font_size,
-            threshold: settings.threshold,
-            sampling: settings.sampling,
-            mode: settings.mode,
-            style: settings.style,
-            ..RenderOptions::default()
-        };
+        let cell_height = self.cell_height(settings)?;
+        let options = render_options(settings);
         let plan = self.slot_mut(frame)?.sampler.prepare(
             settings.cell_size,
             cell_height,
@@ -224,10 +290,10 @@ impl Live {
         let job = job.as_mut().ok_or(SessionError::NoJob)?;
         let frame = job.frame;
         let count = frames.len();
-        let slot = frames
-            .get_mut(frame)
-            .ok_or(SessionError::FrameOutOfRange { frame, count })?;
-        job.advance(&mut slot.sampler, renderer, budget)
+        if frame >= count {
+            return Err(SessionError::FrameOutOfRange { frame, count });
+        }
+        job.advance(frames, renderer, budget)
     }
 
     fn cancel(&mut self, generation: Generation) -> Result<(), SessionError> {
@@ -478,11 +544,13 @@ impl Session {
     }
 
     /// Starts an export of `frame` in the given output kind, with the same frame rules and
-    /// errors as [`Session::start_preview_frame`].
+    /// errors as [`Session::start_preview_frame`]. `OutputKind::Gif` covers every frame of an
+    /// animation instead: it must name frame `0`, and a still source refuses it.
     ///
     /// # Errors
     ///
-    /// Same as [`Session::start_preview_frame`].
+    /// Same as [`Session::start_preview_frame`], plus an `invalid_argument` for a GIF export of a
+    /// still source or with a nonzero frame.
     pub fn start_export_frame_as(
         &mut self,
         generation: Generation,

@@ -107,7 +107,7 @@ pub fn pixel_budget(value: f64) -> Result<u64, SessionError> {
 pub const OUTPUT_KIND_MESSAGE: &str = "outputKind must be \"png\" or \"text\"";
 
 /// Converts the optional output kind. An absent value is [`OutputKind::Png`], so callers that
-/// send no kind keep the PNG contract; `"png"` and `"text"` are the only accepted names.
+/// send no kind keep the PNG contract; `"png"`, `"text"` and `"gif"` are the only accepted names.
 ///
 /// # Errors
 ///
@@ -117,6 +117,7 @@ pub fn output_kind(kind: TextArg<'_>) -> Result<OutputKind, SessionError> {
     match kind {
         TextArg::Absent | TextArg::Text("png") => Ok(OutputKind::Png),
         TextArg::Text("text") => Ok(OutputKind::Text),
+        TextArg::Text("gif") => Ok(OutputKind::Gif),
         TextArg::Text(_) => Err(SessionError::Argument {
             code: ErrorCode::InvalidSettings,
             message: OUTPUT_KIND_MESSAGE.to_owned(),

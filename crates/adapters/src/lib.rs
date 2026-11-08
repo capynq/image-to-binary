@@ -3,11 +3,13 @@
 use image_to_binary_core::ContractError;
 use image_to_binary_processing::Job;
 
+mod artwork_gif;
 mod artwork_png;
 mod artwork_task;
 mod artwork_text;
 pub mod session;
 
+pub use artwork_gif::ArtworkGifTask;
 pub use artwork_png::ArtworkPngTask;
 pub use artwork_task::{PngTaskError, PngTaskLimits};
 pub use artwork_text::ArtworkTextTask;

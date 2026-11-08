@@ -369,6 +369,10 @@ impl From<ExportError> for SessionError {
                 ErrorCode::EncodeFailed,
                 format!("the PNG encoder failed: {inner}"),
             )),
+            ExportError::Gif(inner) => Self::Engine(EngineFailure::new(
+                ErrorCode::EncodeFailed,
+                format!("the GIF encoder failed: {inner}"),
+            )),
             ExportError::Sink(reason) => Self::Engine(EngineFailure::new(
                 ErrorCode::Internal,
                 format!("PNG chunk storage failed: {reason}"),

@@ -1,10 +1,14 @@
 use crate::ContractError;
 
-/// Supported export contracts; encoding is owned by a later export crate.
+/// Supported export contracts; encoding is owned by the export crate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OutputFormat {
+    /// A still PNG image.
     Png,
+    /// UTF-8 text rows.
     Text,
+    /// An animated GIF of every source frame.
+    Gif,
 }
 
 /// Owned output bytes whose allocation is released by RAII when dropped.

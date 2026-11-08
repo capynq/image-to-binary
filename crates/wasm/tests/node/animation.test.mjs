@@ -6,6 +6,7 @@ import {
   bytes,
   drive,
   ImageSession,
+  JobStage,
   loadReference,
   MAX_SAFE,
   newSession,
@@ -151,4 +152,72 @@ test('frame accessors report disposal after dispose', () => {
   for (const getter of ['frameCount', 'frameDelays', 'loopCount']) {
     assertCode(() => session[getter], 'disposed', getter);
   }
+});
+
+function skipSubBlocks(bytes, start) {
+  let at = start;
+  for (;;) {
+    const length = bytes[at];
+    at += 1;
+    if (length === 0) return at;
+    at += length;
+  }
+}
+
+function gifFrameCount(bytes) {
+  assert.equal(Buffer.from(bytes.subarray(0, 6)).toString('latin1'), 'GIF89a');
+  let at = 13;
+  if (bytes[10] & 0x80) at += 3 * (2 << (bytes[10] & 0x07));
+  let frames = 0;
+  for (;;) {
+    const block = bytes[at];
+    if (block === 0x21) {
+      at = skipSubBlocks(bytes, at + 2);
+    } else if (block === 0x2c) {
+      frames += 1;
+      const flags = bytes[at + 9];
+      at += 10;
+      if (flags & 0x80) at += 3 * (2 << (flags & 0x07));
+      at = skipSubBlocks(bytes, at + 1);
+    } else if (block === 0x3b) {
+      assert.equal(at + 1, bytes.length, 'the trailer must end the stream');
+      return frames;
+    } else {
+      assert.fail(`unexpected GIF block ${block}`);
+    }
+  }
+}
+
+function gifExport(session, generation, frame) {
+  const trailing = frame === undefined ? [] : [frame];
+  session.startExport(generation, 5, 10, 128, 'classic', undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'gif', ...trailing);
+  const chunks = [];
+  while (session.stage() !== JobStage.Ready) {
+    session.advance(generation, 4096);
+    for (const chunk of session.drainExport(generation)) chunks.push(Buffer.from(chunk));
+  }
+  for (const chunk of session.finishExport(generation)) chunks.push(Buffer.from(chunk));
+  return Buffer.concat(chunks);
+}
+
+test('the shaded animation exports as a GIF with one image per frame', () => {
+  const started = animatedSession(shaded);
+  started.startExport(1, 5, 10, 128, 'classic', undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'gif');
+  assert.equal(started.progressTotal(), started.frameCount, 'GIF progress counts frames');
+  started.dispose();
+
+  const exported = gifExport(animatedSession(shaded), 1);
+  assert.equal(gifFrameCount(exported), shaded.frames.length);
+  assert.equal(gifFrameCount(exported), 3);
+  assert.ok(exported.includes(Buffer.from('NETSCAPE2.0', 'latin1')), 'an endless loop writes the NETSCAPE extension');
+});
+
+test('a GIF export refuses a still source and a nonzero frame with invalid_argument', () => {
+  const still = newSession();
+  assertCode(() => still.startExport(1, 5, 10, 128, 'classic', undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'gif'), 'invalid_argument', 'still gif');
+  still.dispose();
+
+  const session = animatedSession(shaded);
+  assertCode(() => session.startExport(1, 5, 10, 128, 'classic', undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'gif', 1), 'invalid_argument', 'gif frame');
+  session.dispose();
 });

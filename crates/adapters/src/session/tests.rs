@@ -693,7 +693,10 @@ fn export_bytes(session: &mut Session, generation: u64, budget: u64) -> Vec<u8> 
 
 fn encoding_row_pixels(session: &Session) -> u64 {
     match &session.live.as_ref().unwrap().job.as_ref().unwrap().phase {
-        Phase::Encoding(task) => task.grid_row_units(),
+        Phase::Encoding(task) => match task.as_ref() {
+            ExportTask::Raster(raster) => raster.grid_row_units(),
+            ExportTask::Gif(_) => panic!("expected a raster export"),
+        },
         other => panic!("expected an encoding export, found {other:?}"),
     }
 }

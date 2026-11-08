@@ -1006,6 +1006,10 @@ mod tests {
             output_kind_argument(Some(&json!("text"))).unwrap(),
             OutputKind::Text
         );
+        assert_eq!(
+            output_kind_argument(Some(&json!("gif"))).unwrap(),
+            OutputKind::Gif
+        );
         let unknown = output_kind_argument(Some(&json!("svg"))).unwrap_err();
         assert_eq!(unknown.code(), ErrorCode::InvalidSettings);
         assert_eq!(
@@ -1347,5 +1351,91 @@ mod tests {
             tauri::async_runtime::block_on(processing.export_file(request, Record(Arc::default())))
                 .unwrap_err();
         assert_eq!(error.code(), ErrorCode::InvalidArgument);
+    }
+
+    /// Counts the image descriptors of a GIF after walking every block, so a torn or padded
+    /// stream fails rather than miscounting.
+    fn gif_frame_count(bytes: &[u8]) -> usize {
+        fn skip_sub_blocks(bytes: &[u8], mut at: usize) -> usize {
+            loop {
+                let length = usize::from(bytes[at]);
+                at += 1;
+                if length == 0 {
+                    return at;
+                }
+                at += length;
+            }
+        }
+        assert!(bytes.starts_with(b"GIF89a"));
+        let mut at = 13;
+        if bytes[10] & 0x80 != 0 {
+            at += 3 * (2 << usize::from(bytes[10] & 0x07));
+        }
+        let mut frames = 0;
+        loop {
+            match bytes[at] {
+                0x21 => at = skip_sub_blocks(bytes, at + 2),
+                0x2C => {
+                    frames += 1;
+                    let flags = bytes[at + 9];
+                    at += 10;
+                    if flags & 0x80 != 0 {
+                        at += 3 * (2 << usize::from(flags & 0x07));
+                    }
+                    at = skip_sub_blocks(bytes, at + 1);
+                }
+                0x3B => {
+                    assert_eq!(at + 1, bytes.len(), "trailer must end the stream");
+                    return frames;
+                }
+                other => panic!("unexpected GIF block {other:#x}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_gif_export_writes_every_frame_and_refuses_a_still_or_a_frame() {
+        let dir = TestDir::new("gif-export-animated");
+        let processing = processing();
+        import_gif(&processing, &dir, 1, &gif_bytes(Some(3), &[5, 20]));
+        let destination = dir.path().join("loop.gif");
+        let sink_id = processing.files.insert_sink(destination.clone()).unwrap();
+        let mut request = export_request(10, sink_id);
+        request.output = OutputKind::Gif;
+        let report =
+            tauri::async_runtime::block_on(processing.export_file(request, Record(Arc::default())))
+                .unwrap();
+        let written = std::fs::read(&destination).unwrap();
+        assert_eq!(report.byte_length, written.len() as u64);
+        assert_eq!(gif_frame_count(&written), 2);
+        assert!(written.windows(11).any(|window| window == b"NETSCAPE2.0"));
+
+        let sink_id = processing
+            .files
+            .insert_sink(dir.path().join("second-frame.gif"))
+            .unwrap();
+        let mut request = export_request(11, sink_id);
+        request.output = OutputKind::Gif;
+        request.frame = 1;
+        let error =
+            tauri::async_runtime::block_on(processing.export_file(request, Record(Arc::default())))
+                .unwrap_err();
+        assert_eq!(error.code(), ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn a_gif_export_of_a_still_source_is_refused_before_any_file_is_written() {
+        let dir = TestDir::new("gif-export-still");
+        let processing = processing();
+        import_gif(&processing, &dir, 1, &gif_bytes(None, &[5]));
+        let destination = dir.path().join("still.gif");
+        let sink_id = processing.files.insert_sink(destination.clone()).unwrap();
+        let mut request = export_request(10, sink_id);
+        request.output = OutputKind::Gif;
+        let error =
+            tauri::async_runtime::block_on(processing.export_file(request, Record(Arc::default())))
+                .unwrap_err();
+        assert_eq!(error.code(), ErrorCode::InvalidArgument);
+        assert!(!destination.exists());
     }
 }
