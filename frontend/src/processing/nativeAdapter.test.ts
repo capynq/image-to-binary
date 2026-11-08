@@ -1083,3 +1083,50 @@ describe('native animation', () => {
     expect(bridge.countCalls('save_image_dialog')).toBe(1)
   })
 })
+
+describe('native GIF export', () => {
+  async function animatedExport(bridge: FakeBridge, frameCount: number) {
+    bridge
+      .on('import_source', () =>
+        animatedReply(frameCount, frameCount > 1 ? [5, 5, 5].slice(0, frameCount) : [], 0),
+      )
+      .on('release_handle', () => undefined)
+      .on('save_image_dialog', () => ({ id: 7, name: 'spin-binary.gif' }))
+      .on('export_file', () => ({ generation: 4, byteLength: 42 }))
+    const adapter = createNativeProcessingAdapter({
+      bridge,
+      renderPreview: markingRender(),
+      urlApi: recordingUrlApi().api,
+    })
+    const s = adapter.createSession()
+    const result = await adapter.import(
+      s,
+      toInput({ id: 9, name: 'spin.gif', byteLength: 40 }),
+      context(1, 1),
+    )
+    return { adapter, s, source: result.source }
+  }
+
+  it('passes output gif with no frame and suggests a .gif name', async () => {
+    const bridge = new FakeBridge()
+    const { adapter, s, source } = await animatedExport(bridge, 3)
+    const artifact = await adapter.export(s, source, 'gif', DEFAULT_SETTINGS, context(3, 4))
+    expect(bridge.calls.find((call) => call.command === 'save_image_dialog')?.args).toEqual({
+      suggestedName: 'spin-binary.gif',
+      outputKind: 'gif',
+    })
+    const args = bridge.calls.find((call) => call.command === 'export_file')?.args
+    expect(args).toMatchObject({ outputKind: 'gif', sinkId: 7, generation: 4 })
+    expect(args).not.toHaveProperty('frame')
+    expect(artifact).toMatchObject({ kind: 'saved', name: 'spin-binary.gif' })
+  })
+
+  it('refuses a GIF export of a still before the save dialog opens', async () => {
+    const bridge = new FakeBridge()
+    const { adapter, s, source } = await animatedExport(bridge, 1)
+    await expect(adapter.export(s, source, 'gif', DEFAULT_SETTINGS, context(3, 4))).rejects.toThrow(
+      RangeError,
+    )
+    expect(bridge.countCalls('save_image_dialog')).toBe(0)
+  })
+})

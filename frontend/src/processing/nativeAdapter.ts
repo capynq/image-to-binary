@@ -347,11 +347,14 @@ export function createNativeProcessingAdapter(options: NativeAdapterOptions): Pr
       assertActive(state)
       const record = sourceOf(state, source)
       if (!isOutputKindName(format)) {
-        throw new RangeError('Export format must be png or text.')
+        throw new RangeError('Export format must be png, text or gif.')
+      }
+      if (format === 'gif' && record.frameCount === 1) {
+        throw new RangeError('A GIF export needs an animated source.')
       }
       validateSettings(settings)
       const frame = options.frame ?? 0
-      const frameProblem = validateFrameIndex(frame, record.frameCount)
+      const frameProblem = format === 'gif' ? null : validateFrameIndex(frame, record.frameCount)
       if (frameProblem !== null) throw new RangeError(frameProblem)
       const generation = context.generation
       const operation = beginOperation(state, context)
@@ -377,7 +380,7 @@ export function createNativeProcessingAdapter(options: NativeAdapterOptions): Pr
             sinkId: sink.id,
             generation,
             outputKind: format,
-            frame,
+            ...(format === 'gif' ? {} : { frame }),
             progress: progressChannel(generation, onProgress),
           })
         } catch (error) {

@@ -104,7 +104,7 @@ pub fn pixel_budget(value: f64) -> Result<u64, SessionError> {
 }
 
 /// Message for an unknown output kind; shells show it verbatim.
-pub const OUTPUT_KIND_MESSAGE: &str = "outputKind must be \"png\" or \"text\"";
+pub const OUTPUT_KIND_MESSAGE: &str = "outputKind must be \"png\", \"text\" or \"gif\"";
 
 /// Converts the optional output kind. An absent value is [`OutputKind::Png`], so callers that
 /// send no kind keep the PNG contract; `"png"`, `"text"` and `"gif"` are the only accepted names.

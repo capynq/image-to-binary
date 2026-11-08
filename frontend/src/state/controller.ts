@@ -48,7 +48,8 @@ export interface StudioController {
   preview(kind?: PreviewKind, options?: PreviewOptions): Promise<void>
   exportDemo(format?: ExportFormat): Promise<Blob>
   /**
-   * Encodes the accepted source with the settings in effect when the export starts. A newer
+   * Encodes the accepted source with the settings in effect when the export starts. `gif` needs an
+   * animation and rejects a still with a `RangeError` before any state changes. A newer
    * preview, settings change, source change, reset or disposal supersedes it without publishing.
    * Listeners run after each snapshot is complete, so a listener may call back into the
    * controller; such a call is judged against the snapshot that was just committed.
@@ -70,7 +71,7 @@ export interface PreviewOptions {
   readonly startFrame?: number
 }
 
-/** `frame` is the animation frame an export encodes; it defaults to 0. */
+/** `frame` is the animation frame a PNG or text export shows, defaulting to 0; GIF ignores it. */
 export interface ExportOptions {
   readonly frame?: number
 }
@@ -391,9 +392,15 @@ export function createStudioController(options: StudioControllerOptions = {}): S
     if (owned === null) {
       throw new Error('Import an image before exporting.')
     }
+    const isGif = format === 'gif'
+    if (isGif && snapshot.animation === null) {
+      throw new RangeError('A GIF export needs an animated source.')
+    }
     const frame = options.frame ?? 0
-    const frameProblem = validateFrameIndex(frame, frameCountOf(snapshot.animation))
-    if (frameProblem !== null) throw new RangeError(frameProblem)
+    if (!isGif) {
+      const frameProblem = validateFrameIndex(frame, frameCountOf(snapshot.animation))
+      if (frameProblem !== null) throw new RangeError(frameProblem)
+    }
     const previousReady = readyExport
     readyExport = null
     const operation = beginOperation('exporting', 'export', { export: RUNNING_EXPORT }, [
@@ -414,7 +421,7 @@ export function createStudioController(options: StudioControllerOptions = {}): S
             commit({ export: { ...snapshot.export, progress: fraction } }, [])
           }
         },
-        { frame },
+        isGif ? {} : { frame },
       )
     } catch (error) {
       const current = isCurrent(operation)

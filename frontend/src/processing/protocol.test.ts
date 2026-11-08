@@ -383,14 +383,22 @@ describe('colour and contrast validation', () => {
 describe('output kind contract', () => {
   const exportBase = { type: 'export', requestId: 1, operationId: 1, sourceId: 1, parameters }
 
-  it('names exactly png and text, with the pinned message', () => {
-    expect(OUTPUT_KIND_NAMES).toEqual(['png', 'text'])
-    expect(OUTPUT_KIND_MESSAGE).toBe('outputKind must be "png" or "text"')
+  it('names exactly png, text and gif, with the pinned message', () => {
+    expect(OUTPUT_KIND_NAMES).toEqual(['png', 'text', 'gif'])
+    expect(OUTPUT_KIND_MESSAGE).toBe('outputKind must be "png", "text" or "gif"')
     expect(isOutputKindName('png')).toBe(true)
     expect(isOutputKindName('text')).toBe(true)
-    for (const value of ['PNG', 'TEXT', 'svg', '', undefined, null, 1]) {
+    expect(isOutputKindName('gif')).toBe(true)
+    for (const value of ['PNG', 'TEXT', 'GIF', 'svg', '', undefined, null, 1]) {
       expect(isOutputKindName(value)).toBe(false)
     }
+  })
+
+  it('accepts a gif export only without a frame or with frame 0', () => {
+    const gif = { ...exportBase, outputKind: 'gif' }
+    expect(isWorkerRequest(gif)).toBe(true)
+    expect(isWorkerRequest({ ...gif, frame: 0 })).toBe(true)
+    expect(isWorkerRequest({ ...gif, frame: 1 })).toBe(false)
   })
 
   it('accepts an export request only with a named output kind', () => {

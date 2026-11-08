@@ -27,7 +27,7 @@ const context = (operationId: number): JobContext => ({ operationId, generation:
 class AnimationClient implements ProcessingClient {
   readonly previewFrames: number[] = []
   readonly originalFrames: number[] = []
-  readonly exportFrames: number[] = []
+  readonly exportFrames: Array<number | undefined> = []
   readonly cancelled: number[] = []
   disposals = 0
   beforeFrame: ((frame: number) => Promise<void> | undefined) | null = null
@@ -99,7 +99,7 @@ class AnimationClient implements ProcessingClient {
     _operationId: number,
     sink: ExportSink,
     finalize: (completion: ExportCompletion) => T,
-    frame = 0,
+    frame?: number,
   ): Promise<T> {
     this.exportFrames.push(frame)
     sink.accept(Uint8Array.of(65).buffer)
@@ -350,5 +350,35 @@ describe('browser adapter animation sources', () => {
     const { session, imported } = await importDemo(adapter)
     await adapter.export(session, imported.source, 'text', DEFAULT_SETTINGS, context(3))
     expect(client.exportFrames).toEqual([0])
+  })
+
+  it('exports a GIF as an image/gif Blob without sending a frame to the client', async () => {
+    const client = new AnimationClient(3)
+    const { adapter } = harness(client)
+    const { session, imported } = await importDemo(adapter)
+    const artifact = await adapter.export(
+      session,
+      imported.source,
+      'gif',
+      DEFAULT_SETTINGS,
+      context(3),
+      undefined,
+      {},
+    )
+    expect(artifact.kind).toBe('blob')
+    if (artifact.kind !== 'blob') return
+    expect(artifact.format).toBe('gif')
+    expect(artifact.blob.type).toBe('image/gif')
+    expect(client.exportFrames).toEqual([undefined])
+  })
+
+  it('refuses a GIF export of a still before the client is asked', async () => {
+    const client = new AnimationClient(1)
+    const { adapter } = harness(client)
+    const { session, imported } = await importDemo(adapter)
+    await expect(
+      adapter.export(session, imported.source, 'gif', DEFAULT_SETTINGS, context(3)),
+    ).rejects.toThrow(RangeError)
+    expect(client.exportFrames).toEqual([])
   })
 })

@@ -379,11 +379,15 @@ export function createAdapterWithAccumulator(
       assertActive(state)
       const record = sourceOf(state, source)
       if (!isOutputKindName(format)) {
-        throw new RangeError('Export format must be png or text.')
+        throw new RangeError('Export format must be png, text or gif.')
+      }
+      if (format === 'gif' && record.handle.frameCount === 1) {
+        throw new RangeError('A GIF export needs an animated source.')
       }
       validateSettings(settings)
       const frame = options.frame ?? 0
-      const frameProblem = validateFrameIndex(frame, record.handle.frameCount)
+      const frameProblem =
+        format === 'gif' ? null : validateFrameIndex(frame, record.handle.frameCount)
       if (frameProblem !== null) throw new RangeError(frameProblem)
       const accumulator = makeAccumulator({
         format,
@@ -397,7 +401,7 @@ export function createAdapterWithAccumulator(
           context.operationId,
           accumulator,
           (completion) => accumulator.finish(completion),
-          frame,
+          format === 'gif' ? undefined : frame,
         )
       } finally {
         accumulator.release()

@@ -160,4 +160,28 @@ describe('controller animation snapshot', () => {
     await controller.startExport('text')
     expect(exports.at(-1)).toEqual({ format: 'text', options: { frame: 0 } })
   })
+
+  it('rejects a GIF export of a still before any state changes', async () => {
+    const { adapter, exports } = animatedAdapter(1)
+    const controller = createStudioController({ adapter })
+    await controller.import({ kind: 'demo' })
+    const before = controller.getSnapshot()
+    await expect(controller.startExport('gif')).rejects.toThrow(RangeError)
+    expect(controller.getSnapshot()).toBe(before)
+    expect(exports).toEqual([])
+  })
+
+  it('exports a GIF with no frame option, and still passes the shown frame to PNG', async () => {
+    const { adapter, exports } = animatedAdapter(3)
+    const controller = createStudioController({ adapter })
+    await controller.import({ kind: 'demo' })
+
+    await controller.startExport('gif')
+    expect(exports.at(-1)).toEqual({ format: 'gif', options: {} })
+    expect(exports.at(-1)?.options).not.toHaveProperty('frame')
+    expect(controller.getSnapshot().export.status).toBe('ready')
+
+    await controller.startExport('png', { frame: 1 })
+    expect(exports.at(-1)).toEqual({ format: 'png', options: { frame: 1 } })
+  })
 })

@@ -79,12 +79,15 @@ export function isAnimationMetadata(
   return loopCount === Infinity || (typeof loopCount === 'number' && isCount(loopCount))
 }
 
-/** `png` is the default export; `text` is UTF-8 grid text over the same grid and settings. */
-export type OutputKindName = 'png' | 'text'
+/**
+ * `png` is the default export; `text` is UTF-8 grid text over the same grid and settings; `gif`
+ * encodes every frame of an animation and is refused for a still.
+ */
+export type OutputKindName = 'png' | 'text' | 'gif'
 
-export const OUTPUT_KIND_NAMES: readonly OutputKindName[] = ['png', 'text']
+export const OUTPUT_KIND_NAMES: readonly OutputKindName[] = ['png', 'text', 'gif']
 
-export const OUTPUT_KIND_MESSAGE = 'outputKind must be "png" or "text"'
+export const OUTPUT_KIND_MESSAGE = 'outputKind must be "png", "text" or "gif"'
 
 export function isOutputKindName(value: unknown): value is OutputKindName {
   return OUTPUT_KIND_NAMES.some((name) => name === value)
@@ -193,7 +196,10 @@ export interface OriginalPreviewRequest extends RequestIdentity {
   readonly frame?: number
 }
 
-/** Starts an export of a retained source in `outputKind`; answered by ordered `exportChunk` messages and one `exported`. */
+/**
+ * Starts an export of a retained source in `outputKind`; answered by ordered `exportChunk` messages and one `exported`.
+ * A `gif` request carries no frame, because it encodes every frame.
+ */
 export interface ExportRequest extends RequestIdentity {
   readonly type: 'export'
   readonly sourceId: number
@@ -483,7 +489,8 @@ export function isWorkerRequest(value: unknown): value is WorkerRequest {
         isCount(value.sourceId) &&
         isPreviewParameters(value.parameters) &&
         isOutputKindName(value.outputKind) &&
-        isOptionalFrame(value.frame)
+        isOptionalFrame(value.frame) &&
+        (value.outputKind !== 'gif' || value.frame === undefined || value.frame === 0)
       )
     case 'importEncoded':
       return hasIdentity(value) && typeof value.name === 'string' && isArrayBuffer(value.bytes)

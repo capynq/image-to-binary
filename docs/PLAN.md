@@ -2550,8 +2550,26 @@ Proposed commit title: `feat: export animated GIF`
 
 Completion checklist:
 
-- [ ] Encoder and format wiring implemented.
-- [ ] Round-trip and limit tests passing.
+- [x] Encoder and format wiring implemented.
+- [x] Round-trip and limit tests passing.
+
+Validation: `OutputFormat::Gif` encodes artwork frame by frame through the
+shared counting writer (256 MiB output ceiling), at most one frame's RGBA
+alive, with cancellation between row batches and before each frame.
+Monochrome output uses one deterministic 256-step palette from background to
+foreground, because glyphs are anti-aliased blends of the two; endpoints are
+exact. Source colour uses per-frame `from_rgba_speed` at speed 10. Delays
+come from the source, endless loops write NETSCAPE2.0 and play-once sources
+omit it; dimensions above 65535 are refused. GIF is valid only for animated
+sources and ignores the shown frame; PNG and text keep exporting it. The
+studio offers "Animated GIF" only for animations, downloads `image/gif` with
+a `.gif` name, and the desktop save dialog gains a GIF filter. `gif`,
+`weezl` and `color_quant` pass the notices licence check, and both lockfiles
+gain only the direct edge. 336 workspace tests, 158 desktop tests, 119 WASM
+node tests and 909 frontend tests pass. A Chromium export of a five-frame
+looping GIF produced a `GIF89a` file with five frames, 20 cs delays and an
+endless NETSCAPE loop. The desktop GIF export runs in desktop unit tests
+only, not the smoke run.
 
 ### 9.9 Document animation support
 

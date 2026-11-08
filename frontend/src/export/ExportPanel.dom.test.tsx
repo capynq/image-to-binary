@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createDownloadOwner } from './downloadOwner'
 import type { DownloadLink } from './downloadOwner'
 import { ExportPanel } from './ExportPanel'
+import { exportFormatChoices } from './exportFormats'
 import type { ExportPanelProps } from './ExportPanel'
 import { artifactOf, countingUrlApi, textArtifactOf } from './exportTestSupport'
 import type { ExportFormat } from '../processing/types'
@@ -202,6 +203,22 @@ describe('ExportPanel format choice', () => {
     expect(new Set(radios.map((radio) => radio.name)).size).toBe(1)
     expect(formatRadio('png').checked).toBe(true)
     expect(control('Export PNG')).toBeTruthy()
+  })
+
+  it('offers GIF only when the owner passes it for an animation', () => {
+    const values = () =>
+      [...container.querySelectorAll<HTMLInputElement>('input[type="radio"]')].map(
+        (radio) => radio.value,
+      )
+    show({ format: 'png', formats: exportFormatChoices(false), onFormatChange: noop })
+    expect(values()).toEqual(['png', 'text'])
+    expect(container.querySelector('input[value="gif"]')).toBeNull()
+
+    show({ format: 'gif', formats: exportFormatChoices(true), onFormatChange: noop })
+    expect(values()).toEqual(['png', 'text', 'gif'])
+    expect(formatRadio('gif').checked).toBe(true)
+    expect(control('Export GIF')).toBeTruthy()
+    expect(container.textContent).toContain('GIF encodes every frame')
   })
 
   it('reports the chosen format and names the export button for it', () => {

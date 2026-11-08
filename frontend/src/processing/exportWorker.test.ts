@@ -166,6 +166,32 @@ describe('worker export transfer', () => {
     pair.close()
   })
 
+  it('encodes a GIF over every frame with no client frame and monotonic progress in [0, 1]', async () => {
+    const engine = new FakeEngine({ steps: 3 })
+    engine.animation = { frameCount: 3, frameDelays: [5, 5, 5], loopCount: 0 }
+    const pair = createLinkedPair(engine)
+    const source = await pair.client.importRgba(rgba(), 1)
+    const fractions: number[] = []
+    const accumulator = createExportAccumulator({
+      format: 'gif',
+      onProgress: (fraction) => fractions.push(fraction),
+    })
+    const exported = await pair.client.exportFile(
+      source,
+      PARAMS,
+      'gif',
+      2,
+      accumulator,
+      (completion) => accumulator.finish(completion),
+    )
+    expect(engine.starts.at(-1)).toMatchObject({ kind: 'export', outputKind: 'gif', frame: 0 })
+    expect(exported.blob.type).toBe('image/gif')
+    expect(fractions.length).toBeGreaterThan(0)
+    expect(fractions.every((fraction) => fraction >= 0 && fraction <= 1)).toBe(true)
+    expect(fractions).toEqual([...fractions].sort((a, b) => a - b))
+    pair.close()
+  })
+
   it('yields before every advance so queued messages can run between advances', async () => {
     const engine = new FakeEngine({ steps: 3 })
     const { endpoint, counter } = hostFixture(engine)

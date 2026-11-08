@@ -31,13 +31,17 @@ export type StudioJobStatus =
   | 'error'
   | 'disposed'
 
-/** `png` is the image file; `text` is UTF-8 grid text over the same grid and settings. */
-export type ExportFormat = 'png' | 'text'
+/**
+ * `png` is the image file; `text` is UTF-8 grid text over the same grid and settings; `gif` is the
+ * animated artwork and is available only for an animated source.
+ */
+export type ExportFormat = 'png' | 'text' | 'gif'
 
 /** The Blob type of each export format; text is UTF-8 with no BOM. */
 export const EXPORT_MIME_TYPES: Readonly<Record<ExportFormat, string>> = Object.freeze({
   png: 'image/png',
   text: 'text/plain;charset=utf-8',
+  gif: 'image/gif',
 })
 
 export type ExportStatus = 'idle' | 'running' | 'ready' | 'failed'
@@ -186,7 +190,7 @@ export interface PreviewRenderOptions {
   readonly startFrame?: number
 }
 
-/** Adapter options for an export: the frame an animation exports, default 0. */
+/** Adapter options for an export: the frame a PNG or text export shows, default 0; GIF takes none. */
 export interface ExportRenderOptions {
   readonly frame?: number
 }
@@ -254,7 +258,8 @@ export interface ProcessingAdapter {
   ): Promise<PreviewArtifact>
   /**
    * Encodes `source` with `settings` as `format`. Rejects with a `RangeError` for any other
-   * format; `onProgress` may run zero or more times before the result settles.
+   * format, and for `gif` on a still. A `gif` encodes every frame and ignores `options.frame`;
+   * `onProgress` may run zero or more times before the result settles.
    */
   export(
     session: ProcessingSession,

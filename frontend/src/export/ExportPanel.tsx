@@ -13,7 +13,7 @@ import { formatBytes } from '../useImportFlow'
 import { announceExportPhase } from './exportAnnouncement'
 import type { AnnouncedExport } from './exportAnnouncement'
 import type { DownloadLink } from './downloadOwner'
-import { EXPORT_FORMAT_WORDS, EXPORT_FORMATS } from './exportFormats'
+import { EXPORT_FORMAT_WORDS, exportFormatChoices } from './exportFormats'
 import { exportFocusTarget, shouldMoveExportFocus } from './exportFocus'
 import type { ExportFocusTarget, ExportPhase } from './exportFocus'
 
@@ -30,6 +30,8 @@ export interface ExportPanelProps {
   readonly savedName?: string | null
   /** The format the next export produces. The format control is shown only when this is set. */
   readonly format?: ExportFormat
+  /** Formats the choice control offers; the owner passes GIF only for an animated source. */
+  readonly formats?: readonly ExportFormat[]
   readonly onFormatChange?: (format: ExportFormat) => void
   /** The format of the export on screen, such as the running or downloaded one; defaults to `format`. */
   readonly shownFormat?: ExportFormat
@@ -142,7 +144,7 @@ export function ExportPanel(props: ExportPanelProps) {
           columns={2}
           className="format-fieldset"
           optionsClassName="format-options"
-          options={EXPORT_FORMATS.map((value) => ({
+          options={(props.formats ?? exportFormatChoices(false)).map((value) => ({
             value,
             label: EXPORT_FORMAT_WORDS[value].choice,
           }))}

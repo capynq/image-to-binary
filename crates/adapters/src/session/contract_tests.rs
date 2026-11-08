@@ -343,12 +343,13 @@ fn the_output_kind_message_and_names_match_the_browser() {
         OUTPUT_KIND_MESSAGE
     );
     assert!(PROTOCOL_TS.lines().map(str::trim).any(|line| line
-        == "export const OUTPUT_KIND_NAMES: readonly OutputKindName[] = ['png', 'text']"));
+        == "export const OUTPUT_KIND_NAMES: readonly OutputKindName[] = ['png', 'text', 'gif']"));
     assert_eq!(output_kind(TextArg::Text("png")).unwrap(), OutputKind::Png);
     assert_eq!(
         output_kind(TextArg::Text("text")).unwrap(),
         OutputKind::Text
     );
+    assert_eq!(output_kind(TextArg::Text("gif")).unwrap(), OutputKind::Gif);
     assert_eq!(
         output_kind(TextArg::Text("svg")).unwrap_err().message(),
         OUTPUT_KIND_MESSAGE

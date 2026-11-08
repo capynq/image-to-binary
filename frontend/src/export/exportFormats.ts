@@ -12,7 +12,12 @@ export interface ExportFormatWords {
 }
 
 /** Formats in the order the choice control lists them. */
-export const EXPORT_FORMATS: readonly ExportFormat[] = ['png', 'text']
+export const EXPORT_FORMATS: readonly ExportFormat[] = ['png', 'text', 'gif']
+
+/** The formats a source offers: GIF needs an animation, so a still gets PNG and text only. */
+export function exportFormatChoices(animated: boolean): readonly ExportFormat[] {
+  return animated ? EXPORT_FORMATS : EXPORT_FORMATS.filter((format) => format !== 'gif')
+}
 
 export const EXPORT_FORMAT_WORDS: Readonly<Record<ExportFormat, ExportFormatWords>> = Object.freeze(
   {
@@ -27,6 +32,12 @@ export const EXPORT_FORMAT_WORDS: Readonly<Record<ExportFormat, ExportFormatWord
       name: 'text',
       lead: 'Text',
       help: 'Text uses the same grid and settings as PNG and stays on this device.',
+    },
+    gif: {
+      choice: 'Animated GIF',
+      name: 'GIF',
+      lead: 'GIF',
+      help: 'GIF encodes every frame at the source timing with the current settings and stays on this device.',
     },
   },
 )

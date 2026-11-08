@@ -98,3 +98,10 @@ describe('exportFilename for text exports', () => {
     expect(encoder.encode(long.slice(0, -'-binary.txt'.length)).byteLength).toBeLessThanOrEqual(160)
   })
 })
+
+describe('exportFilename for GIF exports', () => {
+  it('names a GIF export <stem>-binary.gif', () => {
+    expect(exportFilename('wave.gif', 'gif')).toBe('wave-binary.gif')
+    expect(exportFilename('', 'gif')).toBe('image-binary.gif')
+  })
+})

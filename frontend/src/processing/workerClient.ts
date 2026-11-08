@@ -351,14 +351,21 @@ class WorkerProcessingClient implements ProcessingClient {
     operationId: number,
     sink: ExportSink,
     finalize: (completion: ExportCompletion) => T,
-    frame = 0,
+    frame?: number,
   ): Promise<T> {
     const terminal = this.terminalError()
     if (terminal !== null) return Promise.reject(terminal)
     if (this.sources.get(source.sourceId) !== source) {
       return Promise.reject(this.unownedSource())
     }
-    const frameProblem = validateFrameIndex(frame, source.frameCount)
+    const isGif = outputKind === 'gif'
+    if (isGif && frame !== undefined && frame !== 0) {
+      return Promise.reject(
+        new RangeError('A GIF export covers every frame; frame must be absent.'),
+      )
+    }
+    const selected = frame ?? 0
+    const frameProblem = isGif ? null : validateFrameIndex(selected, source.frameCount)
     if (frameProblem !== null) return Promise.reject(new RangeError(frameProblem))
     return this.schedule<T>(operationId, async (context) => {
       context.checkpoint()
@@ -371,7 +378,7 @@ class WorkerProcessingClient implements ProcessingClient {
         sourceId: source.sourceId,
         parameters: { ...parameters },
         outputKind,
-        frame,
+        ...(isGif ? {} : { frame: selected }),
       }
       const stream: ExportStream = { sink, nextSequence: 0, receivedBytes: 0, failure: null }
       const reply = await this.request('export', request, [], stream)

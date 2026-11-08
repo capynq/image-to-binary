@@ -3,7 +3,7 @@ import { ComparisonCanvas } from './ComparisonCanvas'
 import type { ViewMode } from './comparisonGeometry'
 import { ExportPanel } from './export/ExportPanel'
 import { exportFilename } from './export/downloadName'
-import { EXPORT_FORMAT_WORDS } from './export/exportFormats'
+import { EXPORT_FORMAT_WORDS, exportFormatChoices } from './export/exportFormats'
 import type { ExportPhase } from './export/exportFocus'
 import { footerStatusLabel, useFooterAnnouncement } from './export/footerAnnouncement'
 import { useExportDownload } from './export/useExportDownload'
@@ -123,9 +123,15 @@ export default function App({ controller, native, menu = null }: AppProps) {
   const [rampDraft, setRampDraft] = useState(() => snapshot.settings.ramp)
   const [foregroundDraft, setForegroundDraft] = useState(() => snapshot.settings.foreground)
   const [backgroundDraft, setBackgroundDraft] = useState(() => snapshot.settings.background)
-  const [exportFormat, setExportFormat] = useState<ExportFormat>('png')
+  const [chosenFormat, setExportFormat] = useState<ExportFormat>('png')
   const [runFormat, setRunFormat] = useState<ExportFormat>('png')
   const artworkReasonId = useId()
+  const animated = snapshot.animation !== null
+  const exportFormat: ExportFormat = chosenFormat === 'gif' && !animated ? 'png' : chosenFormat
+
+  useEffect(() => {
+    if (chosenFormat === 'gif' && !animated) setExportFormat('png')
+  }, [chosenFormat, animated])
 
   useEffect(() => {
     if (typeof window.matchMedia !== 'function') return undefined
@@ -294,7 +300,7 @@ export default function App({ controller, native, menu = null }: AppProps) {
     if (!currentGates().export) return
     setRunFormat(exportFormat)
     controller
-      .startExport(exportFormat, { frame })
+      .startExport(exportFormat, exportFormat === 'gif' ? {} : { frame })
       .catch(() => undefined)
       .finally(() => setExportSettled((count) => count + 1))
   }
@@ -612,6 +618,7 @@ export default function App({ controller, native, menu = null }: AppProps) {
               download={download}
               savedName={savedExport?.name ?? null}
               format={exportFormat}
+              formats={exportFormatChoices(animated)}
               onFormatChange={setExportFormat}
               shownFormat={runFormat}
               onExport={startExport}

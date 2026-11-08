@@ -9,6 +9,7 @@ const encoder = new TextEncoder()
 const EXTENSIONS: Readonly<Record<ExportFormat, string>> = Object.freeze({
   png: 'png',
   text: 'txt',
+  gif: 'gif',
 })
 
 /**
