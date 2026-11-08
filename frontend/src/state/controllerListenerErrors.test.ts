@@ -44,7 +44,7 @@ describe('controller listener errors', () => {
     expect(controller.getSnapshot().settings.cellSize).toBe(20)
   })
 
-  it('a settings change releases the discarded preview exactly once even when a listener throws', async () => {
+  it('a settings change keeps the stale artwork when a listener throws, and a replacement releases it once', async () => {
     const urls = countingUrls()
     const controller = createStudioController({
       adapter: createDemoProcessingAdapter({ urlApi: urls.api }),
@@ -62,6 +62,10 @@ describe('controller listener errors', () => {
       'listener boom',
     )
     expect(previewUrl).toBeDefined()
+    expect(urls.revoked).toEqual([])
+    expect(controller.getSnapshot().preview?.url).toBe(previewUrl)
+    armed = false
+    await controller.preview()
     expect(urls.revoked.filter((url) => url === previewUrl)).toHaveLength(1)
   })
 

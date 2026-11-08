@@ -4,12 +4,18 @@ import { importNativeFile, toInput } from './processing/nativeFiles'
 import type { NativeFiles } from './processing/nativeFiles'
 import type { ViewMode } from './comparisonGeometry'
 import type { StudioController } from './state/controller'
+import type { StudioSnapshot } from './processing/types'
 
 export const IMPORT_ACCEPT =
   '.avif,.bmp,.gif,.heic,.heif,.jpg,.jpeg,.png,.tif,.tiff,.webp,image/avif,image/bmp,image/gif,image/heic,image/heif,image/jpeg,image/png,image/tiff,image/webp'
 
 export const IMPORT_GUIDANCE =
   'Use one AVIF, BMP, GIF, HEIC, HEIF, JPEG, PNG, TIFF or WebP image up to 256 MiB and 50 megapixels, with a file name of at most 256 characters.'
+
+/** Stale artwork stays visible but is re-rendered when its view is selected. */
+function hasFreshArtwork(snapshot: StudioSnapshot): boolean {
+  return snapshot.preview !== null && snapshot.previewRevision === snapshot.settingsRevision
+}
 
 /** Formats an encoded byte count for display using binary units. */
 export function formatBytes(bytes: number): string {
@@ -188,7 +194,7 @@ export function useImportFlow(
             if (
               wanted.current !== 'original' &&
               after.original !== null &&
-              after.preview === null
+              !hasFreshArtwork(after)
             ) {
               controller.preview('artwork').catch(() => undefined)
             }
@@ -197,7 +203,7 @@ export function useImportFlow(
         )
         return
       }
-      if (mode !== 'original' && current.preview === null) {
+      if (mode !== 'original' && !hasFreshArtwork(current)) {
         controller.preview('artwork').catch(() => undefined)
       }
     },

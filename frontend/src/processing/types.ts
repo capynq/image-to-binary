@@ -118,6 +118,12 @@ export interface StudioSnapshot {
   readonly importStage: ImportStage | null
   readonly preview: PreviewSnapshot | null
   readonly original: PreviewSnapshot | null
+  /** Increments on every accepted settings change; `previewRevision` says which one `preview` renders. */
+  readonly settingsRevision: number
+  /** The `settingsRevision` the displayed artwork was rendered from; null exactly when `preview` is null. */
+  readonly previewRevision: number | null
+  /** True while a quiet artwork render runs over the displayed artwork; status stays `ready`. */
+  readonly artworkUpdating: boolean
   readonly export: ExportSnapshot
   readonly error: string | null
 }

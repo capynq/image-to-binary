@@ -2318,9 +2318,17 @@ Proposed commit title: `feat: keep stale artwork while settings change`
 
 Completion checklist:
 
-- [ ] Revisions and stale artwork implemented.
-- [ ] Quiet preview implemented.
-- [ ] Controller tests updated and passing.
+- [x] Revisions and stale artwork implemented.
+- [x] Quiet preview implemented.
+- [x] Controller tests updated and passing.
+
+Validation: settings changes bump `settingsRevision` only when a field
+changes, keep the displayed artwork, and dispose it once when a newer
+artwork, import, reset or dispose replaces it. Quiet artwork previews keep
+`ready` status without progress commits; every superseding commit clears
+`artworkUpdating`. Selecting the Artwork view re-renders when the shown
+artwork is stale. Typecheck, format and 801 frontend tests pass; a full run
+under heavy host load timed out in four files, which all pass when rerun.
 
 ### 9.2 Render automatically after edits
 

@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { createDemoProcessingAdapter } from '../processing/demoAdapter'
 import { until } from '../processing/testKit'
-import type { PreviewKind, ProcessingAdapter } from '../processing/types'
+import { DEFAULT_SETTINGS } from '../processing/types'
+import type { PreviewKind, ProcessingAdapter, StudioSettings } from '../processing/types'
 import { createStudioController } from './controller'
 import { DEFAULT_RAMP } from '../processing/protocol'
 
@@ -21,6 +22,7 @@ function countingAdapter(): {
   readonly sourcesDisposed: string[]
   readonly control: {
     failNextImport: boolean
+    failNextPreview: boolean
     importGate: Promise<void> | null
     previewGate: Promise<void> | null
   }
@@ -31,9 +33,10 @@ function countingAdapter(): {
   const sourcesDisposed: string[] = []
   const control: {
     failNextImport: boolean
+    failNextPreview: boolean
     importGate: Promise<void> | null
     previewGate: Promise<void> | null
-  } = { failNextImport: false, importGate: null, previewGate: null }
+  } = { failNextImport: false, failNextPreview: false, importGate: null, previewGate: null }
   let imports = 0
   let artifacts = 0
   const adapter: ProcessingAdapter = {
@@ -62,6 +65,10 @@ function countingAdapter(): {
       const gate = control.previewGate
       control.previewGate = null
       await gate
+      if (control.failNextPreview) {
+        control.failNextPreview = false
+        throw new Error('Preview rejected.')
+      }
       const url = `blob:${kind ?? 'artwork'}-${++artifacts}`
       return {
         url,
@@ -108,12 +115,13 @@ describe('controller paired previews', () => {
     expect(JSON.parse(JSON.stringify(snapshot))).toEqual(snapshot)
   })
 
-  it('releases artwork once on settings change while keeping the original', async () => {
+  it('keeps stale artwork on settings change and releases it once when replaced', async () => {
     const h = countingAdapter()
     const controller = createStudioController({ adapter: h.adapter })
     await controller.loadDemo()
     await controller.preview('original')
     await controller.preview()
+    const artwork = controller.getSnapshot().preview
     controller.updateSettings({
       cellSize: 14,
       fontSize: 16,
@@ -138,11 +146,17 @@ describe('controller paired previews', () => {
       contrast: 0,
       invert: false,
     })
-    expect(h.revoked).toEqual(['blob:artwork-2'])
-    expect(controller.getSnapshot().preview).toBeNull()
+    expect(h.revoked).toEqual([])
+    expect(controller.getSnapshot().preview).toBe(artwork)
+    expect(controller.getSnapshot().previewRevision).toBe(0)
+    expect(controller.getSnapshot().settingsRevision).toBe(2)
     expect(controller.getSnapshot().original?.url).toBe('blob:original-1')
     expect(controller.getSnapshot().settings.cellSize).toBe(15)
     expect(controller.getSnapshot().status).toBe('ready')
+    await controller.preview()
+    expect(h.revoked).toEqual(['blob:artwork-2'])
+    expect(controller.getSnapshot().preview?.url).toBe('blob:artwork-3')
+    expect(controller.getSnapshot().previewRevision).toBe(2)
   })
 
   it('retains the pair and source when a replacement import fails', async () => {
@@ -325,5 +339,232 @@ describe('controller paired previews', () => {
     expect(snapshot.metadata?.name).toBe('Demo fixture')
     expect(revoked).toEqual([])
     expect(await (await controller.exportDemo('text')).text()).toBe('1010\n0101\n1010\n0101\n')
+  })
+})
+
+function withCellSize(cellSize: number): StudioSettings {
+  return { ...DEFAULT_SETTINGS, cellSize }
+}
+
+describe('stale artwork and quiet previews', () => {
+  it('advances the settings revision only for accepted changes', async () => {
+    const h = countingAdapter()
+    const controller = createStudioController({ adapter: h.adapter })
+    expect(controller.getSnapshot().settingsRevision).toBe(0)
+    expect(controller.getSnapshot().previewRevision).toBeNull()
+    expect(controller.getSnapshot().artworkUpdating).toBe(false)
+    await controller.loadDemo()
+    await controller.preview()
+    expect(controller.getSnapshot().previewRevision).toBe(0)
+    controller.updateSettings(withCellSize(15))
+    expect(controller.getSnapshot().settingsRevision).toBe(1)
+    expect(controller.getSnapshot().previewRevision).toBe(0)
+    controller.updateSettings(withCellSize(15))
+    expect(controller.getSnapshot().settingsRevision).toBe(1)
+    expect(() => controller.updateSettings(withCellSize(4))).toThrow('Cell size')
+    expect(controller.getSnapshot().settingsRevision).toBe(1)
+    await controller.preview()
+    expect(controller.getSnapshot().previewRevision).toBe(1)
+  })
+
+  it('keeps the artwork and its revision through a settings change and resets them on import', async () => {
+    const h = countingAdapter()
+    const controller = createStudioController({ adapter: h.adapter })
+    await controller.loadDemo()
+    await controller.preview()
+    controller.updateSettings(withCellSize(15))
+    expect(controller.getSnapshot().preview?.url).toBe('blob:artwork-1')
+    expect(controller.getSnapshot().previewRevision).toBe(0)
+    await controller.loadDemo()
+    expect(controller.getSnapshot().preview).toBeNull()
+    expect(controller.getSnapshot().previewRevision).toBeNull()
+    expect(controller.getSnapshot().settingsRevision).toBe(1)
+    expect(h.revoked).toEqual(['blob:artwork-1'])
+  })
+
+  it('supersedes an in-flight render on settings change without touching the displayed artwork', async () => {
+    const h = countingAdapter()
+    const controller = createStudioController({ adapter: h.adapter })
+    await controller.loadDemo()
+    await controller.preview()
+    const artwork = controller.getSnapshot().preview
+    const gate = gateway()
+    h.control.previewGate = gate.promise
+    const pending = controller.preview()
+    await until(() => h.kinds.length === 2, 'artwork request')
+    controller.updateSettings(withCellSize(15))
+    expect(controller.getSnapshot().preview).toBe(artwork)
+    gate.release()
+    await pending
+    expect(controller.getSnapshot().preview).toBe(artwork)
+    expect(controller.getSnapshot().previewRevision).toBe(0)
+    expect(h.revoked).toEqual(['blob:artwork-2'])
+  })
+
+  it('disposes the retained artwork exactly once on dispose after a settings change', async () => {
+    const h = countingAdapter()
+    const controller = createStudioController({ adapter: h.adapter })
+    await controller.loadDemo()
+    await controller.preview()
+    controller.updateSettings(withCellSize(15))
+    controller.dispose()
+    controller.dispose()
+    expect(h.revoked).toEqual(['blob:artwork-1'])
+    expect(controller.getSnapshot().preview).toBeNull()
+    expect(controller.getSnapshot().previewRevision).toBeNull()
+  })
+
+  it('keeps ready status and toggles artworkUpdating around a quiet render', async () => {
+    const h = countingAdapter()
+    const controller = createStudioController({ adapter: h.adapter })
+    await controller.loadDemo()
+    await controller.preview()
+    const statuses: string[] = []
+    const updating: boolean[] = []
+    controller.subscribe(() => {
+      statuses.push(controller.getSnapshot().status)
+      updating.push(controller.getSnapshot().artworkUpdating)
+    })
+    const gate = gateway()
+    h.control.previewGate = gate.promise
+    const pending = controller.preview('artwork', { quiet: true })
+    await until(() => h.kinds.length === 2, 'quiet request')
+    expect(controller.getSnapshot().status).toBe('ready')
+    expect(controller.getSnapshot().progress).toBe(1)
+    expect(controller.getSnapshot().artworkUpdating).toBe(true)
+    expect(controller.getSnapshot().preview?.url).toBe('blob:artwork-1')
+    gate.release()
+    await pending
+    expect(controller.getSnapshot().artworkUpdating).toBe(false)
+    expect(controller.getSnapshot().status).toBe('ready')
+    expect(controller.getSnapshot().preview?.url).toBe('blob:artwork-2')
+    expect(controller.getSnapshot().previewRevision).toBe(0)
+    expect(h.revoked).toEqual(['blob:artwork-1'])
+    expect(statuses).not.toContain('processing')
+    expect(updating).toEqual([true, false])
+  })
+
+  it('a quiet render publishes fresh artwork that clears staleness', async () => {
+    const h = countingAdapter()
+    const controller = createStudioController({ adapter: h.adapter })
+    await controller.loadDemo()
+    await controller.preview()
+    controller.updateSettings(withCellSize(15))
+    expect(controller.getSnapshot().previewRevision).not.toBe(
+      controller.getSnapshot().settingsRevision,
+    )
+    await controller.preview('artwork', { quiet: true })
+    expect(controller.getSnapshot().previewRevision).toBe(controller.getSnapshot().settingsRevision)
+    expect(controller.getSnapshot().artworkUpdating).toBe(false)
+    expect(h.revoked).toEqual(['blob:artwork-1'])
+  })
+
+  it('keeps the old artwork and surfaces the error when a quiet render fails', async () => {
+    const h = countingAdapter()
+    const controller = createStudioController({ adapter: h.adapter })
+    await controller.loadDemo()
+    await controller.preview()
+    const artwork = controller.getSnapshot().preview
+    h.control.failNextPreview = true
+    await expect(controller.preview('artwork', { quiet: true })).rejects.toThrow(
+      'Preview rejected.',
+    )
+    const snapshot = controller.getSnapshot()
+    expect(snapshot.artworkUpdating).toBe(false)
+    expect(snapshot.status).toBe('error')
+    expect(snapshot.error).toBe('Preview rejected. Previous image remains available.')
+    expect(snapshot.preview).toBe(artwork)
+    expect(snapshot.previewRevision).toBe(0)
+    expect(h.revoked).toEqual([])
+  })
+
+  it('rejects a quiet preview of the original before any state changes', async () => {
+    const h = countingAdapter()
+    const controller = createStudioController({ adapter: h.adapter })
+    await controller.loadDemo()
+    const before = controller.getSnapshot()
+    await expect(controller.preview('original', { quiet: true })).rejects.toThrow(
+      'Only the artwork preview can be quiet.',
+    )
+    expect(controller.getSnapshot()).toBe(before)
+    expect(h.kinds).toEqual([])
+  })
+
+  it.each(['cancel', 'settings', 'preview', 'import', 'reset', 'dispose'] as const)(
+    '%s clears artworkUpdating in the same commit that supersedes a quiet render',
+    async (action) => {
+      const h = countingAdapter()
+      const controller = createStudioController({ adapter: h.adapter })
+      await controller.loadDemo()
+      await controller.preview()
+      const gate = gateway()
+      h.control.previewGate = gate.promise
+      const pending = controller.preview('artwork', { quiet: true })
+      await until(() => h.kinds.length === 2, 'quiet request')
+      expect(controller.getSnapshot().artworkUpdating).toBe(true)
+      const seen: boolean[] = []
+      controller.subscribe(() => seen.push(controller.getSnapshot().artworkUpdating))
+      let next: Promise<unknown> = Promise.resolve()
+      if (action === 'cancel') controller.cancel()
+      else if (action === 'settings') controller.updateSettings(withCellSize(15))
+      else if (action === 'preview') next = controller.preview()
+      else if (action === 'import') next = controller.loadDemo()
+      else if (action === 'reset') controller.reset()
+      else controller.dispose()
+      expect(controller.getSnapshot().artworkUpdating).toBe(false)
+      expect(seen[0]).toBe(false)
+      gate.release()
+      await pending
+      await next
+      expect(controller.getSnapshot().artworkUpdating).toBe(false)
+      expect(new Set(h.revoked).size).toBe(h.revoked.length)
+      const shown = controller.getSnapshot().preview?.url
+      if (shown !== undefined) expect(h.revoked).not.toContain(shown)
+      expect(h.revoked.length).toBeGreaterThan(0)
+    },
+  )
+
+  it('discards and disposes a stale quiet result after a newer settings change', async () => {
+    const h = countingAdapter()
+    const controller = createStudioController({ adapter: h.adapter })
+    await controller.loadDemo()
+    await controller.preview()
+    const gate = gateway()
+    h.control.previewGate = gate.promise
+    const pending = controller.preview('artwork', { quiet: true })
+    await until(() => h.kinds.length === 2, 'quiet request')
+    controller.updateSettings(withCellSize(15))
+    gate.release()
+    await pending
+    const snapshot = controller.getSnapshot()
+    expect(h.revoked).toEqual(['blob:artwork-2'])
+    expect(snapshot.preview?.url).toBe('blob:artwork-1')
+    expect(snapshot.previewRevision).toBe(0)
+    expect(snapshot.settingsRevision).toBe(1)
+    expect(snapshot.artworkUpdating).toBe(false)
+    expect(snapshot.status).toBe('ready')
+  })
+
+  it('exports with the new settings while stale artwork stays displayed', async () => {
+    const h = countingAdapter()
+    const controller = createStudioController({ adapter: h.adapter })
+    await controller.loadDemo()
+    await controller.preview()
+    const before = await (await controller.exportDemo('text')).text()
+    const artwork = controller.getSnapshot().preview
+    const changed: StudioSettings = { ...DEFAULT_SETTINGS, threshold: 0 }
+    controller.updateSettings(changed)
+    expect(controller.getSnapshot().preview).toBe(artwork)
+    expect(controller.getSnapshot().previewRevision).not.toBe(
+      controller.getSnapshot().settingsRevision,
+    )
+    const after = await (await controller.exportDemo('text')).text()
+    expect(after).not.toBe(before)
+    const reference = createStudioController({
+      adapter: countingAdapter().adapter,
+      settings: changed,
+    })
+    await reference.loadDemo()
+    expect(after).toBe(await (await reference.exportDemo('text')).text())
   })
 })

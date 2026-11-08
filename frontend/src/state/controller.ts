@@ -38,7 +38,7 @@ export interface StudioController {
    * Renders `kind` (default `artwork`) and publishes it only if the operation is still current.
    * Rejects an unknown kind before any state changes.
    */
-  preview(kind?: PreviewKind): Promise<void>
+  preview(kind?: PreviewKind, options?: PreviewOptions): Promise<void>
   exportDemo(format?: ExportFormat): Promise<Blob>
   /**
    * Encodes the accepted source with the settings in effect when the export starts. A newer
@@ -54,6 +54,11 @@ export interface StudioController {
   dispose(): void
 }
 
+/** A quiet artwork preview keeps the displayed artwork and status while it renders. */
+export interface PreviewOptions {
+  readonly quiet?: boolean
+}
+
 type OperationKind = 'import' | 'preview' | 'export' | 'textExport'
 
 interface ActiveOperation {
@@ -65,6 +70,8 @@ interface ActiveOperation {
 interface Disposable {
   dispose(): void
 }
+
+const SETTINGS_KEYS = Object.keys(DEFAULT_SETTINGS) as ReadonlyArray<keyof StudioSettings>
 
 const IDLE_EXPORT: ExportSnapshot = Object.freeze({
   status: 'idle',
@@ -94,6 +101,9 @@ export function createStudioController(options: StudioControllerOptions = {}): S
     importStage: null,
     preview: null,
     original: null,
+    settingsRevision: 0,
+    previewRevision: null,
+    artworkUpdating: false,
     export: IDLE_EXPORT,
     error: null,
   })
@@ -147,10 +157,11 @@ export function createStudioController(options: StudioControllerOptions = {}): S
     cancelled === 'export' ? { export: IDLE_EXPORT } : {}
 
   const beginOperation = (
-    status: 'importing' | 'processing' | 'exporting',
+    status: 'importing' | 'processing' | 'exporting' | 'ready',
     kind: OperationKind,
     extra: Partial<StudioSnapshot> = {},
     discards: ReadonlyArray<Disposable | null> = [],
+    artworkUpdating = false,
   ): ActiveOperation => {
     const cancelled = supersede()
     const operation: ActiveOperation = {
@@ -166,8 +177,9 @@ export function createStudioController(options: StudioControllerOptions = {}): S
         ...extra,
         generation: operation.generation,
         status,
-        progress: 0,
+        progress: status === 'ready' ? 1 : 0,
         error: null,
+        artworkUpdating,
       },
       discards,
     )
@@ -192,7 +204,17 @@ export function createStudioController(options: StudioControllerOptions = {}): S
       ownedImport === null || message === ''
         ? message
         : `${message}${separator}Previous image remains available.`
-    commit({ status: 'error', error: text, progress: 0, importStage: null, ...extra }, [])
+    commit(
+      {
+        status: 'error',
+        error: text,
+        progress: 0,
+        importStage: null,
+        artworkUpdating: false,
+        ...extra,
+      },
+      [],
+    )
   }
 
   /** Swaps the source and clears every source-derived artifact in one commit. */
@@ -208,7 +230,15 @@ export function createStudioController(options: StudioControllerOptions = {}): S
     ownedImport = next
     readyExport = null
     commit(
-      { ...patch, importStage: null, preview: null, original: null, export: IDLE_EXPORT },
+      {
+        ...patch,
+        importStage: null,
+        preview: null,
+        original: null,
+        previewRevision: null,
+        artworkUpdating: false,
+        export: IDLE_EXPORT,
+      },
       discards,
     )
   }
@@ -241,29 +271,41 @@ export function createStudioController(options: StudioControllerOptions = {}): S
     })
   }
 
-  const preview = async (kind: PreviewKind = 'artwork'): Promise<void> => {
+  const preview = async (
+    kind: PreviewKind = 'artwork',
+    options: PreviewOptions = {},
+  ): Promise<void> => {
     if (disposed) {
       throw new Error('Studio controller is disposed.')
     }
     if (kind !== 'artwork' && kind !== 'original') {
       throw new RangeError('Unknown preview kind.')
     }
+    const quiet = options.quiet === true
+    if (quiet && kind !== 'artwork') {
+      throw new RangeError('Only the artwork preview can be quiet.')
+    }
     const owned = ownedImport
     if (owned === null) {
       throw new Error('Import an image before previewing.')
     }
-    const operation = beginOperation('processing', 'preview')
+    const operation = quiet
+      ? beginOperation('ready', 'preview', {}, [], true)
+      : beginOperation('processing', 'preview')
+    const { settings, settingsRevision } = snapshot
     let artifact: PreviewArtifact
     try {
       artifact = await adapter.preview(
         session,
         owned.source,
-        snapshot.settings,
+        settings,
         operation,
         kind,
-        (fraction) => {
-          if (isCurrent(operation)) commit({ progress: fraction }, [])
-        },
+        quiet
+          ? undefined
+          : (fraction) => {
+              if (isCurrent(operation)) commit({ progress: fraction }, [])
+            },
       )
     } catch (error) {
       const current = isCurrent(operation)
@@ -288,8 +330,10 @@ export function createStudioController(options: StudioControllerOptions = {}): S
             height: artifact.height,
           }),
         ),
+        ...(kind === 'artwork' ? { previewRevision: settingsRevision } : {}),
         status: 'ready',
         progress: 1,
+        artworkUpdating: false,
       },
       [previous],
     )
@@ -305,6 +349,7 @@ export function createStudioController(options: StudioControllerOptions = {}): S
         progress: ready ? 1 : 0,
         export: IDLE_EXPORT,
         error: null,
+        artworkUpdating: false,
       },
       [],
     )
@@ -361,6 +406,7 @@ export function createStudioController(options: StudioControllerOptions = {}): S
       {
         status: 'ready',
         progress: 1,
+        artworkUpdating: false,
         export: { status: 'ready', progress: 1, byteLength: artifact.byteLength, error: null },
       },
       [],
@@ -391,6 +437,7 @@ export function createStudioController(options: StudioControllerOptions = {}): S
             generation: snapshot.generation + 1,
             ...exportIdleIf(cancelled),
             importStage: null,
+            artworkUpdating: false,
             status: 'error',
             error: error instanceof Error ? error.message : String(error),
           },
@@ -399,16 +446,17 @@ export function createStudioController(options: StudioControllerOptions = {}): S
         throw error
       }
       supersede()
-      const discards: Array<Disposable | null> = [artifacts.artwork, readyExport]
-      artifacts.artwork = null
+      const changed = !sameSettings(snapshot.settings, settings)
+      const discards: Array<Disposable | null> = [readyExport]
       readyExport = null
       commit(
         {
           settings: cloneSettings(settings),
+          settingsRevision: changed ? snapshot.settingsRevision + 1 : snapshot.settingsRevision,
           generation: snapshot.generation + 1,
           status: ownedImport === null ? 'idle' : 'ready',
           importStage: null,
-          preview: null,
+          artworkUpdating: false,
           export: IDLE_EXPORT,
           error: null,
         },
@@ -438,7 +486,7 @@ export function createStudioController(options: StudioControllerOptions = {}): S
         throw new StaleOperationError()
       }
       activeOperation = null
-      commit({ status: 'ready', progress: 1 }, [])
+      commit({ status: 'ready', progress: 1, artworkUpdating: false }, [])
       if (artifact.kind !== 'blob') throw new Error('Text export did not produce a blob.')
       return artifact.blob
     },
@@ -469,6 +517,7 @@ export function createStudioController(options: StudioControllerOptions = {}): S
           importStage: null,
           progress: 0,
           error: null,
+          artworkUpdating: false,
           ...exportIdleIf(cancelled),
         },
         [],
@@ -501,6 +550,10 @@ export function createStudioController(options: StudioControllerOptions = {}): S
 
 function errorText(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).trimEnd()
+}
+
+function sameSettings(a: StudioSettings, b: StudioSettings): boolean {
+  return SETTINGS_KEYS.every((key) => a[key] === b[key])
 }
 
 function disposeQuietly(resource: Disposable | null): void {
