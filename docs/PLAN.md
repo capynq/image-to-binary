@@ -2586,7 +2586,17 @@ Proposed commit title: `docs: document animated GIF support`
 
 Completion checklist:
 
-- [ ] README and format coverage updated.
+- [x] README and format coverage updated.
+
+Validation: the README documents animated playback controls, Animated GIF
+export (palette, quantisation, loop and delay rules), the 1000-frame and
+decoded-budget fallback, short-delay normalisation, and the new limits
+(512 MiB animation preview, 65535 px and 64 MiB RGBA per GIF frame, 256 MiB
+output), each checked against its source constant. The format coverage notes
+cite the decode, session, WASM, encoder, desktop and smoke tests for GIF
+animation; the browser property-matrix GIF probe predates Phase 9 and was
+not re-run. Final root checks: formatting, Clippy `-D warnings`, 336
+workspace tests and the WASM check pass.
 
 ## Subphase 0.1 validation record
 

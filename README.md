@@ -122,13 +122,23 @@ Nothing is signed, notarised, uploaded or published.
    opened image renders as soon as its preview is ready.
 4. Switch the view between **Original**, **Artwork** and **Split** (a draggable
    divider over both images), zoom, pan and fit.
-5. Choose **PNG image** or **UTF-8 text** and press **Export**. In the browser,
-   then choose **Download**. On desktop, a save dialog opens. **Cancel** stops a
-   running job.
+5. Choose **PNG image**, **UTF-8 text** or, for an animated source,
+   **Animated GIF**, and press **Export**. In the browser, then choose
+   **Download**. On desktop, a save dialog opens. **Cancel** stops a running job.
 
 The theme choice (System, Light or Dark) is stored in the browser's
 `localStorage` under `image-to-binary-theme-choice`. It is the only value the
 studio keeps between sessions.
+
+### Animated sources
+
+An animated GIF with two or more frames plays in the studio. **Play** and
+**Pause** control playback. The frame scrubber shows the current frame and sets
+it, and moving it pauses playback. Original, Artwork and Split views share one
+frame index, so the split stays synchronised. Automatic and manual renders start
+at the frame on screen. Playback follows each frame's delay and the GIF's loop
+count, holds while the window is hidden, and starts paused on the first frame
+when the system asks for reduced motion.
 
 ### Keyboard and menu shortcuts
 
@@ -162,7 +172,7 @@ Input (the picker and drop accept these extensions):
 | Format | Browser | Desktop default package | Desktop with `native-codecs` |
 | --- | --- | --- | --- |
 | JPEG, PNG, WebP, BMP | yes | yes | yes |
-| TIFF (first page), GIF (first frame) | yes | yes | yes |
+| TIFF (first page), GIF (all frames, see notes) | yes | yes | yes |
 | HEIC, HEIF (primary image) | only in builds with the decoder | not available | yes |
 | AVIF (primary item) | only in builds with the decoder | not available | yes |
 
@@ -170,8 +180,12 @@ Notes:
 
 - Orientation metadata is applied before processing. Sources with 16-bit or
   10-bit samples are normalised to 8 bits.
-- Animated PNG, GIF and WebP decode their first frame. Animated WebP with
-  alpha-blended frames decodes one level low, a known and accepted limitation.
+- Animated GIFs import every frame, up to 1000 frames within the 1 GiB decoded
+  budget (every frame plus one working canvas counts). A GIF over either limit
+  imports its first frame as a still. Delays of 0 or 1 centisecond play at
+  100 ms. Animated PNG and animated WebP decode their first frame. Animated WebP
+  with alpha-blended frames decodes one level low, a known and accepted
+  limitation.
 - HEIC and AVIF use pinned libheif 1.23.7, libde265 1.1.3 and libaom 3.15.3.
   Default desktop packages exclude them because the LGPL-3.0 and HEVC patent
   questions are open (see [Licences and notices](#licences-and-notices)).
@@ -197,6 +211,15 @@ contract:
 The exports are deterministic. Preview and export share one source grid and one
 set of settings, so the text and PNG show the same cells.
 
+**Animated GIF** is offered only for animated sources. It encodes every frame
+with the current render settings at the source's delays, and it keeps the
+source's loop: an endless loop repeats, and a play-once source plays once. PNG
+and text export the frame currently shown; GIF ignores it. Monochrome output
+uses one 256-entry palette from the background colour to the foreground colour,
+so each frame's anti-aliased blends map to their nearest entry. Source colour
+quantises each frame on its own, so its colours can differ slightly from the
+preview.
+
 Browser downloads are named after the source (for example `png-binary.png`).
 
 ## Limits
@@ -207,10 +230,13 @@ These values come from the code, and the frontend pins them to the Rust constant
 | --- | --- | --- |
 | Source pixels (width times height) | 50,000,000 | `crates/adapters/src/session/limits.rs`, `frontend/src/processing/protocol.ts` |
 | Encoded input size | 256 MiB | `MAX_ENCODED_BYTES`, same files |
-| Decoded RGBA working set per source | 1 GiB | `crates/adapters/src/session/limits.rs`, shared by WASM and desktop |
+| Decoded RGBA working set per source | 1 GiB (animations: every frame plus one working canvas) | `crates/adapters/src/session/limits.rs`, shared by WASM and desktop |
+| Animation frames per GIF | 1,000 (more falls back to the first frame) | `MAX_ANIMATION_FRAMES`, `crates/processing/src/decode/animation.rs` |
+| Animation preview frames per run (original or artwork) | 512 MiB of encoded PNG; error "Animation preview is too large; try a larger cell size." | `ANIMATION_PREVIEW_BUDGET_BYTES`, `frontend/src/processing/browserAdapter.ts` and `nativeAnimation.ts` |
+| GIF export canvas | 1 to 65535 px per side; 64 MiB of RGBA per frame (16,777,216 pixels) | `crates/export/src/gif.rs`, and `min(MAX_RENDER_ROW_BYTES, max_output_bytes)` in `crates/adapters/src/artwork_gif.rs` |
 | Preview and original preview, longest edge | 1600 px, never upscaled | `MAX_PREVIEW_DIMENSION`, `ORIGINAL_PREVIEW_MAX_EDGE` |
 | Original-preview output reservation | 1600 × 1600 × 4 bytes | `crates/processing/src/original.rs` |
-| PNG and text export output | 256 MiB | `EXPORT_MAX_ENCODED_BYTES` |
+| PNG, text and GIF export output | 256 MiB | `EXPORT_MAX_ENCODED_BYTES` |
 | Export chunk size | 1 MiB | `EXPORT_CHUNK_BYTES` |
 | Cell size | 5 to 30 px | `crates/core/src/bounds.rs`, `frontend/src/processing/bounds.ts` |
 | Font size | 8 to 30 px | same |
@@ -355,7 +381,8 @@ desktop app, other operating systems, other hardware, and variance across runs.
 | Menus and shortcuts | Buttons only; the browser keeps its own shortcuts | Native menu bar with accelerators (see [Keyboard and menu shortcuts](#keyboard-and-menu-shortcuts)) |
 | HEIC and AVIF | Lazy decoder worker, only in builds that include it | Excluded from default packages; `native-codecs` enables native decoding |
 | Processing | WASM in a module worker | Rust on a native worker thread |
-| Export | Blob, then browser download | Streamed PNG or text written atomically to a chosen file |
+| Export | Blob, then browser download | Streamed PNG, text or GIF written atomically to a chosen file |
+| Animation | Every frame rendered as a PNG object URL, within a 512 MiB budget per run | Every frame rendered on request over IPC, within the same 512 MiB budget per run |
 | Footer and text | "Images are processed locally on this device." | Same text |
 | Memory | Bound by the WASM heap | Decoded working set up to 1 GiB |
 
