@@ -157,7 +157,7 @@ describe('worker host request id ordering', () => {
     expect(raw.replies[1]).toMatchObject({ type: 'previewed', requestId: 2 })
     await roundTrip(raw, () => sendPreview(raw, 2, 1))
     expect(raw.replies[2]).toMatchObject({ type: 'fatal' })
-    expect(engine.log.filter((entry) => entry.startsWith('start:'))).toEqual(['start:2'])
+    expect(engine.log.filter((entry) => entry.startsWith('start:'))).toEqual(['start:1'])
     expect(engine.frames).toHaveLength(1)
   })
 
@@ -382,7 +382,8 @@ describe('worker host render modes', () => {
     expect(engine.starts).toEqual([
       {
         kind: 'preview',
-        generation: 2,
+        generation: 1,
+        frame: 0,
         cellSize: 12,
         fontSize: 16,
         threshold: 128,
@@ -393,7 +394,8 @@ describe('worker host render modes', () => {
       },
       {
         kind: 'export',
-        generation: 3,
+        generation: 2,
+        frame: 0,
         cellSize: 12,
         fontSize: 16,
         threshold: 128,
@@ -421,7 +423,7 @@ describe('worker host original preview', () => {
     }
     expect(reply).toMatchObject({ type: 'previewed', requestId: 2, width: 2, height: 1 })
     expect(reply.pixels.byteLength).toBe(8)
-    expect(engine.log).toEqual(['original:2', 'finish:2'])
+    expect(engine.log).toEqual(['original:1', 'finish:1'])
     expect(engine.sessions[0]?.budgets).toEqual([131_072, 131_072, 131_072])
     expect(engine.frames).toHaveLength(1)
     expect(engine.frames[0]).toMatchObject({ taken: true, freed: true })
@@ -462,7 +464,7 @@ describe('worker host original preview', () => {
     gate.releaseAll()
     await awaitReplies(raw, 3)
     expect(raw.replies[2]).toMatchObject({ type: 'cancelled', requestId: 2 })
-    expect(engine.log).toEqual(['original:2', 'cancel:2'])
+    expect(engine.log).toEqual(['original:1', 'cancel:1'])
     expect(engine.frames).toHaveLength(0)
     expect(engine.sessions[0]).toMatchObject({ disposeCalls: 0, freed: false })
     await roundTrip(raw, () => sendOriginal(raw, 3, 1))
@@ -488,7 +490,7 @@ describe('worker host original preview', () => {
     await awaitReplies(raw, 3)
     expect(raw.replies[2]).toMatchObject({ type: 'cancelled', requestId: 2 })
     expect(engine.frames).toHaveLength(0)
-    expect(engine.log).toEqual(['original:2'])
+    expect(engine.log).toEqual(['original:1'])
     expect(engine.sessions[0]).toMatchObject({ disposeCalls: 1, freed: true })
   })
 })
@@ -528,4 +530,123 @@ describe('worker host encoded output limit', () => {
       expect(raw.replies.some((reply) => replyType(reply) === 'exportChunk')).toBe(false)
     },
   )
+})
+
+function sendFramePreview(raw: RawHost, requestId: number, sourceId: number, frame: number): void {
+  raw.send({
+    type: 'preview',
+    requestId,
+    operationId: requestId,
+    sourceId,
+    frame,
+    parameters: {
+      cellSize: 12,
+      fontSize: 16,
+      threshold: 128,
+      sampling: 'classic',
+      mode: 'binary',
+      ramp: DEFAULT_RAMP,
+      foreground: '#00ff00',
+      background: '#000000',
+      colorMode: 'monochrome',
+      contrast: 0,
+      invert: false,
+    },
+  })
+}
+
+describe('worker host animation frames', () => {
+  it('replies with frame count, delays and loop count for an encoded animation', async () => {
+    const engine = new FakeEngine()
+    engine.animation = { frameCount: 3, frameDelays: [5, 10, 2], loopCount: Infinity }
+    const raw = openHost(engine)
+    await roundTrip(raw, () => sendImportEncoded(raw, 1))
+    expect(raw.replies[0]).toMatchObject({
+      type: 'imported',
+      frameCount: 3,
+      frameDelays: [5, 10, 2],
+      loopCount: Infinity,
+    })
+  })
+
+  it('replies with still metadata for a raw RGBA import', async () => {
+    const engine = new FakeEngine()
+    const raw = openHost(engine)
+    await roundTrip(raw, () => sendImport(raw, 1))
+    expect(raw.replies[0]).toMatchObject({
+      type: 'imported',
+      frameCount: 1,
+      frameDelays: [],
+      loopCount: 0,
+    })
+  })
+
+  it('takes a fresh job generation per start, independent of request ids', async () => {
+    const engine = new FakeEngine()
+    engine.animation = { frameCount: 3, frameDelays: [10, 10, 10], loopCount: 0 }
+    const raw = openHost(engine)
+    await roundTrip(raw, () => sendImportEncoded(raw, 1))
+    await roundTrip(raw, () => sendFramePreview(raw, 7, 1, 2))
+    await roundTrip(raw, () => sendOriginal(raw, 9, 1))
+    await roundTrip(raw, () => sendFramePreview(raw, 12, 1, 0))
+    expect(engine.log).toEqual([
+      'start:1',
+      'finish:1',
+      'original:2',
+      'finish:2',
+      'start:3',
+      'finish:3',
+    ])
+    expect(engine.starts.map(({ generation, frame }) => [generation, frame])).toEqual([
+      [1, 2],
+      [3, 0],
+    ])
+    expect(raw.replies.slice(1).map((reply) => (reply as { requestId: number }).requestId)).toEqual(
+      [7, 9, 12],
+    )
+  })
+
+  it('fails an out-of-range frame without publishing and keeps the next start valid', async () => {
+    const engine = new FakeEngine()
+    engine.animation = { frameCount: 2, frameDelays: [10, 10], loopCount: 0 }
+    const raw = openHost(engine)
+    await roundTrip(raw, () => sendImportEncoded(raw, 1))
+    await roundTrip(raw, () => sendFramePreview(raw, 2, 1, 2))
+    expect(raw.replies[1]).toMatchObject({
+      type: 'failed',
+      requestId: 2,
+      code: 'invalid_argument',
+    })
+    expect(engine.frames).toHaveLength(0)
+    await roundTrip(raw, () => sendFramePreview(raw, 3, 1, 1))
+    expect(raw.replies[2]).toMatchObject({ type: 'previewed', requestId: 3 })
+    expect(engine.sessions[0]?.frames).toEqual([1])
+  })
+
+  it('cancels a frame mid-animation and starts the next frame on a higher generation', async () => {
+    const engine = new FakeEngine()
+    engine.animation = { frameCount: 3, frameDelays: [10, 10, 10], loopCount: 0 }
+    const gate = createGate()
+    const raw = openHost(engine, undefined, { createYielder: gate.create })
+    await roundTrip(raw, () => sendImportEncoded(raw, 1))
+    engine.onStart = () => {
+      gate.armed = true
+      engine.onStart = null
+    }
+    sendFramePreview(raw, 2, 1, 1)
+    await until(() => gate.waiting() === 1, 'frame advance yield')
+    raw.send({ type: 'cancel', requestId: 2, operationId: 2 })
+    await roundTrip(raw, () => sendFramePreview(raw, 3, 1, 2))
+    expect(raw.replies[1]).toMatchObject({ type: 'failed', requestId: 3, code: 'busy' })
+    gate.releaseAll()
+    await awaitReplies(raw, 3)
+    expect(raw.replies[2]).toMatchObject({ type: 'cancelled', requestId: 2 })
+    expect(engine.log).toEqual(['start:1', 'cancel:1'])
+    expect(engine.frames).toHaveLength(0)
+    await roundTrip(raw, () => sendFramePreview(raw, 4, 1, 2))
+    expect(raw.replies[3]).toMatchObject({ type: 'previewed', requestId: 4 })
+    expect(engine.log.filter((entry) => entry.startsWith('start:'))).toEqual(['start:1', 'start:2'])
+    expect(engine.sessions[0]?.frames).toEqual([1, 2])
+    expect(engine.frames).toHaveLength(1)
+  })
 })

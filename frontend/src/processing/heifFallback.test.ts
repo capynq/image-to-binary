@@ -52,7 +52,16 @@ class FakeClient implements ProcessingClient {
   clientDisposals = 0
 
   private handle(name: string, width: number, height: number): SourceHandle {
-    return { sourceId: 1, name, width, height, dispose: () => undefined }
+    return {
+      sourceId: 1,
+      name,
+      width,
+      height,
+      frameCount: 1,
+      frameDelays: [],
+      loopCount: 0,
+      dispose: () => undefined,
+    }
   }
 
   async importEncoded(source: EncodedImportSource): Promise<SourceHandle> {

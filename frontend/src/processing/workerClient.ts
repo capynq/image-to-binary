@@ -4,6 +4,7 @@ import {
   isArrayBuffer,
   isWorkerReply,
   validateEncodedImport,
+  validateFrameIndex,
   validateImageMetadata,
   validatePreviewFrame,
   validateRgbaImage,
@@ -37,12 +38,18 @@ export interface Releasable {
   dispose(): void
 }
 
-/** Owned worker-side source. `dispose()` is idempotent and releases the Rust session. */
+/**
+ * Owned worker-side source. `dispose()` is idempotent and releases the Rust session. Stills report
+ * `frameCount` 1, no delays and loop count 0.
+ */
 export interface SourceHandle extends Releasable {
   readonly sourceId: number
   readonly name: string
   readonly width: number
   readonly height: number
+  readonly frameCount: number
+  readonly frameDelays: ReadonlyArray<number>
+  readonly loopCount: number
 }
 
 /** Normalized RGBA8 input. Importing transfers (detaches) `pixels`. */
@@ -114,23 +121,28 @@ export interface ProcessingClient {
   importRgba(source: RgbaImportSource, operationId: number): Promise<SourceHandle>
   /** Decoded dimensions come from the worker reply; the returned name must equal the input name. */
   importEncoded(source: EncodedImportSource, operationId: number): Promise<SourceHandle>
-  /** `finalize` runs inside the scheduled operation; its result is released if superseded. */
+  /**
+   * `finalize` runs inside the scheduled operation; its result is released if superseded. `frame`
+   * must be an index below the source's `frameCount`; a reject is a `RangeError`.
+   */
   preview<T extends Releasable>(
     source: SourceHandle,
     parameters: PreviewParameters,
     operationId: number,
     finalize: (pixels: PreviewPixels) => Promise<T>,
+    frame?: number,
   ): Promise<T>
   previewPixels(
     source: SourceHandle,
     parameters: PreviewParameters,
     operationId: number,
   ): Promise<PreviewPixels>
-  /** Bounded original-image preview of a retained source; `finalize` follows the `preview` contract. */
+  /** Bounded original-image preview of a retained source; `finalize` and `frame` follow the `preview` contract. */
   originalPreview<T extends Releasable>(
     source: SourceHandle,
     operationId: number,
     finalize: (pixels: PreviewPixels) => Promise<T>,
+    frame?: number,
   ): Promise<T>
   originalPreviewPixels(source: SourceHandle, operationId: number): Promise<PreviewPixels>
   /**
@@ -145,6 +157,7 @@ export interface ProcessingClient {
     operationId: number,
     sink: ExportSink,
     finalize: (completion: ExportCompletion) => T,
+    frame?: number,
   ): Promise<T>
   cancel(operationId: number): void
   dispose(): void
@@ -276,16 +289,19 @@ class WorkerProcessingClient implements ProcessingClient {
     parameters: PreviewParameters,
     operationId: number,
     finalize: (pixels: PreviewPixels) => Promise<T>,
+    frame = 0,
   ): Promise<T> {
     return this.schedulePreview<T>(
       source,
       operationId,
+      frame,
       (generation): PreviewRequest => ({
         type: 'preview',
         requestId: generation,
         operationId,
         sourceId: source.sourceId,
         parameters: { ...parameters },
+        frame,
       }),
       finalize,
     )
@@ -305,15 +321,18 @@ class WorkerProcessingClient implements ProcessingClient {
     source: SourceHandle,
     operationId: number,
     finalize: (pixels: PreviewPixels) => Promise<T>,
+    frame = 0,
   ): Promise<T> {
     return this.schedulePreview<T>(
       source,
       operationId,
+      frame,
       (generation): OriginalPreviewRequest => ({
         type: 'originalPreview',
         requestId: generation,
         operationId,
         sourceId: source.sourceId,
+        frame,
       }),
       finalize,
     )
@@ -332,12 +351,15 @@ class WorkerProcessingClient implements ProcessingClient {
     operationId: number,
     sink: ExportSink,
     finalize: (completion: ExportCompletion) => T,
+    frame = 0,
   ): Promise<T> {
     const terminal = this.terminalError()
     if (terminal !== null) return Promise.reject(terminal)
     if (this.sources.get(source.sourceId) !== source) {
       return Promise.reject(this.unownedSource())
     }
+    const frameProblem = validateFrameIndex(frame, source.frameCount)
+    if (frameProblem !== null) return Promise.reject(new RangeError(frameProblem))
     return this.schedule<T>(operationId, async (context) => {
       context.checkpoint()
       this.assertUsable()
@@ -349,6 +371,7 @@ class WorkerProcessingClient implements ProcessingClient {
         sourceId: source.sourceId,
         parameters: { ...parameters },
         outputKind,
+        frame,
       }
       const stream: ExportStream = { sink, nextSequence: 0, receivedBytes: 0, failure: null }
       const reply = await this.request('export', request, [], stream)
@@ -423,6 +446,7 @@ class WorkerProcessingClient implements ProcessingClient {
   private schedulePreview<T extends Releasable>(
     source: SourceHandle,
     operationId: number,
+    frame: number,
     build: (generation: number) => PreviewRequest | OriginalPreviewRequest,
     finalize: (pixels: PreviewPixels) => Promise<T>,
   ): Promise<T> {
@@ -431,6 +455,8 @@ class WorkerProcessingClient implements ProcessingClient {
     if (this.sources.get(source.sourceId) !== source) {
       return Promise.reject(this.unownedSource())
     }
+    const frameProblem = validateFrameIndex(frame, source.frameCount)
+    if (frameProblem !== null) return Promise.reject(new RangeError(frameProblem))
     return this.schedule<T>(operationId, async (context) => {
       context.checkpoint()
       this.assertUsable()
@@ -552,6 +578,9 @@ class WorkerProcessingClient implements ProcessingClient {
       name: reply.name,
       width: reply.width,
       height: reply.height,
+      frameCount: reply.frameCount,
+      frameDelays: Object.freeze([...reply.frameDelays]),
+      loopCount: reply.loopCount,
       dispose: () => this.releaseHandle(handle),
     }
     this.sources.set(handle.sourceId, handle)

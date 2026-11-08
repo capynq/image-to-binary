@@ -103,16 +103,36 @@ export class FakeSession implements EngineSession {
   freed = false
   advances = 0
   readonly budgets: number[] = []
+  /** Frame index of every accepted start, in call order. */
+  readonly frames: number[] = []
   private original = false
   private exporting = false
   private pending: Uint8Array[] = []
+  private lastGeneration = 0
 
   constructor(
     private readonly engine: FakeEngine,
     readonly sourceWidth = 2,
     readonly sourceHeight = 1,
     readonly sourceChannels = 4,
+    readonly frameCount = 1,
+    readonly frameDelays: ReadonlyArray<number> = [],
+    readonly loopCount = 0,
   ) {}
+
+  /** Mirrors the engine contract: generations strictly increase and the frame must exist. */
+  private acceptStart(generation: number, frame: number): void {
+    if (generation <= this.lastGeneration) {
+      throw Object.assign(new Error('The generation did not increase.'), {
+        code: 'invalid_argument',
+      })
+    }
+    if (!Number.isSafeInteger(frame) || frame < 0 || frame >= this.frameCount) {
+      throw Object.assign(new Error('The frame is out of range.'), { code: 'invalid_argument' })
+    }
+    this.lastGeneration = generation
+    this.frames.push(frame)
+  }
 
   startPreview(
     generation: number,
@@ -127,10 +147,13 @@ export class FakeSession implements EngineSession {
     colorMode: ColorModeName,
     contrast: number,
     invert: boolean,
+    frame: number,
   ): number {
+    this.acceptStart(generation, frame)
     this.engine.starts.push({
       kind: 'preview',
       generation,
+      frame,
       cellSize,
       fontSize,
       threshold,
@@ -165,10 +188,13 @@ export class FakeSession implements EngineSession {
     contrast: number,
     invert: boolean,
     outputKind: OutputKindName,
+    frame: number,
   ): number {
+    this.acceptStart(generation, frame)
     this.engine.starts.push({
       kind: 'export',
       generation,
+      frame,
       cellSize,
       fontSize,
       threshold,
@@ -220,7 +246,8 @@ export class FakeSession implements EngineSession {
     return this.engine.steps
   }
 
-  startOriginalPreview(generation: number): number {
+  startOriginalPreview(generation: number, frame: number): number {
+    this.acceptStart(generation, frame)
     this.engine.log.push(`original:${generation}`)
     this.original = true
     this.engine.onStart?.(generation)
@@ -293,6 +320,7 @@ export class FakeSession implements EngineSession {
 export interface RecordedStart {
   readonly kind: 'preview' | 'export'
   readonly generation: number
+  readonly frame: number
   readonly cellSize: number
   readonly fontSize: number
   readonly threshold: number
@@ -325,6 +353,12 @@ export class FakeEngine implements ProcessingEngine {
   failNextCreate: string | null = null
   failNextEncoded: string | null = null
   encodedMetadata = { width: 2, height: 1, channels: 4 }
+  /** Animation of every encoded session; a still unless `frameCount` exceeds 1. */
+  animation: { frameCount: number; frameDelays: ReadonlyArray<number>; loopCount: number } = {
+    frameCount: 1,
+    frameDelays: [],
+    loopCount: 0,
+  }
   originalFrameSize = { width: 2, height: 1 }
   readonly encodedInputs: number[] = []
   onEncodedCreate: (() => void) | null = null
@@ -367,7 +401,16 @@ export class FakeEngine implements ProcessingEngine {
       throw Object.assign(new Error('The fake engine could not decode the bytes.'), { code })
     }
     const { width, height, channels } = this.encodedMetadata
-    const session = new FakeSession(this, width, height, channels)
+    const { frameCount, frameDelays, loopCount } = this.animation
+    const session = new FakeSession(
+      this,
+      width,
+      height,
+      channels,
+      frameCount,
+      frameDelays,
+      loopCount,
+    )
     this.sessions.push(session)
     this.onEncodedCreate?.()
     return session
@@ -511,6 +554,9 @@ export async function importViaEndpoint(
     name: 'test',
     width: 2,
     height: 1,
+    frameCount: 1,
+    frameDelays: [],
+    loopCount: 0,
   })
   return pending
 }

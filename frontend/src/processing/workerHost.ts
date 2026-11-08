@@ -3,6 +3,7 @@ import {
   MAX_ENCODED_BYTES,
   MAX_RETAINED_SOURCES,
   eventData,
+  isAnimationMetadata,
   isWorkerRequest,
   validateEncodedImport,
   validateImageMetadata,
@@ -44,8 +45,13 @@ export interface WorkerHost {
   dispose(): void
 }
 
+/**
+ * `jobGeneration` is the last WASM job generation this session accepted. Every start takes the
+ * next value, because the engine rejects any generation that does not exceed an earlier one.
+ */
 interface SourceRecord {
   readonly session: EngineSession
+  jobGeneration: number
 }
 
 interface ActiveJob {
@@ -150,8 +156,15 @@ export function createWorkerHost(
       closeSession(session)
       throw new JobCancelled()
     }
+    let animation: AnimationMetadata
+    try {
+      animation = readAnimation(session)
+    } catch (error) {
+      closeSession(session)
+      throw error
+    }
     const sourceId = nextSourceId++
-    sources.set(sourceId, { session })
+    sources.set(sourceId, { session, jobGeneration: 0 })
     return {
       type: 'imported',
       requestId: request.requestId,
@@ -160,6 +173,7 @@ export function createWorkerHost(
       name: request.name,
       width: request.width,
       height: request.height,
+      ...animation,
     }
   }
 
@@ -179,10 +193,11 @@ export function createWorkerHost(
     let published = false
     try {
       const { width, height } = readNormalizedMetadata(session, request.name)
+      const animation = readAnimation(session)
       await yielder.yield()
       assertRunning(job)
       const sourceId = nextSourceId++
-      sources.set(sourceId, { session })
+      sources.set(sourceId, { session, jobGeneration: 0 })
       published = true
       return {
         type: 'imported',
@@ -192,6 +207,7 @@ export function createWorkerHost(
         name: request.name,
         width,
         height,
+        ...animation,
       }
     } finally {
       if (!published) closeSession(session)
@@ -208,7 +224,8 @@ export function createWorkerHost(
     if (record === undefined) {
       throw new JobFailure('unknown_source', 'The source is not available in the worker.')
     }
-    const generation = request.requestId
+    const generation = nextJobGeneration(record)
+    const frameIndex = request.frame ?? 0
     let started = false
     let finished = false
     try {
@@ -230,9 +247,10 @@ export function createWorkerHost(
           colorMode,
           contrast,
           invert,
+          frameIndex,
         )
       } else {
-        stage = record.session.startOriginalPreview(generation)
+        stage = record.session.startOriginalPreview(generation, frameIndex)
       }
       started = true
       while (stage !== engine.readyStage) {
@@ -290,7 +308,8 @@ export function createWorkerHost(
       throw new JobFailure('unknown_source', 'The source is not available in the worker.')
     }
     const { session } = record
-    const generation = request.requestId
+    const generation = nextJobGeneration(record)
+    const frameIndex = request.frame ?? 0
     const { cellSize, fontSize, threshold, sampling, mode, ramp } = request.parameters
     const { foreground, background, colorMode, contrast, invert } = request.parameters
     const emitted = { sequence: 0, byteLength: 0 }
@@ -340,6 +359,7 @@ export function createWorkerHost(
         contrast,
         invert,
         request.outputKind,
+        frameIndex,
       )
       started = true
       while (stage !== engine.readyStage) {
@@ -572,6 +592,29 @@ export function createWorkerHost(
   endpoint.addEventListener('message', onMessage)
   endpoint.addEventListener('messageerror', onMessageError)
   return { dispose }
+}
+
+/** Animation metadata of an imported source, in the shape the import reply carries. */
+interface AnimationMetadata {
+  readonly frameCount: number
+  readonly frameDelays: number[]
+  readonly loopCount: number
+}
+
+function nextJobGeneration(record: SourceRecord): number {
+  record.jobGeneration += 1
+  return record.jobGeneration
+}
+
+/** Reads and checks the engine's animation metadata; a malformed result is an internal failure. */
+function readAnimation(session: EngineSession): AnimationMetadata {
+  const frameCount = session.frameCount
+  const frameDelays = Array.from(session.frameDelays)
+  const loopCount = session.loopCount
+  if (!isAnimationMetadata(frameCount, frameDelays, loopCount)) {
+    throw new JobFailure('internal', 'The decoded animation metadata is invalid.')
+  }
+  return { frameCount, frameDelays, loopCount }
 }
 
 function closeSession(session: EngineSession): void {

@@ -40,6 +40,9 @@ class FakeClient implements ProcessingClient {
       name,
       width,
       height,
+      frameCount: 1,
+      frameDelays: [],
+      loopCount: 0,
       dispose: () => {
         if (!released) {
           released = true

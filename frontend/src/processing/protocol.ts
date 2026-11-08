@@ -13,6 +13,11 @@ export const MAX_RETAINED_SOURCES = 2
 export const MAX_SOURCE_NAME_LENGTH = 256
 export const MAX_PREVIEW_DIMENSION = 1600
 export const MAX_ENCODED_BYTES = 256 * 1024 * 1024
+/** Frame ceiling of the engine's animation decode; a source above it imports as a still. */
+export const MAX_ANIMATION_FRAMES = 1000
+/** Normalised GIF delays are at least 2 cs, so 0 and 1 never reach the page. */
+export const MIN_FRAME_DELAY_CS = 2
+export const MAX_FRAME_DELAY_CS = 65_535
 /** Matches the default ASCII ramp of the shared argument contract, least ink first. */
 export const DEFAULT_RAMP = ' .:-=+*#%@'
 export const DEFAULT_FOREGROUND = '#00ff00'
@@ -37,6 +42,42 @@ export const COLOR_MODE_MESSAGE = 'colorMode must be "monochrome" or "source"'
 export const CONTRAST_INTEGER_MESSAGE = 'contrast must be an integer'
 export const CONTRAST_RANGE_MESSAGE = `contrast must be between ${MIN_CONTRAST} and ${MAX_CONTRAST}`
 export const INVERT_BOOLEAN_MESSAGE = 'invert must be a boolean'
+
+/** Returns the readable reason a frame index is rejected for a source, or `null` when it is in range. */
+export function validateFrameIndex(frame: number, frameCount: number): string | null {
+  if (Number.isSafeInteger(frame) && frame >= 0 && frame < frameCount) return null
+  return `Frame must be an integer from 0 through ${frameCount - 1}.`
+}
+
+/**
+ * Checks the decoded animation shape: a still has no delays, and an animation has one delay per
+ * frame. `loopCount` is `Infinity` for an endless loop or a non-negative integer otherwise.
+ */
+export function isAnimationMetadata(
+  frameCount: unknown,
+  frameDelays: unknown,
+  loopCount: unknown,
+): boolean {
+  if (
+    typeof frameCount !== 'number' ||
+    !Number.isSafeInteger(frameCount) ||
+    frameCount < 1 ||
+    frameCount > MAX_ANIMATION_FRAMES
+  ) {
+    return false
+  }
+  if (!Array.isArray(frameDelays)) return false
+  if (frameCount === 1 ? frameDelays.length !== 0 : frameDelays.length !== frameCount) return false
+  const delaysValid = frameDelays.every(
+    (delay) =>
+      typeof delay === 'number' &&
+      Number.isSafeInteger(delay) &&
+      delay >= MIN_FRAME_DELAY_CS &&
+      delay <= MAX_FRAME_DELAY_CS,
+  )
+  if (!delaysValid) return false
+  return loopCount === Infinity || (typeof loopCount === 'number' && isCount(loopCount))
+}
 
 /** `png` is the default export; `text` is UTF-8 grid text over the same grid and settings. */
 export type OutputKindName = 'png' | 'text'
@@ -130,10 +171,12 @@ export interface ImportRequest extends RequestIdentity {
   readonly pixels: ArrayBuffer
 }
 
+/** `frame` selects the animation frame to render; absent means frame 0. */
 export interface PreviewRequest extends RequestIdentity {
   readonly type: 'preview'
   readonly sourceId: number
   readonly parameters: PreviewParameters
+  readonly frame?: number
 }
 
 /** Transfers ownership of `bytes` (an encoded BMP, GIF, JPEG, PNG, TIFF or WebP file) to the worker. */
@@ -147,6 +190,7 @@ export interface ImportEncodedRequest extends RequestIdentity {
 export interface OriginalPreviewRequest extends RequestIdentity {
   readonly type: 'originalPreview'
   readonly sourceId: number
+  readonly frame?: number
 }
 
 /** Starts an export of a retained source in `outputKind`; answered by ordered `exportChunk` messages and one `exported`. */
@@ -155,6 +199,7 @@ export interface ExportRequest extends RequestIdentity {
   readonly sourceId: number
   readonly parameters: PreviewParameters
   readonly outputKind: OutputKindName
+  readonly frame?: number
 }
 
 export interface CancelRequest extends RequestIdentity {
@@ -175,12 +220,19 @@ export type WorkerRequest =
   | CancelRequest
   | ReleaseSourceRequest
 
+/**
+ * A retained source. Stills report `frameCount` 1, no delays and loop count 0; animations report
+ * one centisecond delay per frame and the loop count (`Infinity` loops forever).
+ */
 export interface ImportedReply extends RequestIdentity {
   readonly type: 'imported'
   readonly sourceId: number
   readonly name: string
   readonly width: number
   readonly height: number
+  readonly frameCount: number
+  readonly frameDelays: ReadonlyArray<number>
+  readonly loopCount: number
 }
 
 /**
@@ -371,6 +423,14 @@ function hasPreviewFrame(value: Record<string, unknown>): boolean {
   )
 }
 
+function isOptionalFrame(value: unknown): boolean {
+  return value === undefined || isCount(value)
+}
+
+function hasImportedAnimation(value: Record<string, unknown>): boolean {
+  return isAnimationMetadata(value.frameCount, value.frameDelays, value.loopCount)
+}
+
 function hasIdentity(value: Record<string, unknown>): boolean {
   return isRequestId(value.requestId) && isCount(value.operationId)
 }
@@ -414,6 +474,7 @@ export function isWorkerRequest(value: unknown): value is WorkerRequest {
         hasIdentity(value) &&
         isCount(value.sourceId) &&
         isPreviewParameters(value.parameters) &&
+        isOptionalFrame(value.frame) &&
         !('outputKind' in value)
       )
     case 'export':
@@ -421,12 +482,13 @@ export function isWorkerRequest(value: unknown): value is WorkerRequest {
         hasIdentity(value) &&
         isCount(value.sourceId) &&
         isPreviewParameters(value.parameters) &&
-        isOutputKindName(value.outputKind)
+        isOutputKindName(value.outputKind) &&
+        isOptionalFrame(value.frame)
       )
     case 'importEncoded':
       return hasIdentity(value) && typeof value.name === 'string' && isArrayBuffer(value.bytes)
     case 'originalPreview':
-      return hasIdentity(value) && isSourceId(value.sourceId)
+      return hasIdentity(value) && isSourceId(value.sourceId) && isOptionalFrame(value.frame)
     case 'cancel':
       return hasIdentity(value)
     case 'releaseSource':
@@ -440,7 +502,12 @@ export function isWorkerReply(value: unknown): value is WorkerReply {
   if (!isRecord(value)) return false
   switch (value.type) {
     case 'imported':
-      return hasIdentity(value) && isSourceId(value.sourceId) && hasSourceMetadata(value)
+      return (
+        hasIdentity(value) &&
+        isSourceId(value.sourceId) &&
+        hasSourceMetadata(value) &&
+        hasImportedAnimation(value)
+      )
     case 'previewed':
       return hasIdentity(value) && hasPreviewFrame(value)
     case 'exportChunk':

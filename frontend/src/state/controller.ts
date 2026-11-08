@@ -1,4 +1,5 @@
 import { createDemoProcessingAdapter } from '../processing/demoAdapter'
+import { validateFrameIndex } from '../processing/protocol'
 import { ExportCancelledError } from '../processing/types'
 import type {
   ExportArtifact,
@@ -10,10 +11,16 @@ import type {
   PreviewKind,
   PreviewSnapshot,
   ProcessingAdapter,
+  StudioAnimation,
   StudioSettings,
   StudioSnapshot,
 } from '../processing/types'
-import { DEFAULT_SETTINGS, cloneSettings, validateSettings } from '../processing/types'
+import {
+  DEFAULT_SETTINGS,
+  cloneSettings,
+  freezeAnimation,
+  validateSettings,
+} from '../processing/types'
 
 export class StaleOperationError extends Error {
   constructor() {
@@ -36,7 +43,7 @@ export interface StudioController {
   updateSettings(settings: StudioSettings): void
   /**
    * Renders `kind` (default `artwork`) and publishes it only if the operation is still current.
-   * Rejects an unknown kind before any state changes.
+   * Rejects an unknown kind or an out-of-range `startFrame` before any state changes.
    */
   preview(kind?: PreviewKind, options?: PreviewOptions): Promise<void>
   exportDemo(format?: ExportFormat): Promise<Blob>
@@ -46,7 +53,7 @@ export interface StudioController {
    * Listeners run after each snapshot is complete, so a listener may call back into the
    * controller; such a call is judged against the snapshot that was just committed.
    */
-  startExport(format?: ExportFormat): Promise<void>
+  startExport(format?: ExportFormat, options?: ExportOptions): Promise<void>
   /** The ready export, or null. Kept out of snapshots; the download phase reads it. */
   readyExport(): ExportArtifact | null
   reset(): void
@@ -54,9 +61,18 @@ export interface StudioController {
   dispose(): void
 }
 
-/** A quiet artwork preview keeps the displayed artwork and status while it renders. */
+/**
+ * A quiet artwork preview keeps the displayed artwork and status while it renders. `startFrame`
+ * is the animation frame the preview starts on; every frame is rendered, wrapping around.
+ */
 export interface PreviewOptions {
   readonly quiet?: boolean
+  readonly startFrame?: number
+}
+
+/** `frame` is the animation frame an export encodes; it defaults to 0. */
+export interface ExportOptions {
+  readonly frame?: number
 }
 
 type OperationKind = 'import' | 'preview' | 'export' | 'textExport'
@@ -98,6 +114,7 @@ export function createStudioController(options: StudioControllerOptions = {}): S
     progress: 0,
     settings: cloneSettings(options.settings ?? DEFAULT_SETTINGS),
     metadata: null,
+    animation: null,
     importStage: null,
     preview: null,
     original: null,
@@ -231,6 +248,7 @@ export function createStudioController(options: StudioControllerOptions = {}): S
     readyExport = null
     commit(
       {
+        animation: freezeAnimation(next?.animation),
         ...patch,
         importStage: null,
         preview: null,
@@ -285,6 +303,9 @@ export function createStudioController(options: StudioControllerOptions = {}): S
     if (quiet && kind !== 'artwork') {
       throw new RangeError('Only the artwork preview can be quiet.')
     }
+    const startFrame = options.startFrame ?? 0
+    const frameProblem = validateFrameIndex(startFrame, frameCountOf(snapshot.animation))
+    if (frameProblem !== null) throw new RangeError(frameProblem)
     const owned = ownedImport
     if (owned === null) {
       throw new Error('Import an image before previewing.')
@@ -306,6 +327,7 @@ export function createStudioController(options: StudioControllerOptions = {}): S
           : (fraction) => {
               if (isCurrent(operation)) commit({ progress: fraction }, [])
             },
+        { startFrame },
       )
     } catch (error) {
       const current = isCurrent(operation)
@@ -328,6 +350,9 @@ export function createStudioController(options: StudioControllerOptions = {}): S
             url: artifact.url,
             width: artifact.width,
             height: artifact.height,
+            ...(artifact.frames === undefined
+              ? {}
+              : { frames: Object.freeze([...artifact.frames]) }),
           }),
         ),
         ...(kind === 'artwork' ? { previewRevision: settingsRevision } : {}),
@@ -355,7 +380,10 @@ export function createStudioController(options: StudioControllerOptions = {}): S
     )
   }
 
-  const startExport = async (format: ExportFormat = 'png'): Promise<void> => {
+  const startExport = async (
+    format: ExportFormat = 'png',
+    options: ExportOptions = {},
+  ): Promise<void> => {
     if (disposed) {
       throw new Error('Studio controller is disposed.')
     }
@@ -363,6 +391,9 @@ export function createStudioController(options: StudioControllerOptions = {}): S
     if (owned === null) {
       throw new Error('Import an image before exporting.')
     }
+    const frame = options.frame ?? 0
+    const frameProblem = validateFrameIndex(frame, frameCountOf(snapshot.animation))
+    if (frameProblem !== null) throw new RangeError(frameProblem)
     const previousReady = readyExport
     readyExport = null
     const operation = beginOperation('exporting', 'export', { export: RUNNING_EXPORT }, [
@@ -383,6 +414,7 @@ export function createStudioController(options: StudioControllerOptions = {}): S
             commit({ export: { ...snapshot.export, progress: fraction } }, [])
           }
         },
+        { frame },
       )
     } catch (error) {
       const current = isCurrent(operation)
@@ -550,6 +582,10 @@ export function createStudioController(options: StudioControllerOptions = {}): S
 
 function errorText(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).trimEnd()
+}
+
+function frameCountOf(animation: StudioAnimation | null): number {
+  return animation?.frameCount ?? 1
 }
 
 function sameSettings(a: StudioSettings, b: StudioSettings): boolean {

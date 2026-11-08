@@ -100,6 +100,7 @@ export function createDemoProcessingAdapter(options: DemoAdapterOptions = {}): P
         return {
           source,
           metadata: { name: 'Demo fixture', width: 4, height: 4, source: 'demo' },
+          animation: null,
           dispose(): void {
             if (!released) {
               released = true

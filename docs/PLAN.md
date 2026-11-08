@@ -2438,8 +2438,21 @@ Proposed commit title: `feat: preview animated sources in the browser`
 
 Completion checklist:
 
-- [ ] WASM session frames implemented.
-- [ ] Worker, adapter and controller wiring tested.
+- [x] WASM session frames implemented.
+- [x] Worker, adapter and controller wiring tested.
+
+Validation: adapter sessions hold one frame slot per GIF frame (stills keep
+the 64 MiB sample cache; animation frames sample uncached) and expose frame
+count, delays and loop count. The WASM binding imports multi-frame GIFs as
+animations, keeps over-limit GIFs on the first-frame path, and takes an
+optional trailing frame index. The worker host draws WASM job generations
+from a per-source counter, so one operation can render many frames while
+request ids still drive supersession. The browser adapter renders every
+frame from the requested start frame with wrap-around, revokes all frames on
+cancel or failure, and rejects animations whose encoded preview frames
+exceed 512 MiB. The controller exposes a frozen `animation` snapshot and
+validates frame indices before any state change. 118 Rust adapter tests, 117
+WASM node tests and 857 frontend tests pass; desktop stays still-only.
 
 ### 9.6 Preview animated sources on the desktop
 

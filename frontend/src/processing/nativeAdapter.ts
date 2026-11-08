@@ -168,6 +168,7 @@ export function createNativeProcessingAdapter(options: NativeAdapterOptions): Pr
     return {
       source: handle,
       metadata,
+      animation: null,
       dispose(): void {
         if (record.released) return
         record.released = true

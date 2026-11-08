@@ -22,6 +22,16 @@ export interface EngineSession {
   readonly sourceHeight: number
   /** Normalized channel count; always 4 (RGBA8). */
   readonly sourceChannels: number
+  /** `1` for a still, the decoded frame count for an animation. */
+  readonly frameCount: number
+  /** Per-frame delays in centiseconds; empty for a still. */
+  readonly frameDelays: ArrayLike<number>
+  /** Repeat count after the first play; `Infinity` loops forever, `0` plays once. */
+  readonly loopCount: number
+  /**
+   * Every start takes a generation that exceeds each earlier accepted generation on the session;
+   * `frame` is the animation frame index, `0` for a still.
+   */
   startPreview(
     generation: number,
     cellSize: number,
@@ -35,9 +45,10 @@ export interface EngineSession {
     colorMode: ColorModeName,
     contrast: number,
     invert: boolean,
+    frame: number,
   ): EngineStage
-  /** Starts the bounded original-image preview job; shares advance, cancel and finish. */
-  startOriginalPreview(generation: number): EngineStage
+  /** Starts the bounded original-image preview job of `frame`; shares advance, cancel and finish. */
+  startOriginalPreview(generation: number, frame: number): EngineStage
   /**
    * Starts an export of `outputKind` that samples the same grid as a preview with the same
    * settings; `png` and `text` are the only kinds.
@@ -56,6 +67,7 @@ export interface EngineSession {
     contrast: number,
     invert: boolean,
     outputKind: OutputKindName,
+    frame: number,
   ): EngineStage
   advance(generation: number, pixelBudget: number): EngineStage
   /** Returns encoded chunks completed since the last drain; each array is JS-owned. */

@@ -4,26 +4,33 @@ import { createExportAccumulator } from './exportAccumulator'
 import type { ExportAccumulator, ExportAccumulatorOptions } from './exportAccumulator'
 import { startHeifDecode } from './heifDecodeJob'
 import type { DecodedRgba, HeifDecodeJob, HeifDecoderEndpoint } from './heifDecodeJob'
-import { isOutputKindName, validateEncodedImport } from './protocol'
+import { isOutputKindName, validateEncodedImport, validateFrameIndex } from './protocol'
 import { renderPreviewPng } from './previewRenderer'
 import type { PreviewRenderer } from './previewRenderer'
 import type {
   ExportArtifact,
   ExportProgressListener,
+  ExportRenderOptions,
   ImportInput,
   ImportedResult,
   ImportedSource,
   ImportStageListener,
   PreviewArtifact,
   PreviewKind,
+  PreviewProgressListener,
+  PreviewRenderOptions,
   ProcessingAdapter,
   ProcessingSession,
   StudioMetadata,
   UrlApi,
 } from './types'
-import { previewParametersOf, validateSettings } from './types'
+import { freezeAnimation, previewParametersOf, validateSettings } from './types'
 import { ProcessingWorkerError } from './workerClient'
 import type { PreviewPixels, ProcessingClient, RgbaImport, SourceHandle } from './workerClient'
+
+/** Total encoded PNG bytes one animation preview may retain across all of its frames. */
+export const ANIMATION_PREVIEW_BUDGET_BYTES = 512 * 1024 * 1024
+export const ANIMATION_BUDGET_MESSAGE = 'Animation preview is too large; try a larger cell size.'
 
 export interface BrowserAdapterOptions {
   /** Invoked lazily on the first import; session creation allocates nothing heavy. */
@@ -43,11 +50,23 @@ interface SourceRecord {
   released: boolean
 }
 
+/** One multi-frame preview in flight; `cancelled` is read between frames. */
+interface AnimationRun {
+  cancelled: boolean
+  retainedBytes: number
+}
+
+/** A PNG frame owned by its animation run; `dispose` is idempotent. */
+interface EncodedFrame extends PreviewArtifact {
+  readonly byteLength: number
+}
+
 interface SessionState {
   disposed: boolean
   client: ProcessingClient | null
   readonly sources: WeakMap<ImportedSource, SourceRecord>
   readonly decodes: Map<number, HeifDecodeJob>
+  readonly runs: Map<number, AnimationRun>
 }
 
 /**
@@ -109,6 +128,11 @@ export function createAdapterWithAccumulator(
     return {
       source,
       metadata,
+      animation: freezeAnimation({
+        frameCount: handle.frameCount,
+        delaysCs: handle.frameDelays,
+        loopCount: handle.loopCount,
+      }),
       dispose(): void {
         if (!record.released) {
           record.released = true
@@ -177,6 +201,75 @@ export function createAdapterWithAccumulator(
       },
     }
   }
+  /**
+   * Encodes one animation frame. The budget is checked on the encoded size before its object URL
+   * exists, so a rejected frame never leaves a URL behind.
+   */
+  const encodeFrame =
+    (run: AnimationRun) =>
+    async (pixels: PreviewPixels): Promise<EncodedFrame> => {
+      const blob = await renderPreview(pixels)
+      if (run.retainedBytes + blob.size > ANIMATION_PREVIEW_BUDGET_BYTES) {
+        throw new RangeError(ANIMATION_BUDGET_MESSAGE)
+      }
+      const url = urlApi.createObjectURL(blob)
+      let revoked = false
+      return {
+        url,
+        width: pixels.width,
+        height: pixels.height,
+        byteLength: blob.size,
+        dispose(): void {
+          if (!revoked) {
+            revoked = true
+            urlApi.revokeObjectURL(url)
+          }
+        },
+      }
+    }
+  /**
+   * Renders every frame in wrap-around order from `startFrame`. A cancel or a failure revokes each
+   * frame already made; a finished run returns the start frame's fields plus all URLs in frame order.
+   */
+  const renderAnimation = async (
+    state: SessionState,
+    operationId: number,
+    frameCount: number,
+    startFrame: number,
+    onProgress: PreviewProgressListener | undefined,
+    renderFrame: (frame: number, run: AnimationRun) => Promise<EncodedFrame>,
+  ): Promise<PreviewArtifact> => {
+    const run: AnimationRun = { cancelled: false, retainedBytes: 0 }
+    state.runs.set(operationId, run)
+    const encoded: EncodedFrame[] = []
+    try {
+      for (let step = 0; step < frameCount; step += 1) {
+        assertNotCancelled(run)
+        const frame = (startFrame + step) % frameCount
+        const artifact = await renderFrame(frame, run)
+        encoded[frame] = artifact
+        run.retainedBytes += artifact.byteLength
+        onProgress?.((step + 1) / frameCount)
+      }
+      assertNotCancelled(run)
+    } catch (error) {
+      encoded.forEach((artifact) => artifact.dispose())
+      throw run.cancelled ? cancelledError() : error
+    } finally {
+      if (state.runs.get(operationId) === run) state.runs.delete(operationId)
+    }
+    const start = encoded[startFrame]
+    if (start === undefined) throw new Error('The animation preview lost its start frame.')
+    return {
+      url: start.url,
+      width: start.width,
+      height: start.height,
+      frames: Object.freeze(encoded.map((artifact) => artifact.url)),
+      dispose(): void {
+        encoded.forEach((artifact) => artifact.dispose())
+      },
+    }
+  }
 
   return {
     createSession(): ProcessingSession {
@@ -186,6 +279,7 @@ export function createAdapterWithAccumulator(
         client: null,
         sources: new WeakMap<ImportedSource, SourceRecord>(),
         decodes: new Map<number, HeifDecodeJob>(),
+        runs: new Map<number, AnimationRun>(),
       })
       return session
     },
@@ -234,22 +328,42 @@ export function createAdapterWithAccumulator(
       settings,
       context,
       kind: PreviewKind = 'artwork',
+      onProgress?: PreviewProgressListener,
+      options: PreviewRenderOptions = {},
     ): Promise<PreviewArtifact> {
       const state = assertSession(session)
       assertActive(state)
       const record = sourceOf(state, source)
-      if (kind === 'original') {
-        return clientOf(state).originalPreview(record.handle, context.operationId, createArtifact)
-      }
-      if (kind !== 'artwork') {
+      if (kind !== 'original' && kind !== 'artwork') {
         throw new RangeError('Unknown preview kind.')
       }
+      const startFrame = options.startFrame ?? 0
+      const frameCount = record.handle.frameCount
+      const frameProblem = validateFrameIndex(startFrame, frameCount)
+      if (frameProblem !== null) throw new RangeError(frameProblem)
+      const client = clientOf(state)
+      const operationId = context.operationId
+      if (kind === 'original') {
+        if (frameCount === 1) {
+          return client.originalPreview(record.handle, operationId, createArtifact)
+        }
+        return renderAnimation(
+          state,
+          operationId,
+          frameCount,
+          startFrame,
+          onProgress,
+          (frame, run) =>
+            client.originalPreview(record.handle, operationId, encodeFrame(run), frame),
+        )
+      }
       validateSettings(settings)
-      return clientOf(state).preview(
-        record.handle,
-        previewParametersOf(settings),
-        context.operationId,
-        createArtifact,
+      const parameters = previewParametersOf(settings)
+      if (frameCount === 1) {
+        return client.preview(record.handle, parameters, operationId, createArtifact)
+      }
+      return renderAnimation(state, operationId, frameCount, startFrame, onProgress, (frame, run) =>
+        client.preview(record.handle, parameters, operationId, encodeFrame(run), frame),
       )
     },
     async export(
@@ -259,6 +373,7 @@ export function createAdapterWithAccumulator(
       settings,
       context,
       onProgress?: ExportProgressListener,
+      options: ExportRenderOptions = {},
     ): Promise<ExportArtifact> {
       const state = assertSession(session)
       assertActive(state)
@@ -267,6 +382,9 @@ export function createAdapterWithAccumulator(
         throw new RangeError('Export format must be png or text.')
       }
       validateSettings(settings)
+      const frame = options.frame ?? 0
+      const frameProblem = validateFrameIndex(frame, record.handle.frameCount)
+      if (frameProblem !== null) throw new RangeError(frameProblem)
       const accumulator = makeAccumulator({
         format,
         ...(onProgress === undefined ? {} : { onProgress }),
@@ -279,6 +397,7 @@ export function createAdapterWithAccumulator(
           context.operationId,
           accumulator,
           (completion) => accumulator.finish(completion),
+          frame,
         )
       } finally {
         accumulator.release()
@@ -286,6 +405,8 @@ export function createAdapterWithAccumulator(
     },
     cancel(session, operationId): void {
       const state = assertSession(session)
+      const run = state.runs.get(operationId)
+      if (run !== undefined) run.cancelled = true
       const job = state.decodes.get(operationId)
       if (job !== undefined) {
         state.decodes.delete(operationId)
@@ -303,6 +424,14 @@ export function createAdapterWithAccumulator(
       client?.dispose()
     },
   }
+}
+
+function assertNotCancelled(run: AnimationRun): void {
+  if (run.cancelled) throw cancelledError()
+}
+
+function cancelledError(): ProcessingWorkerError {
+  return new ProcessingWorkerError('cancelled', 'Animation preview was cancelled.')
 }
 
 function isCodecUnavailable(error: unknown): boolean {

@@ -90,9 +90,30 @@ export interface NativeFileInput {
 
 export type ImportInput = DemoFixtureInput | File | NativeFileInput
 
+/** Animation of an imported source; `delaysCs` has one centisecond delay per frame. */
+export interface StudioAnimation {
+  readonly frameCount: number
+  readonly delaysCs: ReadonlyArray<number>
+  readonly loopCount: number
+}
+
+/** A frozen copy of an animation, or null for a still or an absent animation. */
+export function freezeAnimation(
+  animation: StudioAnimation | null | undefined,
+): StudioAnimation | null {
+  if (animation === null || animation === undefined || animation.frameCount <= 1) return null
+  return Object.freeze({
+    frameCount: animation.frameCount,
+    delaysCs: Object.freeze([...animation.delaysCs]),
+    loopCount: animation.loopCount,
+  })
+}
+
 export interface ImportedResult {
   readonly source: ImportedSource
   readonly metadata: StudioMetadata
+  /** Null for a still; absent is treated the same way. */
+  readonly animation?: StudioAnimation | null
   /** Idempotently releases the source; the controller calls it once it stops owning the result. */
   dispose(): void
 }
@@ -102,10 +123,15 @@ export type ImportStage = 'heifDecoder'
 
 export type ImportStageListener = (stage: ImportStage) => void
 
+/**
+ * The displayed preview. `url`, `width` and `height` describe the start frame; `frames` lists the
+ * object URL of every frame in frame order and is present only for an animation.
+ */
 export interface PreviewSnapshot {
   readonly url: string
   readonly width: number
   readonly height: number
+  readonly frames?: ReadonlyArray<string>
 }
 
 /** JSON-safe view state; binary payloads and revocable handles stay private. */
@@ -115,6 +141,8 @@ export interface StudioSnapshot {
   readonly progress: number
   readonly settings: StudioSettings
   readonly metadata: StudioMetadata | null
+  /** The imported animation, or null for a still, a native source or no source. */
+  readonly animation: StudioAnimation | null
   readonly importStage: ImportStage | null
   readonly preview: PreviewSnapshot | null
   readonly original: PreviewSnapshot | null
@@ -141,11 +169,26 @@ export interface ImportedSource {
   readonly __importedSource: unique symbol
 }
 
+/**
+ * `url`, `width` and `height` describe the start frame. `frames` holds one object URL per frame in
+ * frame order and is present only when the source is an animation; `dispose` revokes all of them.
+ */
 export interface PreviewArtifact {
   readonly url: string
   readonly width: number
   readonly height: number
+  readonly frames?: ReadonlyArray<string>
   dispose(): void
+}
+
+/** Adapter options for a preview: the frame an animation starts on, then wraps around. */
+export interface PreviewRenderOptions {
+  readonly startFrame?: number
+}
+
+/** Adapter options for an export: the frame an animation exports, default 0. */
+export interface ExportRenderOptions {
+  readonly frame?: number
 }
 
 /**
@@ -196,6 +239,10 @@ export interface ProcessingAdapter {
     context: JobContext,
     onStage?: ImportStageListener,
   ): Promise<ImportedResult>
+  /**
+   * Renders `kind` of `source`. An animation renders every frame, starting at `options.startFrame`
+   * and wrapping around, and reports `(framesDone + frameFraction) / frameCount` progress.
+   */
   preview(
     session: ProcessingSession,
     source: ImportedSource,
@@ -203,6 +250,7 @@ export interface ProcessingAdapter {
     context: JobContext,
     kind?: PreviewKind,
     onProgress?: PreviewProgressListener,
+    options?: PreviewRenderOptions,
   ): Promise<PreviewArtifact>
   /**
    * Encodes `source` with `settings` as `format`. Rejects with a `RangeError` for any other
@@ -215,6 +263,7 @@ export interface ProcessingAdapter {
     settings: StudioSettings,
     context: JobContext,
     onProgress?: ExportProgressListener,
+    options?: ExportRenderOptions,
   ): Promise<ExportArtifact>
   cancel(session: ProcessingSession, operationId: number): void
   dispose(session: ProcessingSession): void

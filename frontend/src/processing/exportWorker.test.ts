@@ -196,7 +196,7 @@ describe('worker export transfer', () => {
     expect(engine.sessions[0]?.advances).toBe(2)
     expect(endpoint.requests('exportChunk')).toHaveLength(0)
     expect(endpoint.requests('exported')).toHaveLength(0)
-    expect(engine.log).toContain('cancel:2')
+    expect(engine.log).toContain('cancel:1')
   })
 
   it('reports an encoder failure as a typed reply and releases the WASM job', async () => {
@@ -208,7 +208,7 @@ describe('worker export transfer', () => {
     expect(endpoint.requests('failed')).toEqual([
       expect.objectContaining({ code: 'encode_failed', requestId: 2, operationId: 2 }),
     ])
-    expect(engine.log).toContain('cancel:2')
+    expect(engine.log).toContain('cancel:1')
   })
 
   it('rejects an export of a source the worker does not retain', async () => {

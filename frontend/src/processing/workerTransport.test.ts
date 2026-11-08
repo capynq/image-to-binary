@@ -42,7 +42,7 @@ describe('worker transport over MessageChannel', () => {
     expect(result.pixels.byteLength).toBe(8)
     expect(new Uint8Array(result.pixels)[0]).toBe(7)
     expect(engine.frames.map((frame) => frame.freed)).toEqual([true])
-    expect(engine.log).toEqual(['start:2', 'finish:2'])
+    expect(engine.log).toEqual(['start:1', 'finish:1'])
   })
 
   it('validates before transfer and creates no worker for invalid input', async () => {
@@ -95,11 +95,11 @@ describe('worker transport over MessageChannel', () => {
     expect((await first).ok).toBe(false)
     expect((await replaced).ok).toBe(false)
     expect((await newest).ok).toBe(true)
-    expect(engine.log.filter((entry) => entry.startsWith('start:'))).toEqual(['start:2', 'start:4'])
-    expect(engine.log).not.toContain('finish:2')
-    const cancelled = engine.log.indexOf('cancel:2')
+    expect(engine.log.filter((entry) => entry.startsWith('start:'))).toEqual(['start:1', 'start:2'])
+    expect(engine.log).not.toContain('finish:1')
+    const cancelled = engine.log.indexOf('cancel:1')
     expect(cancelled).toBeGreaterThan(-1)
-    expect(cancelled).toBeLessThan(engine.log.indexOf('start:4'))
+    expect(cancelled).toBeLessThan(engine.log.indexOf('start:2'))
     expect(engine.frames).toHaveLength(1)
   })
 
@@ -112,12 +112,12 @@ describe('worker transport over MessageChannel', () => {
     await started
     client.cancel(2)
     expect((await run).ok).toBe(false)
-    await until(() => engine.log.includes('cancel:2'), 'worker cancel')
+    await until(() => engine.log.includes('cancel:1'), 'worker cancel')
     expect(engine.frames).toHaveLength(0)
 
     const next = await client.previewPixels(handle, PARAMS, 3)
     expect(next.width).toBe(2)
-    expect(engine.log.indexOf('cancel:2')).toBeLessThan(engine.log.indexOf('start:3'))
+    expect(engine.log.indexOf('cancel:1')).toBeLessThan(engine.log.indexOf('start:2'))
   })
 
   it('releases sources deterministically and rejects released or foreign handles', async () => {
@@ -221,6 +221,9 @@ describe('client failure handling with a controlled endpoint', () => {
 
     endpoint.emitMessage({
       type: 'imported',
+      frameCount: 1,
+      frameDelays: [],
+      loopCount: 0,
       requestId: request?.requestId,
       operationId: 1,
       sourceId: 5,
@@ -386,6 +389,9 @@ describe('malformed worker replies fail the session without returning bogus resu
     const request = endpoint.requests('import')[0]
     endpoint.emitMessage({
       type: 'imported',
+      frameCount: 1,
+      frameDelays: [],
+      loopCount: 0,
       requestId: request?.requestId,
       operationId: 1,
       ...fields,
@@ -404,6 +410,9 @@ describe('malformed worker replies fail the session without returning bogus resu
     await until(() => endpoint.requests('import').length === 2, 'second import request')
     endpoint.emitMessage({
       type: 'imported',
+      frameCount: 1,
+      frameDelays: [],
+      loopCount: 0,
       requestId: endpoint.requests('import')[1]?.requestId,
       operationId: 2,
       sourceId: 7,
@@ -526,15 +535,15 @@ describe('cancellation around worker initialization and the first advance', () =
     const run = settle(client.previewPixels(handle, PARAMS, 2))
     expect((await run).ok).toBe(false)
     engine.onStart = null
-    await until(() => engine.log.includes('cancel:2'), 'worker cancel')
+    await until(() => engine.log.includes('cancel:1'), 'worker cancel')
     expect(engine.sessions[0]?.advances ?? 0).toBeLessThanOrEqual(TASK_YIELD_TIMER_INTERVAL)
-    expect(engine.log.filter((entry) => entry.startsWith('start:'))).toEqual(['start:2'])
+    expect(engine.log.filter((entry) => entry.startsWith('start:'))).toEqual(['start:1'])
     expect(engine.log.some((entry) => entry.startsWith('finish:'))).toBe(false)
     expect(engine.frames).toHaveLength(0)
 
     const next = await client.previewPixels(handle, PARAMS, 3)
     expect(next.width).toBe(2)
-    expect(engine.log.indexOf('cancel:2')).toBeLessThan(engine.log.indexOf('start:3'))
+    expect(engine.log.indexOf('cancel:1')).toBeLessThan(engine.log.indexOf('start:2'))
   })
 })
 
@@ -667,6 +676,9 @@ describe('encoded import and original preview transport', () => {
     expect(third).toBe(1)
     endpoint.emitMessage({
       type: 'imported',
+      frameCount: 1,
+      frameDelays: [],
+      loopCount: 0,
       requestId: endpoint.requests('importEncoded')[0]?.requestId,
       operationId: 3,
       sourceId: 1,
@@ -853,5 +865,64 @@ describe('encoded import and original preview transport', () => {
     ).rejects.toThrow('source handle')
     handle.dispose()
     await expect(a.client.originalPreviewPixels(handle, 2)).rejects.toThrow('source handle')
+  })
+})
+
+describe('worker client animation frames', () => {
+  const noop = { accept: (): void => undefined, progress: (): void => undefined }
+
+  it('reports animation metadata on the handle and sends the frame with each request', async () => {
+    const engine = new FakeEngine()
+    engine.animation = { frameCount: 3, frameDelays: [10, 5, 2], loopCount: Infinity }
+    const { client } = track(createLinkedPair(engine))
+    const handle = await client.importEncoded({ name: 'anim.gif', bytes: new ArrayBuffer(4) }, 1)
+    expect(handle).toMatchObject({ frameCount: 3, frameDelays: [10, 5, 2], loopCount: Infinity })
+    expect(Object.isFrozen(handle.frameDelays)).toBe(true)
+
+    await client.preview(
+      handle,
+      PARAMS,
+      2,
+      (pixels) => Promise.resolve({ ...pixels, dispose: () => undefined }),
+      2,
+    )
+    expect(engine.starts.at(-1)).toMatchObject({ kind: 'preview', frame: 2 })
+
+    await client.exportFile(
+      handle,
+      PARAMS,
+      'text',
+      3,
+      noop,
+      (completion) => ({
+        ...completion,
+        dispose: () => undefined,
+      }),
+      1,
+    )
+    expect(engine.starts.at(-1)).toMatchObject({ kind: 'export', frame: 1, outputKind: 'text' })
+
+    await client.originalPreview(
+      handle,
+      4,
+      (pixels) => Promise.resolve({ ...pixels, dispose: () => undefined }),
+      2,
+    )
+    expect(engine.sessions[0]?.frames.at(-1)).toBe(2)
+  })
+
+  it('rejects an out-of-range frame as a RangeError before any job starts', async () => {
+    const engine = new FakeEngine()
+    engine.animation = { frameCount: 2, frameDelays: [10, 10], loopCount: 0 }
+    const { client } = track(createLinkedPair(engine))
+    const handle = await client.importEncoded({ name: 'anim.gif', bytes: new ArrayBuffer(4) }, 1)
+    const finalize = (pixels: { width: number; height: number; pixels: ArrayBuffer }) =>
+      Promise.resolve({ ...pixels, dispose: () => undefined })
+    await expect(client.preview(handle, PARAMS, 2, finalize, 2)).rejects.toThrow(RangeError)
+    await expect(client.originalPreview(handle, 3, finalize, -1)).rejects.toThrow(RangeError)
+    await expect(
+      client.exportFile(handle, PARAMS, 'png', 4, noop, () => ({ dispose: () => undefined }), 1.5),
+    ).rejects.toThrow(RangeError)
+    expect(engine.starts).toEqual([])
   })
 })

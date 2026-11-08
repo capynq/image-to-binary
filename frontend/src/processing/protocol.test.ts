@@ -21,9 +21,12 @@ import {
   RAMP_TOO_LONG_MESSAGE,
   samplingForMode,
   validateRamp,
+  isAnimationMetadata,
   isWorkerReply,
   isWorkerRequest,
+  MAX_ANIMATION_FRAMES,
   validateEncodedImport,
+  validateFrameIndex,
   validatePreviewFrame,
   validateRgbaImage,
 } from './protocol'
@@ -133,6 +136,9 @@ describe('protocol guards', () => {
         name: 'n',
         width: 2,
         height: 1,
+        frameCount: 1,
+        frameDelays: [],
+        loopCount: 0,
       }),
     ).toBe(true)
   })
@@ -398,5 +404,99 @@ describe('output kind contract', () => {
   it('does not require an output kind of preview requests', () => {
     const preview = { type: 'preview', requestId: 1, operationId: 1, sourceId: 1, parameters }
     expect(isWorkerRequest(preview)).toBe(true)
+  })
+})
+
+describe('animation frame protocol', () => {
+  const importedBase = {
+    type: 'imported',
+    requestId: 1,
+    operationId: 1,
+    sourceId: 1,
+    name: 'anim.gif',
+    width: 2,
+    height: 1,
+  }
+
+  it('accepts an animated imported reply with delays and an endless loop', () => {
+    expect(
+      isWorkerReply({
+        ...importedBase,
+        frameCount: 3,
+        frameDelays: [2, 10, 65_535],
+        loopCount: Infinity,
+      }),
+    ).toBe(true)
+  })
+
+  it.each([
+    ['zero frames', { frameCount: 0, frameDelays: [], loopCount: 0 }],
+    ['fractional frames', { frameCount: 1.5, frameDelays: [], loopCount: 0 }],
+    [
+      'frames over the animation limit',
+      {
+        frameCount: MAX_ANIMATION_FRAMES + 1,
+        frameDelays: Array.from({ length: MAX_ANIMATION_FRAMES + 1 }, () => 10),
+        loopCount: 0,
+      },
+    ],
+    ['still with delays', { frameCount: 1, frameDelays: [10], loopCount: 0 }],
+    ['delay count differs from frames', { frameCount: 3, frameDelays: [10, 10], loopCount: 0 }],
+    ['missing delays', { frameCount: 2, loopCount: 0 }],
+    ['delay of zero', { frameCount: 2, frameDelays: [0, 10], loopCount: 0 }],
+    ['delay of one', { frameCount: 2, frameDelays: [10, 1], loopCount: 0 }],
+    ['delay over uint16', { frameCount: 2, frameDelays: [10, 65_536], loopCount: 0 }],
+    ['negative loop count', { frameCount: 2, frameDelays: [10, 10], loopCount: -1 }],
+    ['fractional loop count', { frameCount: 2, frameDelays: [10, 10], loopCount: 0.5 }],
+    ['NaN loop count', { frameCount: 2, frameDelays: [10, 10], loopCount: NaN }],
+    ['missing loop count', { frameCount: 2, frameDelays: [10, 10] }],
+  ])('rejects an imported reply with %s', (_name, fields) => {
+    expect(isWorkerReply({ ...importedBase, ...fields })).toBe(false)
+  })
+
+  it('accepts a still with no delays and a play-once loop count', () => {
+    expect(isAnimationMetadata(1, [], 0)).toBe(true)
+    expect(isAnimationMetadata(4, [2, 2, 2, 2], 3)).toBe(true)
+    expect(isAnimationMetadata(MAX_ANIMATION_FRAMES, Array(MAX_ANIMATION_FRAMES).fill(2), 0)).toBe(
+      true,
+    )
+  })
+
+  it('names the frame range of a source and accepts only indices inside it', () => {
+    expect(validateFrameIndex(0, 1)).toBeNull()
+    expect(validateFrameIndex(2, 3)).toBeNull()
+    expect(validateFrameIndex(3, 3)).toBe('Frame must be an integer from 0 through 2.')
+    expect(validateFrameIndex(-1, 3)).toBe('Frame must be an integer from 0 through 2.')
+    expect(validateFrameIndex(1.5, 3)).toBe('Frame must be an integer from 0 through 2.')
+    expect(validateFrameIndex(Number.NaN, 3)).not.toBeNull()
+  })
+
+  it('takes an optional frame on preview, original preview and export requests only', () => {
+    const parameters = {
+      cellSize: 12,
+      fontSize: 16,
+      threshold: 128,
+      sampling: 'classic',
+      mode: 'binary',
+      ramp: DEFAULT_RAMP,
+      foreground: DEFAULT_FOREGROUND,
+      background: DEFAULT_BACKGROUND,
+      colorMode: 'monochrome',
+      contrast: 0,
+      invert: false,
+    }
+    const preview = { type: 'preview', requestId: 2, operationId: 1, sourceId: 1, parameters }
+    expect(isWorkerRequest(preview)).toBe(true)
+    expect(isWorkerRequest({ ...preview, frame: 0 })).toBe(true)
+    expect(isWorkerRequest({ ...preview, frame: 7 })).toBe(true)
+    expect(isWorkerRequest({ ...preview, frame: -1 })).toBe(false)
+    expect(isWorkerRequest({ ...preview, frame: 0.5 })).toBe(false)
+    expect(isWorkerRequest({ ...preview, frame: '1' })).toBe(false)
+    const original = { type: 'originalPreview', requestId: 3, operationId: 1, sourceId: 1 }
+    expect(isWorkerRequest({ ...original, frame: 2 })).toBe(true)
+    expect(isWorkerRequest({ ...original, frame: -2 })).toBe(false)
+    const exported = { ...preview, type: 'export', requestId: 4, outputKind: 'text' }
+    expect(isWorkerRequest({ ...exported, frame: 1 })).toBe(true)
+    expect(isWorkerRequest({ ...exported, frame: 1.25 })).toBe(false)
   })
 })
